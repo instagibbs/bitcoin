@@ -25,18 +25,6 @@ namespace Checkpoints {
 
     bool fEnabled = true;
 
-    bool CheckBlock(int nHeight, const uint256& hash)
-    {
-        if (!fEnabled)
-            return true;
-
-        const MapCheckpoints& checkpoints = *Params().Checkpoints().mapCheckpoints;
-
-        MapCheckpoints::const_iterator i = checkpoints.find(nHeight);
-        if (i == checkpoints.end()) return true;
-        return hash == i->second;
-    }
-
     //! Guess how far we are in the verification process at the given block index
     double GuessVerificationProgress(CBlockIndex *pindex, bool fSigchecks) {
         if (pindex==NULL)

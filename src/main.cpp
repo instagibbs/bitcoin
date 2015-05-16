@@ -638,8 +638,13 @@ unsigned int LimitOrphanTxSize(unsigned int nMaxOrphans) EXCLUSIVE_LOCKS_REQUIRE
     return nEvicted;
 }
 
-bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
+int64_t LockTime(const CTransaction &tx, int flags, const CCoinsView* pCoinsView, int nBlockHeight, int64_t nBlockTime)
 {
+    CCoins coins;
+
+    bool fEnforceBIP68 = static_cast<uint32_t>(tx.nVersion) >= 2
+                      && flags & LOCKTIME_VERIFY_SEQUENCE;
+
     // Will be set to the equivalent height- and time-based nLockTime
     // values that would be necessary to satisfy all relative lock-
     // time constraints given our view of block chain history.
@@ -655,13 +660,78 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
             continue;
         else
             fFinalized = false;
+
+        // Do not enforce sequence numbers as a relative lock time
+        // unless we have been instructed to, and a view has been
+        // provided.
+        if (!(fEnforceBIP68 && pCoinsView))
+            continue;
+
+        // Sequence numbers with the most significant bit set are not
+        // treated as relative lock-times, nor are they given any
+        // consensus-enforced meaning at this point.
+        if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_DISABLED_FLAG)
+            continue;
+
+        // Fetch the UTXO corresponding to this input.
+        if (!pCoinsView->GetCoins(txin.prevout.hash, coins)) {
+            // It is fully expected that coinbases inputs are not
+            // found in the UTXO set. Proceed to the next intput...
+            if (txin.prevout.IsNull())
+                continue;
+            // If a non-coinbase input cannot be found, we cannot
+            // be certain about whether lock-time constraints have
+            // been satisfied. Note that it should only ever be
+            // possible for this to happen with wallet transactions
+            // that have unknown inputs.
+            else
+                return std::numeric_limits<int64_t>::max();
+        }
+
+        // coins.nHeight is MEMPOOL_HEIGHT (an absurdly high value)
+        // if the parent transaction was from the mempool. We can't
+        // know what height it will have once confirmed, but we
+        // assume it makes it in the same block.
+        int nCoinHeight = std::min(coins.nHeight, nBlockHeight);
+
+        if (txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_SECONDS_FLAG) {
+            // In two locations that follow we make reference to
+            // chainActive.Tip(). To prevent a race condition, we
+            // store a reference to the current tip.
+            //
+            // Note that it is not guaranteed that indexBestBlock will
+            // be consistent with the passed in view. The proper thing
+            // to do is to have the view return time information about
+            // UTXOs.
+            const CBlockIndex& indexBestBlock = *chainActive.Tip();
+
+            // The only time the negative branch of this conditional
+            // is executed is when the prior output was taken from the
+            // mempool, in which case we assume it makes it into the
+            // same block (see above).
+            int64_t nCoinTime = (nCoinHeight <= (indexBestBlock.nHeight+1))
+                              ? indexBestBlock.GetAncestor(nCoinHeight-1)->GetMedianTimePast()
+                              : nBlockTime;
+
+            // Time-based relative lock-times are measured from the
+            // smallest allowed timestamp of the block containing the
+            // txout being spent, which is the median time past of the
+            // block prior.
+            nMinTime = std::max(nMinTime, nCoinTime + (int64_t)((txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) << CTxIn::SEQUENCE_LOCKTIME_GRANULARITY) - 1);
+        } else {
+            // We subtract 1 from relative lock-times because a lock-
+            // time of 0 has the semantics of "same block," so a lock-
+            // time of 1 should mean "next block," but nLockTime has
+            // the semantics of "last invalid block height."
+            nMinHeight = std::max(nMinHeight, nCoinHeight + (int)(txin.nSequence & CTxIn::SEQUENCE_LOCKTIME_MASK) - 1);
+        }
     }
 
     // If all sequence numbers are CTxIn::SEQUENCE_FINAL, the
     // transaction is considered final and nLockTime constraints
     // are not enforced.
     if (fFinalized)
-        return true;
+        return 0;
 
     if ((int64_t)tx.nLockTime < LOCKTIME_THRESHOLD)
         nMinHeight = std::max(nMinHeight, (int)tx.nLockTime);
@@ -669,17 +739,43 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime)
         nMinTime = std::max(nMinTime, (int64_t)tx.nLockTime);
 
     if (nMinHeight >= nBlockHeight)
-        return false;
+        return nMinHeight;
     if (nMinTime >= nBlockTime)
-        return false;
+        return nMinTime;
 
-    return true;
+    return 0;
 }
 
-bool CheckFinalTx(const CTransaction &tx)
+int64_t CheckLockTime(const CTransaction &tx, int flags)
 {
     AssertLockHeld(cs_main);
-    return IsFinalTx(tx, chainActive.Height() + 1, GetAdjustedTime());
+
+    // By convention a negative value for flags indicates that the
+    // current network-enforced consensus rules should be used. In
+    // a future soft-fork scenario that would mean checking which
+    // rules would be enforced for the next block and setting the
+    // appropriate flags. At the present time no soft-forks are
+    // scheduled, so no flags are set.
+    flags = std::max(flags, 0);
+
+    // pcoinsTip contains the UTXO set for chainActive.Tip()
+    CCoinsViewMemPool viewMemPool(pcoinsTip, mempool);
+    const CCoinsView *pCoinsView = &viewMemPool;
+
+    // CheckLockTime() uses chainActive.Height()+1 to evaluate
+    // nLockTime because when LockTime() is called within
+    // CBlock::AcceptBlock(), the height of the block *being*
+    // evaluated is what is used. Thus if we want to know if a
+    // transaction can be part of the *next* block, we need to call
+    // LockTime() with one more than chainActive.Height().
+    const int nBlockHeight = chainActive.Height() + 1;
+
+    // Timestamps on the other hand don't get any special treatment,
+    // because we can't know what timestamp the next block will have,
+    // and there aren't timestamp applications where it matters.
+    const int64_t nBlockTime = GetAdjustedTime();
+
+    return LockTime(tx, flags, pCoinsView, nBlockHeight, nBlockTime);
 }
 
 unsigned int GetLegacySigOpCount(const CTransaction& tx)
@@ -823,12 +919,6 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
     if (fRequireStandard && !IsStandardTx(tx, reason))
         return state.DoS(0, false, REJECT_NONSTANDARD, reason);
 
-    // Only accept nLockTime-using transactions that can be mined in the next
-    // block; we don't want our mempool filled up with transactions that can't
-    // be mined yet.
-    if (!CheckFinalTx(tx))
-        return state.DoS(0, false, REJECT_NONSTANDARD, "non-final");
-
     // is it already in the memory pool?
     uint256 hash = tx.GetHash();
     if (pool.exists(hash))
@@ -885,6 +975,12 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         // we have all inputs cached now, so switch back to dummy, so we don't need to keep lock on mempool
         view.SetBackend(dummy);
         }
+
+        // Only accept nLockTime-using transactions that can be mined in the next
+        // block; we don't want our mempool filled up with transactions that can't
+        // be mined yet.
+        if (LockTime(tx, STANDARD_LOCKTIME_VERIFY_FLAGS, &view, chainActive.Height() + 1, GetAdjustedTime()))
+            return state.DoS(0, false, REJECT_NONSTANDARD, "non-final");
 
         // Check for non-standard pay-to-script-hash in inputs
         if (fRequireStandard && !AreInputsStandard(tx, view))
@@ -1775,6 +1871,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     CCheckQueueControl<CScriptCheck> control(fScriptChecks && nScriptCheckThreads ? &scriptcheckqueue : NULL);
 
+    int nLockTimeFlags = 0;
     int64_t nTimeStart = GetTimeMicros();
     CAmount nFees = 0;
     int nInputs = 0;
@@ -1798,6 +1895,11 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
             if (!view.HaveInputs(tx))
                 return state.DoS(100, error("ConnectBlock(): inputs missing/spent"),
                                  REJECT_INVALID, "bad-txns-inputs-missingorspent");
+
+            // Check that transaction is finalized
+            if (LockTime(tx, nLockTimeFlags, &view, pindex->nHeight, pindex->GetBlockTime()))
+                return state.DoS(100, error("ConnectBlock(): contains a non-final transaction", __func__),
+                                 REJECT_INVALID, "bad-txns-nonfinal");
 
             if (fStrictPayToScriptHash)
             {
@@ -2719,10 +2821,11 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
     const Consensus::Params& consensusParams = Params().GetConsensus();
 
     // Check that all transactions are finalized
-    BOOST_FOREACH(const CTransaction& tx, block.vtx)
-        if (!IsFinalTx(tx, nHeight, block.GetBlockTime())) {
+    BOOST_FOREACH(const CTransaction& tx, block.vtx) {
+        int nLockTimeFlags = 0;
+        if (LockTime(tx, nLockTimeFlags, NULL, nHeight, block.GetBlockTime()))
             return state.DoS(10, error("%s: contains a non-final transaction", __func__), REJECT_INVALID, "bad-txns-nonfinal");
-        }
+    }
 
     // Enforce block.nVersion=2 rule that the coinbase starts with serialized block height
     // if 750 of the last 1,000 blocks are version 2 or greater (51/100 if testnet):

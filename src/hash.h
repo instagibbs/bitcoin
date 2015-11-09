@@ -23,14 +23,14 @@ private:
 public:
     static const size_t OUTPUT_SIZE = CSHA256::OUTPUT_SIZE;
 
-    void Finalize(unsigned char hash[OUTPUT_SIZE]) {
+    void Finalize(unsigned char hash[OUTPUT_SIZE], int* nHashRounds = NULL) {
         unsigned char buf[sha.OUTPUT_SIZE];
         sha.Finalize(buf);
-        sha.Reset().Write(buf, sha.OUTPUT_SIZE).Finalize(hash);
+        sha.Reset().Write(buf, sha.OUTPUT_SIZE, nHashRounds).Finalize(hash);
     }
 
-    CHash256& Write(const unsigned char *data, size_t len) {
-        sha.Write(data, len);
+    CHash256& Write(const unsigned char *data, size_t len, int* nHashRounds = NULL) {
+        sha.Write(data, len, nHashRounds);
         return *this;
     }
 
@@ -124,15 +124,16 @@ class CHashWriter
 private:
     CHash256 ctx;
     size_t nBytesHashed;
+    int nHashRounds;
 
 public:
     int nType;
     int nVersion;
 
-    CHashWriter(int nTypeIn, int nVersionIn) : nBytesHashed(0), nType(nTypeIn), nVersion(nVersionIn) {}
+    CHashWriter(int nTypeIn, int nVersionIn) : nBytesHashed(0), nHashRounds(0), nType(nTypeIn), nVersion(nVersionIn) {}
 
     CHashWriter& write(const char *pch, size_t size) {
-        ctx.Write((const unsigned char*)pch, size);
+        ctx.Write((const unsigned char*)pch, size, &nHashRounds);
 	nBytesHashed += size;
         return (*this);
     }
@@ -140,11 +141,15 @@ public:
     // invalidates the object
     uint256 GetHash() {
         uint256 result;
-        ctx.Finalize((unsigned char*)&result);
+        ctx.Finalize((unsigned char*)&result, &nHashRounds);
         return result;
     }
     size_t GetNumBytesHashed() const {
         return nBytesHashed;
+    }
+
+    int GetNumHashRounds() const {
+        return nHashRounds;
     }
 
     template<typename T>

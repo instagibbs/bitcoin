@@ -1333,7 +1333,7 @@ bool CScriptCheck::operator()() {
         return ::error("CScriptCheck(): %s:%d VerifySignature failed: %s", ptxTo->GetHash().ToString(), nIn, ScriptErrorString(error));
     }
     if (resourceTracker) {
-        if (!resourceTracker->Update(ptxTo->GetHash(), checker.GetNumSigops(), checker.GetBytesHashed()))
+        if (!resourceTracker->Update(ptxTo->GetHash(), checker.GetNumSigops(), checker.GetBytesHashed(), checker.GetNumHashRounds()))
             return ::error("CScriptCheck(): %s:%d sigop and/or sighash byte limit exceeded",
                 ptxTo->GetHash().ToString(), nIn);
     }

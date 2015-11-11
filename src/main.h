@@ -334,20 +334,22 @@ class BlockValidationResourceTracker
      const uint64_t nMaxSigops;
      uint64_t nSighashBytes;
      const uint64_t nMaxSighashBytes;
+     uint64_t nHashRounds;
  
  public:
      BlockValidationResourceTracker(uint64_t nMaxSigopsIn, uint64_t nMaxSighashBytesIn) :
                                   nSigops(0), nMaxSigops(nMaxSigopsIn),
-                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn) { }
+                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn), nHashRounds(0) { }
 
     bool IsWithinLimits() const {
         LOCK(cs);
         return (nSigops <= nMaxSigops && nSighashBytes <= nMaxSighashBytes);
     }
-    bool Update(const uint256& txid, uint64_t nSigopsIn, uint64_t nSighashBytesIn) {
+    bool Update(const uint256& txid, uint64_t nSigopsIn, uint64_t nSighashBytesIn, uint64_t nHashRoundsIn) {
         LOCK(cs);
         nSigops += nSigopsIn;
         nSighashBytes += nSighashBytesIn;
+        nHashRounds += nHashRoundsIn;
         return (nSigops <= nMaxSigops && nSighashBytes <= nMaxSighashBytes);
     }
     uint64_t GetSigOps() const {

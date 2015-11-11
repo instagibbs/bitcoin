@@ -788,6 +788,9 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
                 case OP_HASH160:
                 case OP_HASH256:
                 {
+                    //
+                    // None of these hashes are being recorded AFAICT
+                    //
                     // (in -- hash)
                     if (stack.size() < 1)
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
@@ -954,6 +957,8 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
             // Size limits
             if (stack.size() + altstack.size() > 1000)
                 return set_error(serror, SCRIPT_ERR_STACK_SIZE);
+
+            //Op++
         }
     }
     catch (...)

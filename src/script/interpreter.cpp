@@ -1066,7 +1066,7 @@ public:
 
 } // anon namespace
 
-uint256 SignatureHash(const CScript& scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, size_t* nHashedOut)
+uint256 SignatureHash(const CScript& scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, size_t* nHashedOut, size_t* nHashRoundsOut)
 {
     static const uint256 one(uint256S("0000000000000000000000000000000000000000000000000000000000000001"));
     if (nIn >= txTo.vin.size()) {
@@ -1091,6 +1091,9 @@ uint256 SignatureHash(const CScript& scriptCode, const CTransaction& txTo, unsig
     if (nHashedOut != NULL) {
         *nHashedOut = ss.GetNumBytesHashed();
     }
+    if (nHashRoundsOut != NULL) {
+        *nHashRoundsOut = ss.GetNumHashRounds();
+    }
     return ss.GetHash();
 }
 
@@ -1113,9 +1116,11 @@ bool TransactionSignatureChecker::CheckSig(const vector<unsigned char>& vchSigIn
     vchSig.pop_back();
 
     size_t nHashed = 0;
-    uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, &nHashed);
+    size_t nRoundsHashed = 0;
+    uint256 sighash = SignatureHash(scriptCode, *txTo, nIn, nHashType, &nHashed, &nRoundsHashed);
     nBytesHashed += nHashed;
     ++nSigops;
+    nHashRounds += nRoundsHashed;
 
     if (!VerifySignature(vchSig, pubkey, sighash))
         return false;

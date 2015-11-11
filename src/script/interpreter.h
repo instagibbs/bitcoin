@@ -85,7 +85,7 @@ enum
 
 bool CheckSignatureEncoding(const std::vector<unsigned char> &vchSig, unsigned int flags, ScriptError* serror);
 
-uint256 SignatureHash(const CScript &scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, size_t* nHashedOut=NULL);
+uint256 SignatureHash(const CScript &scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, size_t* nHashedOut=NULL, size_t* nHashRoundsOut=NULL);
 
 class BaseSignatureChecker
 {
@@ -110,16 +110,18 @@ private:
     unsigned int nIn;
     mutable size_t nBytesHashed;
     mutable size_t nSigops;
+    mutable size_t nHashRounds;
 
 protected:
     virtual bool VerifySignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const;
 
 public:
-    TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn) : txTo(txToIn), nIn(nInIn), nBytesHashed(0), nSigops(0) {}
+    TransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn) : txTo(txToIn), nIn(nInIn), nBytesHashed(0), nSigops(0), nHashRounds(0) {}
     bool CheckSig(const std::vector<unsigned char>& scriptSig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode) const;
     bool CheckLockTime(const CScriptNum& nLockTime) const;
     size_t GetBytesHashed() const { return nBytesHashed; }
     size_t GetNumSigops() const { return nSigops; }
+    size_t getNumHashRounds() const { return nHashRounds; }
 };
 
 class MutableTransactionSignatureChecker : public TransactionSignatureChecker

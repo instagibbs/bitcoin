@@ -334,12 +334,15 @@ class BlockValidationResourceTracker
      const uint64_t nMaxSigops;
      uint64_t nSighashBytes;
      const uint64_t nMaxSighashBytes;
-     uint64_t nHashRounds;
+     uint64_t nSigHashRounds;
+     uint64_t nOpHashRounds;
+     uint64_t nScriptOps;
+     uint64_t nInputs;
  
  public:
      BlockValidationResourceTracker(uint64_t nMaxSigopsIn, uint64_t nMaxSighashBytesIn) :
                                   nSigops(0), nMaxSigops(nMaxSigopsIn),
-                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn), nHashRounds(0) { }
+                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn), nSigHashRounds(0), nOpHashRounds(0), nScriptOps(0), nInputs(0) { }
 
     bool IsWithinLimits() const {
         LOCK(cs);
@@ -349,8 +352,23 @@ class BlockValidationResourceTracker
         LOCK(cs);
         nSigops += nSigopsIn;
         nSighashBytes += nSighashBytesIn;
-        nHashRounds += nHashRoundsIn;
+        nSigHashRounds += nHashRoundsIn;
         return (nSigops <= nMaxSigops && nSighashBytes <= nMaxSighashBytes);
+    }
+    bool UpdateOpHashRounds(uint64_t nOpHashRoundsIn) {
+        LOCK(cs);
+        nOpHashRounds += nOpHashRoundsIn;
+        return true;
+    }
+    bool UpdateScriptOps(uint64_t nScriptOpsIn) {
+        LOCK(cs);
+        nScriptOps += nScriptOpsIn;
+        return true;
+    }
+    bool UpdateInputs(uint64_t nInputsIn) {
+        LOCK(cs);
+        nInputs += nInputsIn;
+        return true;
     }
     uint64_t GetSigOps() const {
         LOCK(cs);
@@ -359,6 +377,22 @@ class BlockValidationResourceTracker
     uint64_t GetSighashBytes() const {
         LOCK(cs);
         return nSighashBytes;
+    }
+    uint64_t GetSighashRounds() const {
+        LOCK(cs);
+        return nSigHashRounds;
+    }
+    uint64_t GetOphashRounds() const {
+        LOCK(cs);
+        return nOpHashRounds;
+    }
+    uint64_t GetScriptOps() const {
+        LOCK(cs);
+        return nScriptOps;
+    }
+    uint64_t GetInputs() const {
+        LOCK(cs);
+        return nInputs;
     }
 };
 

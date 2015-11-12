@@ -1329,7 +1329,7 @@ bool CScriptCheck::operator()() {
 
     const CScript &scriptSig = ptxTo->vin[nIn].scriptSig;
     CachingTransactionSignatureChecker checker(ptxTo, nIn, cacheStore);
-    if (!VerifyScript(scriptSig, scriptPubKey, nFlags, checker, &error)) {
+    if (!VerifyScript(scriptSig, scriptPubKey, nFlags, checker, &error, resourceTracker)) {
         return ::error("CScriptCheck(): %s:%d VerifySignature failed: %s", ptxTo->GetHash().ToString(), nIn, ScriptErrorString(error));
     }
     if (resourceTracker) {
@@ -1837,6 +1837,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         const CTransaction &tx = block.vtx[i];
 
         nInputs += tx.vin.size();
+        resourceTracker.UpdateInputs(tx.vin.size());
         nSigOps += GetLegacySigOpCount(tx);
         if (nSigOps > MAX_BLOCK_SIGOPS)
             return state.DoS(100, error("ConnectBlock(): too many sigops"),

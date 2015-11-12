@@ -8,6 +8,7 @@
 
 #include "script_error.h"
 #include "primitives/transaction.h"
+#include "main.h"
 
 #include <vector>
 #include <stdint.h>
@@ -121,7 +122,7 @@ public:
     bool CheckLockTime(const CScriptNum& nLockTime) const;
     size_t GetBytesHashed() const { return nBytesHashed; }
     size_t GetNumSigops() const { return nSigops; }
-    size_t getNumHashRounds() const { return nHashRounds; }
+    size_t GetNumHashRounds() const { return nHashRounds; }
 };
 
 class MutableTransactionSignatureChecker : public TransactionSignatureChecker
@@ -134,8 +135,8 @@ public:
 };
 
 bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& script, unsigned int flags,
-                const BaseSignatureChecker& checker, ScriptError* error = NULL);
+                const BaseSignatureChecker& checker, ScriptError* error = NULL, BlockValidationResourceTracker* resourceTracker = NULL);
 bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, unsigned int flags,
-                  const BaseSignatureChecker& checker, ScriptError* error = NULL);
+                  const BaseSignatureChecker& checker, ScriptError* error = NULL, BlockValidationResourceTracker* resourceTracker = NULL);
 
 #endif // BITCOIN_SCRIPT_INTERPRETER_H

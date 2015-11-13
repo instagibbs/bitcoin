@@ -20,8 +20,8 @@ public:
     static const size_t OUTPUT_SIZE = 32;
 
     CSHA256();
-    CSHA256& Write(const unsigned char* data, size_t len, int* nHashRounds = NULL);
-    void Finalize(unsigned char hash[OUTPUT_SIZE], int* nRounds = NULL);
+    CSHA256& Write(const unsigned char* data, size_t len, uint64_t* nHashRounds = NULL);
+    void Finalize(unsigned char hash[OUTPUT_SIZE], uint64_t* nRounds = NULL);
     CSHA256& Reset();
 };
 

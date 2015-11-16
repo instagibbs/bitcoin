@@ -247,6 +247,7 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
     if (script.size() > 10000)
         return set_error(serror, SCRIPT_ERR_SCRIPT_SIZE);
     int nOpCount = 0;
+    uint64_t nOpHashRounds = 0;
     bool fRequireMinimal = (flags & SCRIPT_VERIFY_MINIMALDATA) != 0;
 
     try
@@ -793,27 +794,26 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
                         return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
                     valtype& vch = stacktop(-1);
                     valtype vchHash((opcode == OP_RIPEMD160 || opcode == OP_SHA1 || opcode == OP_HASH160) ? 20 : 32);
-                    uint64_t nHashRounds = 0;
                     if (opcode == OP_RIPEMD160){
                         CRIPEMD160& ripemd = CRIPEMD160().Write(begin_ptr(vch), vch.size());
                         ripemd.Finalize(begin_ptr(vchHash));
-                        nHashRounds += ripemd.GetRounds();
+                        nOpHashRounds += ripemd.GetRounds();
                         //CRIPEMD160().Write(begin_ptr(vch), vch.size()).Finalize(begin_ptr(vchHash));
                     }
                     else if (opcode == OP_SHA1) {
                         CSHA1& sha1 = CSHA1().Write(begin_ptr(vch), vch.size());
                         sha1.Finalize(begin_ptr(vchHash));
-                        nHashRounds += sha1.GetRounds();
+                        nOpHashRounds += sha1.GetRounds();
                         //CSHA1().Write(begin_ptr(vch), vch.size()).Finalize(begin_ptr(vchHash));
                     }
                     else if (opcode == OP_SHA256) {
-                        CSHA256().Write(begin_ptr(vch), vch.size()).Finalize(begin_ptr(vchHash));
+                        CSHA256().Write(begin_ptr(vch), vch.size(), &nOpHashRounds).Finalize(begin_ptr(vchHash), &nOpHashRounds);
                     }
                     else if (opcode == OP_HASH160) {
-                        CHash160().Write(begin_ptr(vch), vch.size(), &nHashRounds).Finalize(begin_ptr(vchHash), &nHashRounds);
+                        CHash160().Write(begin_ptr(vch), vch.size(), &nOpHashRounds).Finalize(begin_ptr(vchHash), &nOpHashRounds);
                     }
                     else if (opcode == OP_HASH256) {
-                        CHash256().Write(begin_ptr(vch), vch.size(), &nHashRounds).Finalize(begin_ptr(vchHash), &nHashRounds);
+                        CHash256().Write(begin_ptr(vch), vch.size(), &nOpHashRounds).Finalize(begin_ptr(vchHash), &nOpHashRounds);
                     }
                     popstack(stack);
                     stack.push_back(vchHash);
@@ -970,6 +970,7 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
         }
         if (resourceTracker) {
             resourceTracker->UpdateScriptOps(nOpCount);
+            resourceTracker->UpdateOpHashRounds(nOpHashRounds);
         }
     }
     catch (...)

@@ -239,7 +239,7 @@ void Transform(uint32_t* s, const unsigned char* chunk)
 
 ////// RIPEMD160
 
-CRIPEMD160::CRIPEMD160() : bytes(0)
+CRIPEMD160::CRIPEMD160() : bytes(0), rounds(0)
 {
     ripemd160::Initialize(s);
 }
@@ -255,12 +255,14 @@ CRIPEMD160& CRIPEMD160::Write(const unsigned char* data, size_t len)
         data += 64 - bufsize;
         ripemd160::Transform(s, buf);
         bufsize = 0;
+        rounds++;
     }
     while (end >= data + 64) {
         // Process full chunks directly from the source.
         ripemd160::Transform(s, data);
         bytes += 64;
         data += 64;
+        rounds++;
     }
     if (end > data) {
         // Fill the buffer with what remains.
@@ -289,4 +291,9 @@ CRIPEMD160& CRIPEMD160::Reset()
     bytes = 0;
     ripemd160::Initialize(s);
     return *this;
+}
+
+uint64_t CRIPEMD160::GetRounds()
+{
+    return rounds;
 }

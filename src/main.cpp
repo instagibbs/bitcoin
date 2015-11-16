@@ -959,7 +959,7 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 
         // Check against previous transactions
         // This is done last to help prevent CPU exhaustion denial-of-service attacks.
-        if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true))
+        if (!CheckInputs(tx, state, view, true, STANDARD_SCRIPT_VERIFY_FLAGS, true, NULL))
             return false;
 
         // Check again against just the consensus-critical mandatory script
@@ -971,7 +971,7 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
         // There is a similar check in CreateNewBlock() to prevent creating
         // invalid blocks, however allowing such transactions into the mempool
         // can be exploited as a DoS attack.
-        if (!CheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS, true))
+        if (!CheckInputs(tx, state, view, true, MANDATORY_SCRIPT_VERIFY_FLAGS, true, NULL))
         {
             return error("%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against MANDATORY but not STANDARD flags %s, %s",
                 __func__, hash.ToString(), FormatStateMessage(state));
@@ -1289,8 +1289,9 @@ void static InvalidBlockFound(CBlockIndex *pindex, const CValidationState &state
     }
 }
 
-void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCache &inputs, CTxUndo &txundo, int nHeight)
+uint32_t UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCache &inputs, CTxUndo &txundo, int nHeight)
 {
+    uint32_t spentTxOutSize = 0;
     // mark inputs spent
     if (!tx.IsCoinBase()) {
         txundo.vprevout.reserve(tx.vin.size());
@@ -1301,7 +1302,9 @@ void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCach
             if (nPos >= coins->vout.size() || coins->vout[nPos].IsNull())
                 assert(false);
             // mark an outpoint spent, and construct undo information
-            txundo.vprevout.push_back(CTxInUndo(coins->vout[nPos]));
+            CTxOut out = coins->vout[nPos];
+            txundo.vprevout.push_back(CTxInUndo(out));
+            spentTxOutSize +=  8+out.scriptPubKey.size();
             coins->Spend(nPos);
             if (coins->vout.size() == 0) {
                 CTxInUndo& undo = txundo.vprevout.back();
@@ -1314,6 +1317,7 @@ void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCach
 
     // add outputs
     inputs.ModifyCoins(tx.GetHash())->FromTx(tx, nHeight);
+    return spentTxOutSize;
 }
 
 void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCache &inputs, int nHeight)
@@ -1323,9 +1327,19 @@ void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCach
 }
 
 bool CScriptCheck::operator()() {
+    if (resourceTracker && !resourceTracker->IsWithinLimits()) {
+       return false;
+    }
+
     const CScript &scriptSig = ptxTo->vin[nIn].scriptSig;
-    if (!VerifyScript(scriptSig, scriptPubKey, nFlags, CachingTransactionSignatureChecker(ptxTo, nIn, cacheStore), &error)) {
-        return false;
+    CachingTransactionSignatureChecker checker(ptxTo, nIn, cacheStore);
+    if (!VerifyScript(scriptSig, scriptPubKey, nFlags, checker, &error, resourceTracker)) {
+        return ::error("CScriptCheck(): %s:%d VerifySignature failed: %s", ptxTo->GetHash().ToString(), nIn, ScriptErrorString(error));
+    }
+    if (resourceTracker) {
+        if (!resourceTracker->Update(ptxTo->GetHash(), checker.GetNumSigops(), checker.GetBytesHashed(), checker.GetNumHashRounds()))
+            return ::error("CScriptCheck(): %s:%d sigop and/or sighash byte limit exceeded",
+                ptxTo->GetHash().ToString(), nIn);
     }
     return true;
 }
@@ -1383,7 +1397,7 @@ bool CheckTxInputs(const CTransaction& tx, CValidationState& state, const CCoins
 }
 }// namespace Consensus
 
-bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsViewCache &inputs, bool fScriptChecks, unsigned int flags, bool cacheStore, std::vector<CScriptCheck> *pvChecks)
+bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsViewCache &inputs, bool fScriptChecks, unsigned int flags, bool cacheStore, BlockValidationResourceTracker* resourceTracker, std::vector<CScriptCheck> *pvChecks)
 {
     if (!tx.IsCoinBase())
     {
@@ -1407,7 +1421,7 @@ bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsVi
                 assert(coins);
 
                 // Verify signature
-                CScriptCheck check(*coins, tx, i, flags, cacheStore);
+                CScriptCheck check(resourceTracker, *coins, tx, i, flags, cacheStore);
                 if (pvChecks) {
                     pvChecks->push_back(CScriptCheck());
                     check.swap(pvChecks->back());
@@ -1419,7 +1433,7 @@ bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsVi
                         // arguments; if so, don't trigger DoS protection to
                         // avoid splitting the network between upgraded and
                         // non-upgraded nodes.
-                        CScriptCheck check(*coins, tx, i,
+                        CScriptCheck check(NULL, *coins, tx, i,
                                 flags & ~STANDARD_NOT_MANDATORY_VERIFY_FLAGS, cacheStore);
                         if (check())
                             return state.Invalid(false, REJECT_NONSTANDARD, strprintf("non-mandatory-script-verify-flag (%s)", ScriptErrorString(check.GetScriptError())));
@@ -1812,20 +1826,37 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     CBlockUndo blockundo;
 
+    BlockValidationResourceTracker resourceTracker(std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max());
+
     CCheckQueueControl<CScriptCheck> control(fScriptChecks && nScriptCheckThreads ? &scriptcheckqueue : NULL);
 
     CAmount nFees = 0;
     int nInputs = 0;
+    int pubKeyBytes = 0;
+    int scriptSigBytes = 0;
+    //int nOutputs = 0;
     unsigned int nSigOps = 0;
     CDiskTxPos pos(pindex->GetBlockPos(), GetSizeOfCompactSize(block.vtx.size()));
     std::vector<std::pair<uint256, CDiskTxPos> > vPos;
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
+
+    uint32_t spentTxOutSize = 0;
     for (unsigned int i = 0; i < block.vtx.size(); i++)
     {
         const CTransaction &tx = block.vtx[i];
 
+        for (unsigned int j = 0; j < tx.vout.size(); j++) {
+            pubKeyBytes += tx.vout[j].getPubKeySize()*sizeof(unsigned char);
+        }
+        for (unsigned int j = 0; j < tx.vin.size(); j++) {
+            scriptSigBytes += tx.vin[j].getScriptSigSize()*sizeof(unsigned char);
+        }
+
         nInputs += tx.vin.size();
+        //nOutputs += tx.vout.size();
+        resourceTracker.UpdateInputs(tx.vin.size());
+        resourceTracker.UpdateOutputs(tx.vout.size());
         nSigOps += GetLegacySigOpCount(tx);
         if (nSigOps > MAX_BLOCK_SIGOPS)
             return state.DoS(100, error("ConnectBlock(): too many sigops"),
@@ -1852,7 +1883,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
             std::vector<CScriptCheck> vChecks;
             bool fCacheResults = fJustCheck; /* Don't cache results if we're actually connecting blocks (still consult the cache, though) */
-            if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults, nScriptCheckThreads ? &vChecks : NULL))
+            if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults, 
+                        &resourceTracker, nScriptCheckThreads ? &vChecks : NULL))
                 return error("ConnectBlock(): CheckInputs on %s failed with %s",
                     tx.GetHash().ToString(), FormatStateMessage(state));
             control.Add(vChecks);
@@ -1862,7 +1894,7 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         if (i > 0) {
             blockundo.vtxundo.push_back(CTxUndo());
         }
-        UpdateCoins(tx, state, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
+        spentTxOutSize += UpdateCoins(tx, state, view, i == 0 ? undoDummy : blockundo.vtxundo.back(), pindex->nHeight);
 
         vPos.push_back(std::make_pair(tx.GetHash(), pos));
         pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
@@ -1921,6 +1953,29 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     int64_t nTime6 = GetTimeMicros(); nTimeCallbacks += nTime6 - nTime5;
     LogPrint("bench", "    - Callbacks: %.2fms [%.2fs]\n", 0.001 * (nTime6 - nTime5), nTimeCallbacks * 0.000001);
+
+    std::ostringstream oss;
+    oss << "Opcodes: ";
+    int* opsarray = resourceTracker.GetOpsArray();
+    for (int i = 0; i < 256; i++) {
+        if (opsarray[i] > 0) {
+            //LogPrint("bench", "Opcode: %d, Count: %d\n", i, opsarray[i]);
+            oss << i << ":" << opsarray[i] << ",";
+        }
+    }
+    oss << endl;
+    std::string logstring = oss.str();
+    LogPrint("bench", "%s", logstring.c_str());
+
+    LogPrint("bench", "Counts: %d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", resourceTracker.GetSigOps(), resourceTracker.GetSighashBytes(), resourceTracker.GetSighashRounds(), resourceTracker.GetOphashRoundsSHA1(), resourceTracker.GetOphashRoundsSHA256(), resourceTracker.GetOphashRoundsRIPEMD(), resourceTracker.GetScriptOps(), resourceTracker.GetInputs(), resourceTracker.GetOutputs(), resourceTracker.GetStackBytesDelta(), pubKeyBytes, scriptSigBytes, resourceTracker.GetScriptOps(), spentTxOutSize);
+    //LogPrint("bench", "SigOps: %d\n", resourceTracker.GetSigOps());
+    //LogPrint("bench", "SighashBytes: %d\n", resourceTracker.GetSighashBytes());
+    //LogPrint("bench", "SighashRounds: %d\n", resourceTracker.GetSighashRounds());
+    //LogPrint("bench", "OphashRoundsSHA1: %d\n", resourceTracker.GetOphashRoundsSHA1());
+    //LogPrint("bench", "OphashRoundsSHA256: %d\n", resourceTracker.GetOphashRoundsSHA256());
+    //LogPrint("bench", "OphashRoundsRIPEMD: %d\n", resourceTracker.GetOphashRoundsRIPEMD());
+    //LogPrint("bench", "ScriptOps: %d\n", resourceTracker.GetScriptOps());
+    //LogPrint("bench", "Inputs: %d\n", resourceTracker.GetInputs());
 
     return true;
 }

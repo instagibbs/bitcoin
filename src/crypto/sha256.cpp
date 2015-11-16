@@ -138,7 +138,7 @@ CSHA256::CSHA256() : bytes(0)
     sha256::Initialize(s);
 }
 
-CSHA256& CSHA256::Write(const unsigned char* data, size_t len)
+CSHA256& CSHA256::Write(const unsigned char* data, size_t len, uint64_t* nRounds)
 {
     const unsigned char* end = data + len;
     size_t bufsize = bytes % 64;
@@ -148,11 +148,17 @@ CSHA256& CSHA256::Write(const unsigned char* data, size_t len)
         bytes += 64 - bufsize;
         data += 64 - bufsize;
         sha256::Transform(s, buf);
+        if (nRounds) {
+            (*nRounds)++;
+        }
         bufsize = 0;
     }
     while (end >= data + 64) {
         // Process full chunks directly from the source.
         sha256::Transform(s, data);
+        if (nRounds) {
+            (*nRounds)++;
+        }
         bytes += 64;
         data += 64;
     }
@@ -164,13 +170,13 @@ CSHA256& CSHA256::Write(const unsigned char* data, size_t len)
     return *this;
 }
 
-void CSHA256::Finalize(unsigned char hash[OUTPUT_SIZE])
+void CSHA256::Finalize(unsigned char hash[OUTPUT_SIZE], uint64_t* nRounds)
 {
     static const unsigned char pad[64] = {0x80};
     unsigned char sizedesc[8];
     WriteBE64(sizedesc, bytes << 3);
-    Write(pad, 1 + ((119 - (bytes % 64)) % 64));
-    Write(sizedesc, 8);
+    Write(pad, 1 + ((119 - (bytes % 64)) % 64), nRounds);
+    Write(sizedesc, 8, nRounds);
     WriteBE32(hash, s[0]);
     WriteBE32(hash + 4, s[1]);
     WriteBE32(hash + 8, s[2]);

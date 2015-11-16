@@ -28,6 +28,7 @@
 
 #include <boost/unordered_map.hpp>
 
+class BlockValidationResourceTracker;
 class CBlockIndex;
 class CBlockTreeDB;
 class CBloomFilter;
@@ -297,7 +298,8 @@ unsigned int GetP2SHSigOpCount(const CTransaction& tx, const CCoinsViewCache& ma
  * instead of being performed inline.
  */
 bool CheckInputs(const CTransaction& tx, CValidationState &state, const CCoinsViewCache &view, bool fScriptChecks,
-                 unsigned int flags, bool cacheStore, std::vector<CScriptCheck> *pvChecks = NULL);
+                 unsigned int flags, bool cacheStore, BlockValidationResourceTracker* resourceTracker,
+                 std::vector<CScriptCheck> *pvChecks = NULL);
 
 /** Apply the effects of this transaction on the UTXO set represented by view */
 void UpdateCoins(const CTransaction& tx, CValidationState &state, CCoinsViewCache &inputs, int nHeight);
@@ -320,6 +322,131 @@ bool IsFinalTx(const CTransaction &tx, int nBlockHeight, int64_t nBlockTime);
  */
 bool CheckFinalTx(const CTransaction &tx, int flags = -1);
 
+/**
+ * Class that keeps track of number of signature operations
+ * and bytes hashed to compute signature hashes.
+ */
+class BlockValidationResourceTracker
+{
+ private:
+     mutable CCriticalSection cs;
+     uint64_t nSigops;
+     const uint64_t nMaxSigops;
+     uint64_t nSighashBytes;
+     const uint64_t nMaxSighashBytes;
+     uint64_t nSigHashRounds; //Sig hashes are SHA256 only
+     uint64_t nOpHashRoundsSHA1;
+     uint64_t nOpHashRoundsSHA256;
+     uint64_t nOpHashRoundsRIPEMD;
+     uint64_t nScriptOps;
+     uint64_t nInputs;
+     uint64_t nOutputs;
+     uint64_t stackBytesDelta;
+     int opCodeCounts[256];
+ 
+ public:
+     BlockValidationResourceTracker(uint64_t nMaxSigopsIn, uint64_t nMaxSighashBytesIn) :
+                                  nSigops(0), nMaxSigops(nMaxSigopsIn),
+                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn), nSigHashRounds(0), nOpHashRoundsSHA1(0), nOpHashRoundsSHA256(0), nOpHashRoundsRIPEMD(0), nScriptOps(0), nInputs(0), nOutputs(0), stackBytesDelta(0) { for (int i=0;i<256;i++){opCodeCounts[i] = 0;} }
+
+    bool IsWithinLimits() const {
+        LOCK(cs);
+        return (nSigops <= nMaxSigops && nSighashBytes <= nMaxSighashBytes);
+    }
+    bool Update(const uint256& txid, uint64_t nSigopsIn, uint64_t nSighashBytesIn, uint64_t nHashRoundsIn) {
+        LOCK(cs);
+        nSigops += nSigopsIn;
+        nSighashBytes += nSighashBytesIn;
+        nSigHashRounds += nHashRoundsIn;
+        return (nSigops <= nMaxSigops && nSighashBytes <= nMaxSighashBytes);
+    }
+    bool UpdateOpHashRoundsSHA1(uint64_t nOpHashRoundsIn) {
+        LOCK(cs);
+        nOpHashRoundsSHA1 += nOpHashRoundsIn;
+        return true;
+    }
+    bool UpdateOpHashRoundsSHA256(uint64_t nOpHashRoundsIn) {
+        LOCK(cs);
+        nOpHashRoundsSHA256 += nOpHashRoundsIn;
+        return true;
+    }
+    bool UpdateOpHashRoundsRIPEMD(uint64_t nOpHashRoundsIn) {
+        LOCK(cs);
+        nOpHashRoundsRIPEMD += nOpHashRoundsIn;
+        return true;
+    }
+
+    bool UpdateScriptOps(uint64_t nScriptOpsIn) {
+        LOCK(cs);
+        nScriptOps += nScriptOpsIn;
+        return true;
+    }
+    bool UpdateInputs(uint64_t nInputsIn) {
+        LOCK(cs);
+        nInputs += nInputsIn;
+        return true;
+    }
+    bool UpdateOutputs(uint64_t nOutputsIn) {
+        LOCK(cs);
+        nOutputs += nOutputsIn;
+        return true;
+    }
+    bool UpdateScriptOpCounts(int opEnum) {
+        LOCK(cs);
+        opCodeCounts[opEnum] = opCodeCounts[opEnum] + 1;
+        return true;
+    }
+    bool UpdateStackBytesDelta(uint64_t stackBytesDeltaIn) {
+        LOCK(cs);
+        stackBytesDelta += stackBytesDeltaIn;
+        return true;
+    }
+    uint64_t GetSigOps() const {
+        LOCK(cs);
+        return nSigops;
+    }
+    uint64_t GetSighashBytes() const {
+        LOCK(cs);
+        return nSighashBytes;
+    }
+    uint64_t GetSighashRounds() const {
+        LOCK(cs);
+        return nSigHashRounds;
+    }
+    uint64_t GetOphashRoundsSHA1() const {
+        LOCK(cs);
+        return nOpHashRoundsSHA1;
+    }
+     uint64_t GetOphashRoundsSHA256() const {
+        LOCK(cs);
+        return nOpHashRoundsSHA256;
+    }
+    uint64_t GetOphashRoundsRIPEMD() const {
+        LOCK(cs);
+        return nOpHashRoundsRIPEMD;
+    }
+    uint64_t GetScriptOps() const {
+        LOCK(cs);
+        return nScriptOps;
+    }
+    uint64_t GetInputs() const {
+        LOCK(cs);
+        return nInputs;
+    }
+    uint64_t GetOutputs() const {
+        LOCK(cs);
+        return nOutputs;
+    }
+    int* GetOpsArray() {
+        LOCK(cs);
+        return &opCodeCounts[0]; 
+    }
+    uint64_t GetStackBytesDelta() const {
+        LOCK(cs);
+        return stackBytesDelta;
+    }
+};
+
 /** 
  * Closure representing one script verification
  * Note that this stores references to the spending transaction 
@@ -327,6 +454,7 @@ bool CheckFinalTx(const CTransaction &tx, int flags = -1);
 class CScriptCheck
 {
 private:
+    BlockValidationResourceTracker* resourceTracker;
     CScript scriptPubKey;
     const CTransaction *ptxTo;
     unsigned int nIn;
@@ -335,14 +463,15 @@ private:
     ScriptError error;
 
 public:
-    CScriptCheck(): ptxTo(0), nIn(0), nFlags(0), cacheStore(false), error(SCRIPT_ERR_UNKNOWN_ERROR) {}
-    CScriptCheck(const CCoins& txFromIn, const CTransaction& txToIn, unsigned int nInIn, unsigned int nFlagsIn, bool cacheIn) :
-        scriptPubKey(txFromIn.vout[txToIn.vin[nInIn].prevout.n].scriptPubKey),
+    CScriptCheck(): resourceTracker(NULL), ptxTo(0), nIn(0), nFlags(0), cacheStore(false), error(SCRIPT_ERR_UNKNOWN_ERROR) {}
+    CScriptCheck(BlockValidationResourceTracker* resourceTrackerIn, const CCoins& txFromIn, const CTransaction& txToIn, unsigned int nInIn, unsigned int nFlagsIn, bool cacheIn) :
+        resourceTracker(resourceTrackerIn), scriptPubKey(txFromIn.vout[txToIn.vin[nInIn].prevout.n].scriptPubKey),
         ptxTo(&txToIn), nIn(nInIn), nFlags(nFlagsIn), cacheStore(cacheIn), error(SCRIPT_ERR_UNKNOWN_ERROR) { }
 
     bool operator()();
 
     void swap(CScriptCheck &check) {
+        std::swap(resourceTracker, check.resourceTracker);
         scriptPubKey.swap(check.scriptPubKey);
         std::swap(ptxTo, check.ptxTo);
         std::swap(nIn, check.nIn);

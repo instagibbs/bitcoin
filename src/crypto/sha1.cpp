@@ -146,7 +146,7 @@ void Transform(uint32_t* s, const unsigned char* chunk)
 
 ////// SHA1
 
-CSHA1::CSHA1() : bytes(0)
+CSHA1::CSHA1() : bytes(0), rounds(0)
 {
     sha1::Initialize(s);
 }
@@ -161,6 +161,7 @@ CSHA1& CSHA1::Write(const unsigned char* data, size_t len)
         bytes += 64 - bufsize;
         data += 64 - bufsize;
         sha1::Transform(s, buf);
+        rounds++;
         bufsize = 0;
     }
     while (end >= data + 64) {
@@ -168,6 +169,7 @@ CSHA1& CSHA1::Write(const unsigned char* data, size_t len)
         sha1::Transform(s, data);
         bytes += 64;
         data += 64;
+        rounds++;
     }
     if (end > data) {
         // Fill the buffer with what remains.
@@ -195,5 +197,11 @@ CSHA1& CSHA1::Reset()
 {
     bytes = 0;
     sha1::Initialize(s);
+    rounds = 0;
     return *this;
+}
+
+uint64_t CSHA1::GetRounds()
+{
+    return rounds;
 }

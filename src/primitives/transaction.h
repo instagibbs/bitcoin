@@ -96,6 +96,11 @@ public:
     }
 
     std::string ToString() const;
+    
+    uint64_t getScriptSigSize() const {
+        return scriptSig.size();
+    }
+
 };
 
 /** An output of a transaction.  It contains the public key that the next input
@@ -169,6 +174,10 @@ public:
     }
 
     std::string ToString() const;
+
+    uint64_t getPubKeySize() const {
+        return scriptPubKey.size();
+    }
 };
 
 struct CMutableTransaction;

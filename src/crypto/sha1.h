@@ -15,6 +15,7 @@ private:
     uint32_t s[5];
     unsigned char buf[64];
     size_t bytes;
+    uint64_t rounds;
 
 public:
     static const size_t OUTPUT_SIZE = 20;
@@ -23,6 +24,7 @@ public:
     CSHA1& Write(const unsigned char* data, size_t len);
     void Finalize(unsigned char hash[OUTPUT_SIZE]);
     CSHA1& Reset();
+    uint64_t GetRounds();
 };
 
 #endif // BITCOIN_CRYPTO_SHA1_H

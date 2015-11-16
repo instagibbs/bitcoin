@@ -54,7 +54,7 @@ public:
         CRIPEMD160& ripemd = CRIPEMD160().Write(buf, sha.OUTPUT_SIZE);
         ripemd.Finalize(hash);
         if (nHashRounds) {
-            (*nHashRounds) += ripemd.GetRounds();
+            //(*nHashRounds) += ripemd.GetRounds();
         }
     }
 

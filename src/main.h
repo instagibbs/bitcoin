@@ -334,15 +334,18 @@ class BlockValidationResourceTracker
      const uint64_t nMaxSigops;
      uint64_t nSighashBytes;
      const uint64_t nMaxSighashBytes;
-     uint64_t nSigHashRounds;
-     uint64_t nOpHashRounds;
+     uint64_t nSigHashRounds; //SHA256 only
+     uint64_t nOpHashRoundsSHA1;
+     uint64_t nOpHashRoundsSHA256;
+     uint64_t nOpHashRoundsRIPEMD;
      uint64_t nScriptOps;
      uint64_t nInputs;
+     int opCodeCounts[256];
  
  public:
      BlockValidationResourceTracker(uint64_t nMaxSigopsIn, uint64_t nMaxSighashBytesIn) :
                                   nSigops(0), nMaxSigops(nMaxSigopsIn),
-                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn), nSigHashRounds(0), nOpHashRounds(0), nScriptOps(0), nInputs(0) { }
+                                  nSighashBytes(0), nMaxSighashBytes(nMaxSighashBytesIn), nSigHashRounds(0), nOpHashRoundsSHA1(0), nOpHashRoundsSHA256(0), nOpHashRoundsRIPEMD(0), nScriptOps(0), nInputs(0) { }
 
     bool IsWithinLimits() const {
         LOCK(cs);
@@ -355,11 +358,22 @@ class BlockValidationResourceTracker
         nSigHashRounds += nHashRoundsIn;
         return (nSigops <= nMaxSigops && nSighashBytes <= nMaxSighashBytes);
     }
-    bool UpdateOpHashRounds(uint64_t nOpHashRoundsIn) {
+    bool UpdateOpHashRoundsSHA1(uint64_t nOpHashRoundsIn) {
         LOCK(cs);
-        nOpHashRounds += nOpHashRoundsIn;
+        nOpHashRoundsSHA1 += nOpHashRoundsIn;
         return true;
     }
+    bool UpdateOpHashRoundsSHA256(uint64_t nOpHashRoundsIn) {
+        LOCK(cs);
+        nOpHashRoundsSHA256 += nOpHashRoundsIn;
+        return true;
+    }
+    bool UpdateOpHashRoundsRIPEMD(uint64_t nOpHashRoundsIn) {
+        LOCK(cs);
+        nOpHashRoundsRIPEMD += nOpHashRoundsIn;
+        return true;
+    }
+
     bool UpdateScriptOps(uint64_t nScriptOpsIn) {
         LOCK(cs);
         nScriptOps += nScriptOpsIn;
@@ -368,6 +382,10 @@ class BlockValidationResourceTracker
     bool UpdateInputs(uint64_t nInputsIn) {
         LOCK(cs);
         nInputs += nInputsIn;
+        return true;
+    }
+    bool UpdateScriptOpCounts(int opEnum) {
+        opCodeCounts[opEnum] += 1;
         return true;
     }
     uint64_t GetSigOps() const {
@@ -382,9 +400,17 @@ class BlockValidationResourceTracker
         LOCK(cs);
         return nSigHashRounds;
     }
-    uint64_t GetOphashRounds() const {
+    uint64_t GetOphashRoundsSHA1() const {
         LOCK(cs);
-        return nOpHashRounds;
+        return nOpHashRoundsSHA1;
+    }
+     uint64_t GetOphashRoundsSHA256() const {
+        LOCK(cs);
+        return nOpHashRoundsSHA256;
+    }
+    uint64_t GetOphashRoundsRIPEMD() const {
+        LOCK(cs);
+        return nOpHashRoundsRIPEMD;
     }
     uint64_t GetScriptOps() const {
         LOCK(cs);

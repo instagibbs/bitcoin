@@ -334,7 +334,7 @@ class BlockValidationResourceTracker
      const uint64_t nMaxSigops;
      uint64_t nSighashBytes;
      const uint64_t nMaxSighashBytes;
-     uint64_t nSigHashRounds; //SHA256 only
+     uint64_t nSigHashRounds; //Sig hashes are SHA256 only
      uint64_t nOpHashRoundsSHA1;
      uint64_t nOpHashRoundsSHA256;
      uint64_t nOpHashRoundsRIPEMD;
@@ -419,6 +419,10 @@ class BlockValidationResourceTracker
     uint64_t GetInputs() const {
         LOCK(cs);
         return nInputs;
+    }
+    int* GetOpsArray() {
+        LOCK(cs);
+        return opCodeCounts; 
     }
 };
 

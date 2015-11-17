@@ -983,6 +983,9 @@ bool EvalScript(vector<vector<unsigned char> >& stack, const CScript& script, un
             if (opcode >= 0 && opcode < 256) {
                 resourceTracker->UpdateScriptOpCounts(opcode);
             }
+            else {
+                printf("Opcode: %d", opcode);
+            }
         }
     }
     catch (...)

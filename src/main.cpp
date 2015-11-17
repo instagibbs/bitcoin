@@ -1934,6 +1934,20 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
     int64_t nTime6 = GetTimeMicros(); nTimeCallbacks += nTime6 - nTime5;
     LogPrint("bench", "    - Callbacks: %.2fms [%.2fs]\n", 0.001 * (nTime6 - nTime5), nTimeCallbacks * 0.000001);
+    int* opsarray = resourceTracker.GetOpsArray();
+    for (int i = 0; i < 256; i++) {
+        LogPrint("bench", "Opcode: %d, Count: %d\n", i, opsarray[i]);
+    }
+
+
+    LogPrint("bench", "SigOps: %d\n", resourceTracker.GetSigOps());
+    LogPrint("bench", "SighashBytes: %d\n", resourceTracker.GetSighashBytes());
+    LogPrint("bench", "SighashRounds: %d\n", resourceTracker.GetSighashRounds());
+    LogPrint("bench", "OphashRoundsSHA1: %d\n", resourceTracker.GetOphashRoundsSHA1());
+    LogPrint("bench", "OphashRoundsSHA256: %d\n", resourceTracker.GetOphashRoundsSHA256());
+    LogPrint("bench", "OphashRoundsRIPEMD: %d\n", resourceTracker.GetOphashRoundsRIPEMD());
+    LogPrint("bench", "ScriptOps: %d\n", resourceTracker.GetScriptOps());
+    LogPrint("bench", "Inputs: %d\n", resourceTracker.GetInputs());
 
     return true;
 }

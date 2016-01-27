@@ -13,6 +13,8 @@
 #include "util.h"
 #include "utiltime.h"
 #include "wallet.h"
+#include "merkleblock.h"
+#include "core_io.h"
 
 #include <fstream>
 #include <stdint.h>
@@ -300,6 +302,106 @@ UniValue importpubkey(const UniValue& params, bool fHelp)
     return NullUniValue;
 }
 
+UniValue importprunedfunds(const UniValue& params, bool fHelp)
+{
+    if (!EnsureWalletIsAvailable(fHelp))
+        return NullUniValue;
+    
+    if (fHelp || params.size() < 3 || params.size() > 4)
+        throw runtime_error(
+            "importprunedfunds\n"
+            "\nImports watch-only funds without rescan. Aimed towards pruned wallets.\n"
+            "\nArguments:\n"
+            "1. \"address\"        (string, required) The address or script for which the wallet will claim watch-only funds \n"
+            "2. \"rawtransaction\" (string, hex, required) The raw transaction funding the address\n"
+            "3. \"txoutproof\"     (string, hex, required) The output from gettxoutproof that contains the transaction\n"
+            "4. \"label\"          (string, optional) An optional label\n"
+        );
+
+    CTransaction tx;
+    if (!DecodeHexTx(tx, params[1].get_str()))
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    uint256 hashTx = tx.GetHash();
+    CWalletTx wtx(pwalletMain,tx);
+
+    CDataStream ssMB(ParseHexV(params[2], "proof"), SER_NETWORK, PROTOCOL_VERSION);
+    CMerkleBlock merkleBlock;
+    ssMB >> merkleBlock;
+
+    string strLabel = "";
+    if (params.size() == 4)
+        strLabel = params[3].get_str();
+
+    UniValue res(UniValue::VARR);
+
+    //Search partial merkle tree in proof for our transaction and index in block
+    vector<uint256> vMatch;
+    vector<unsigned int> vIndex;
+    unsigned int txnIndex = 0;
+    if (merkleBlock.txn.ExtractMatches(vMatch, vIndex) == merkleBlock.header.hashMerkleRoot) {
+    
+        LOCK(cs_main);
+
+        if (!mapBlockIndex.count(merkleBlock.header.GetHash()) || !chainActive.Contains(mapBlockIndex[merkleBlock.header.GetHash()]))
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found in chain");
+
+        vector<uint256>::const_iterator it;
+        if ((it = std::find(vMatch.begin(), vMatch.end(), hashTx))==vMatch.end()) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction given doesn't exist in proof");
+        }
+
+        txnIndex = vIndex[it - vMatch.begin()];
+    }
+    else {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Something wrong with merkleblock");
+        
+    }
+    
+
+    bool isScript = false;
+    bool scriptPubKeyFound = false;
+    CBitcoinAddress address(params[0].get_str());
+
+    if (IsHex(params[0].get_str())) {
+        isScript = true;
+    } else if (!address.IsValid()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Bitcoin address or script");
+    }
+
+    wtx.nIndex = txnIndex;
+    wtx.hashBlock = merkleBlock.header.GetHash();
+
+    BOOST_FOREACH(const CTxOut txout, tx.vout) {
+        CScript spk = txout.scriptPubKey;
+        CTxDestination addressRet;
+        if (ExtractDestination(spk, addressRet)) {
+            CBitcoinAddress outAddr(addressRet);
+            if (outAddr == address) {
+                scriptPubKeyFound = true;
+                break;
+            }
+        }
+    }
+
+    LOCK2(cs_main, pwalletMain->cs_wallet);
+
+    if (scriptPubKeyFound) {
+        if (!isScript)
+            ImportAddress(address, strLabel);
+        else {
+            std::vector<unsigned char> data(ParseHex(params[0].get_str()));
+            ImportScript(CScript(data.begin(), data.end()), strLabel, false);
+        }
+    }
+    else {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Bitcoin address or script does not match transaction provided");
+    }
+
+    CWalletDB walletdb(pwalletMain->strWalletFile, "r+", false);
+    pwalletMain->AddToWallet(wtx, false, &walletdb);
+    
+    return NullUniValue; 
+}
 
 UniValue importwallet(const UniValue& params, bool fHelp)
 {

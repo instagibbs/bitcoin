@@ -332,8 +332,6 @@ UniValue importprunedfunds(const UniValue& params, bool fHelp)
     if (params.size() == 4)
         strLabel = params[3].get_str();
 
-    UniValue res(UniValue::VARR);
-
     //Search partial merkle tree in proof for our transaction and index in block
     vector<uint256> vMatch;
     vector<unsigned int> vIndex;

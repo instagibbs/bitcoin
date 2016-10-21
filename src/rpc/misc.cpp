@@ -135,6 +135,12 @@ public:
             int nRequired;
             ExtractDestinations(subscript, whichType, addresses, nRequired);
             obj.push_back(Pair("script", GetTxnOutputType(whichType)));
+            CKeyID keyID;
+            CPubKey pubkey;
+            if (pwalletMain->GetWitnessKeyID(scriptID, keyID) &&
+                pwalletMain->GetPubKey(keyID, pubkey) && pubkey.IsCompressed()) {
+                obj.push_back(Pair("pubkey", HexStr(pubkey)));
+            }
             obj.push_back(Pair("hex", HexStr(subscript.begin(), subscript.end())));
             UniValue a(UniValue::VARR);
             BOOST_FOREACH(const CTxDestination& addr, addresses)
@@ -204,7 +210,8 @@ UniValue validateaddress(const JSONRPCRequest& request)
         if (pwalletMain && pwalletMain->mapAddressBook.count(dest))
             ret.push_back(Pair("account", pwalletMain->mapAddressBook[dest].name));
         CKeyID keyID;
-        if (pwalletMain && address.GetKeyID(keyID) && pwalletMain->mapKeyMetadata.count(keyID) && !pwalletMain->mapKeyMetadata[keyID].hdKeypath.empty())
+        CScriptID scriptID;
+        if (pwalletMain && (address.GetKeyID(keyID) || (address.GetScriptID(scriptID) && pwalletMain->GetWitnessKeyID(scriptID, keyID))) && pwalletMain->mapKeyMetadata.count(keyID) && !pwalletMain->mapKeyMetadata[keyID].hdKeypath.empty())
         {
             ret.push_back(Pair("hdkeypath", pwalletMain->mapKeyMetadata[keyID].hdKeypath));
             ret.push_back(Pair("hdmasterkeyid", pwalletMain->mapKeyMetadata[keyID].hdMasterKeyID.GetHex()));

@@ -133,7 +133,7 @@ UniValue importprivkey(const JSONRPCRequest& request)
         pwalletMain->MarkDirty();
         pwalletMain->SetAddressBook(vchAddress, strLabel, "receive");
 
-        if (IsWitnessEnabled(chainActive.Tip(), Params().GetConsensus()) || GetBoolArg("-walletprematurewitness", false)) {
+        if (IsWitnessEnabled(chainActive.Tip(), Params().GetConsensus())) {
             Witnessifier w;
             CTxDestination dest = CBitcoinAddress(vchAddress).Get();
             boost::apply_visitor(w, dest);

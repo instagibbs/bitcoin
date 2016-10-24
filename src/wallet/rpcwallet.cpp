@@ -139,7 +139,7 @@ UniValue getnewaddress(const JSONRPCRequest& request)
 
     pwalletMain->SetAddressBook(keyID, strAccount, "receive");
 
-    if (IsWitnessEnabled(chainActive.Tip(), Params().GetConsensus()) || GetBoolArg("-walletprematurewitness", false)) {
+    if (IsWitnessEnabled(chainActive.Tip(), Params().GetConsensus())) {
         Witnessifier w;
         CTxDestination dest = CBitcoinAddress(keyID).Get();
         boost::apply_visitor(w, dest);

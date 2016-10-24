@@ -230,7 +230,7 @@ class SegWitTest(BitcoinTestFramework):
         tmpl = self.nodes[0].getblocktemplate({'rules':['segwit']})
         assert(tmpl['sigoplimit'] == 80000)
         assert(tmpl['transactions'][0]['txid'] == txid)
-        assert(tmpl['transactions'][0]['sigops'] == 8)
+        assert(tmpl['transactions'][0]['sigops'] == 4)
 
         print("Verify non-segwit miners get a valid GBT response after the fork")
         send_to_witness(1, self.nodes[0], find_unspent(self.nodes[0], 50), self.pubkey[0], False, Decimal("49.998"))

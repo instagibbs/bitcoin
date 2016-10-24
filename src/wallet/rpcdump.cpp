@@ -539,11 +539,14 @@ UniValue dumpprivkey(const JSONRPCRequest& request)
 
     string strAddress = request.params[0].get_str();
     CBitcoinAddress address;
-    if (!address.SetString(strAddress))
+    if (!address.SetString(strAddress) || !address.IsValid())
         throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Bitcoin address");
     CKeyID keyID;
-    if (!address.GetKeyID(keyID))
+    CScriptID scriptID;
+    if ((!address.GetScriptID(scriptID) || !pwalletMain->GetWitnessKeyID(scriptID, keyID)) &&
+        !address.GetKeyID(keyID)) {
         throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to a key");
+    }
     CKey vchSecret;
     if (!pwalletMain->GetKey(keyID, vchSecret))
         throw JSONRPCError(RPC_WALLET_ERROR, "Private key for address " + strAddress + " is not known");

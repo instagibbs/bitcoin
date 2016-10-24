@@ -1016,51 +1016,6 @@ UniValue addmultisigaddress(const JSONRPCRequest& request)
     return CBitcoinAddress(innerID).ToString();
 }
 
-class Witnessifier : public boost::static_visitor<bool>
-{
-public:
-    CScriptID result;
-
-    bool operator()(const CNoDestination &dest) const { return false; }
-
-    bool operator()(const CKeyID &keyID) {
-        CPubKey pubkey;
-        if (pwalletMain) {
-            CScript basescript = GetScriptForDestination(keyID);
-            isminetype typ;
-            typ = IsMine(*pwalletMain, basescript, SIGVERSION_WITNESS_V0);
-            if (typ != ISMINE_SPENDABLE && typ != ISMINE_WATCH_SOLVABLE)
-                return false;
-            CScript witscript = GetScriptForWitness(basescript);
-            pwalletMain->AddCScript(witscript);
-            result = CScriptID(witscript);
-            return true;
-        }
-        return false;
-    }
-
-    bool operator()(const CScriptID &scriptID) {
-        CScript subscript;
-        if (pwalletMain && pwalletMain->GetCScript(scriptID, subscript)) {
-            int witnessversion;
-            std::vector<unsigned char> witprog;
-            if (subscript.IsWitnessProgram(witnessversion, witprog)) {
-                result = scriptID;
-                return true;
-            }
-            isminetype typ;
-            typ = IsMine(*pwalletMain, subscript, SIGVERSION_WITNESS_V0);
-            if (typ != ISMINE_SPENDABLE && typ != ISMINE_WATCH_SOLVABLE)
-                return false;
-            CScript witscript = GetScriptForWitness(subscript);
-            pwalletMain->AddCScript(witscript);
-            result = CScriptID(witscript);
-            return true;
-        }
-        return false;
-    }
-};
-
 UniValue addwitnessaddress(const JSONRPCRequest& request)
 {
     if (!EnsureWalletIsAvailable(request.fHelp))

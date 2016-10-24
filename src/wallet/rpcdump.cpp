@@ -133,6 +133,14 @@ UniValue importprivkey(const JSONRPCRequest& request)
         pwalletMain->MarkDirty();
         pwalletMain->SetAddressBook(vchAddress, strLabel, "receive");
 
+        if (IsWitnessEnabled(chainActive.Tip(), Params().GetConsensus()) || GetBoolArg("-walletprematurewitness", false)) {
+            Witnessifier w;
+            CTxDestination dest = CBitcoinAddress(vchAddress).Get();
+            boost::apply_visitor(w, dest);
+
+            pwalletMain->SetAddressBook(w.result, strLabel, "receive");
+        }
+
         // Don't throw error in case a key is already there
         if (pwalletMain->HaveKey(vchAddress))
             return NullUniValue;

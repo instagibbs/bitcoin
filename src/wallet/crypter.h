@@ -195,6 +195,9 @@ public:
         }
     }
 
+    //Retrieves p2sh-p2wpkh's key ID
+    bool GetWitnessKeyID(const CScriptID &scriptID, CKeyID &keyID) const;
+
     /**
      * Wallet status (encrypted, locked) changed.
      * Note: Called without locks held.

@@ -277,6 +277,20 @@ bool CCryptoKeyStore::GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) co
     return false;
 }
 
+bool CCryptoKeyStore::GetWitnessKeyID(const CScriptID &scriptID, CKeyID &keyID) const
+{
+    CScript subscript;
+    int witnessVer = 0;
+    std::vector<unsigned char> witnessProgram;
+    if (!GetCScript(scriptID, subscript) ||
+        !subscript.IsWitnessProgram(witnessVer, witnessProgram) ||
+        witnessProgram.size() != 20) {
+        return false;
+    }
+    keyID = CKeyID(uint160(witnessProgram));
+    return true;
+}
+
 bool CCryptoKeyStore::EncryptKeys(CKeyingMaterial& vMasterKeyIn)
 {
     {

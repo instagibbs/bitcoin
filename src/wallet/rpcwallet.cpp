@@ -525,7 +525,8 @@ UniValue signmessage(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_TYPE_ERROR, "Invalid address");
 
     CKeyID keyID;
-    if (!addr.GetKeyID(keyID))
+    CScriptID scriptID;
+    if (!addr.GetKeyID(keyID) && (!addr.GetScriptID(scriptID) || !pwalletMain->GetWitnessKeyID(scriptID, keyID)))
         throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
 
     CKey key;

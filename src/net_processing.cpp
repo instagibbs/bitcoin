@@ -104,6 +104,7 @@ namespace {
         CBlockIndex* pindex;                                     //!< Optional.
         bool fValidatedHeaders;                                  //!< Whether this block has validated headers at the time of request.
         std::unique_ptr<PartiallyDownloadedBlock> partialBlock;  //!< Optional, used for CMPCTBLOCK downloads
+        bool fTimeoutGETBLOCKTXNSent;                          //!< Whether we have responded to other peers' CMPCTBLOCK messages with a GETBLOCKTXN
     };
     map<uint256, pair<NodeId, list<QueuedBlock>::iterator> > mapBlocksInFlight;
 
@@ -346,7 +347,7 @@ bool MarkBlockAsInFlight(NodeId nodeid, const uint256& hash, const Consensus::Pa
     MarkBlockAsReceived(hash);
 
     list<QueuedBlock>::iterator it = state->vBlocksInFlight.insert(state->vBlocksInFlight.end(),
-            {hash, pindex, pindex != NULL, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&mempool) : NULL)});
+            {hash, pindex, pindex != NULL, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&mempool) : NULL), false});
     state->nBlocksInFlight++;
     state->nBlocksInFlightValidHeaders += it->fValidatedHeaders;
     if (state->nBlocksInFlight == 1) {
@@ -1887,10 +1888,33 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                     // TODO: don't ignore failures
                     return true;
                 }
+
+                bool fIsHBPeer = false;
+                for (std::list<NodeId>::iterator hbIt = lNodesAnnouncingHeaderAndIDs.begin(); hbIt != lNodesAnnouncingHeaderAndIDs.end(); hbIt++) {
+                    if (*hbIt == pfrom->GetId())
+                        fIsHBPeer = true;
+                }
+
                 std::vector<CTransactionRef> dummy;
                 status = tempBlock.FillBlock(*pblock, dummy);
+                // Failure here simply means we don't have enough information
+                // not necessarily bad block
                 if (status == READ_STATUS_OK) {
                     fBlockReconstructed = true;
+                }
+                // Already in flight from different peer, and we didn't have all transactions.
+                // Just send a GETBLOCKTXN to this peer anyways while we wait for req block.
+                // We send this response to all known HB peers, and up to one unprompted CMPCTBLOCK
+                // message from a non-HB peer if received first.
+                else if (fAlreadyInFlight && blockInFlightIt->second.first != pfrom->GetId() && status == READ_STATUS_INVALID && (fIsHBPeer || blockInFlightIt->second.second->fTimeoutGETBLOCKTXNSent == false)){
+                    blockInFlightIt->second.second->fTimeoutGETBLOCKTXNSent = true;
+                    BlockTransactionsRequest req;
+                    for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+                        if (!tempBlock.IsTxAvailable(i))
+                            req.indexes.push_back(i);
+                    }
+                    req.blockhash = pindex->GetBlockHash();
+                    connman.PushMessage(pfrom, msgMaker.Make(NetMsgType::GETBLOCKTXN, req));
                 }
             }
         } else {

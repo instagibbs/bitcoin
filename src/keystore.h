@@ -104,6 +104,7 @@ public:
     virtual bool AddWatchOnly(const CScript &dest);
     virtual bool RemoveWatchOnly(const CScript &dest);
     virtual bool HaveWatchOnly(const CScript &dest) const;
+    virtual bool HaveWatchOnly(const CKeyID &keyId) const;
     virtual bool HaveWatchOnly() const;
 };
 

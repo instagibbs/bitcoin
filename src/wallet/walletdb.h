@@ -63,10 +63,14 @@ public:
     uint32_t nExternalChainCounter;
     uint32_t nInternalChainCounter;
     CKeyID masterKeyID; //!< master key hash160
+    CExtPubKey masterPubKey;
+    bool isWatchOnly = false;
 
     static const int VERSION_HD_BASE        = 1;
     static const int VERSION_HD_CHAIN_SPLIT = 2;
-    static const int CURRENT_VERSION        = VERSION_HD_CHAIN_SPLIT;
+    static const int SUPPORT_WATCHONLY_VERSION = 3;
+    static const int CURRENT_VERSION        = SUPPORT_WATCHONLY_VERSION;
+
     int nVersion;
 
     CHDChain() { SetNull(); }
@@ -79,6 +83,11 @@ public:
         READWRITE(masterKeyID);
         if (this->nVersion >= VERSION_HD_CHAIN_SPLIT)
             READWRITE(nInternalChainCounter);
+        if (this->nVersion >= SUPPORT_WATCHONLY_VERSION) {
+            READWRITE(isWatchOnly);
+            if(isWatchOnly)
+                READWRITE(masterPubKey);
+        }
     }
 
     void SetNull()

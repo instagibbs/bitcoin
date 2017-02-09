@@ -105,6 +105,7 @@ public:
     virtual bool RemoveWatchOnly(const CScript &dest) override;
     virtual bool HaveWatchOnly(const CScript &dest) const override;
     virtual bool HaveWatchOnly() const override;
+    virtual bool HaveWatchOnly(const CKeyID &keyId) const override;
 };
 
 typedef std::vector<unsigned char, secure_allocator<unsigned char> > CKeyingMaterial;

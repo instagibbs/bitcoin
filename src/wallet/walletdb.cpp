@@ -68,6 +68,14 @@ bool CWalletDB::EraseTx(uint256 hash)
     return batch.Erase(std::make_pair(std::string("tx"), hash));
 }
 
+bool CWalletDB::WriteKeyMeta(const CPubKey& vchPubKey, const CKeyMetadata& keyMeta)
+{
+    if (!batch.Write(std::make_pair(std::string("keymeta"), vchPubKey),
+               keyMeta, false))
+        return false;
+    return true;
+}
+
 bool CWalletDB::WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, const CKeyMetadata& keyMeta)
 {
     nWalletDBUpdateCounter++;

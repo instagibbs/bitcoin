@@ -891,7 +891,7 @@ public:
 
     //! Adds a watch-only address to the store, and saves it to disk.
     bool AddWatchOnly(const CScript& dest, int64_t nCreateTime);
-    bool AddWatchOnly(const CPubKey &pubkey, int64_t nCreateTime);
+    bool AddWatchOnly(const CPubKey &pubkey, const CKeyMetadata& meta, int64_t nCreateTime);
 
     bool RemoveWatchOnly(const CScript &dest) override;
     //! Adds a watch-only address to the store, without saving it to disk (used by LoadWallet)

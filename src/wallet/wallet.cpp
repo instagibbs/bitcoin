@@ -119,7 +119,7 @@ CPubKey CWallet::GenerateNewKey(bool internal)
             throw std::runtime_error(std::string(__func__) + ": AddKey failed");
     }
     else {
-        if (!AddWatchOnly(pubkey, nCreationTime))
+        if (!AddWatchOnly(pubkey, metadata, nCreationTime))
             throw std::runtime_error(std::string(__func__) + ": AddWatchOnly failed");
     }
     return pubkey;
@@ -309,16 +309,26 @@ bool CWallet::AddWatchOnly(const CScript& dest, int64_t nCreateTime)
     return AddWatchOnly(dest);
 }
 
-bool CWallet::AddWatchOnly(const CPubKey &pubkey, int64_t nCreateTime)
+bool CWallet::AddWatchOnly(const CPubKey &pubkey, const CKeyMetadata& meta, int64_t nCreateTime)
 {
     auto script = GetScriptForDestination(pubkey.GetID());
     if (!HaveWatchOnly(script))
+    {
+        mapKeyMetadata[CScriptID(script)] = meta;
         if (!AddWatchOnly(script, nCreateTime))
             return false;
+    }
+
+    if (!CWalletDB(*dbw).WriteKeyMeta(pubkey, meta))
+        return false;
+
     script = GetScriptForRawPubKey(pubkey);
     if (!HaveWatchOnly(script))
+    {
+        mapKeyMetadata[CScriptID(script)] = meta;
         if (!AddWatchOnly(script, nCreateTime))
             return false;
+    }
     return true;
 }
 

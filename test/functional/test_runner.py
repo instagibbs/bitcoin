@@ -122,6 +122,7 @@ BASE_SCRIPTS= [
     'uptime.py',
     'resendwallettransactions.py',
     'minchainwork.py',
+    'externalhd.py'
     'p2p-acceptblock.py',
 ]
 

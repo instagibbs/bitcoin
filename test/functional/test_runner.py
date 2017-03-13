@@ -112,6 +112,7 @@ BASE_SCRIPTS= [
     'listsinceblock.py',
     'p2p-leaktests.py',
     'wallet-encryption.py',
+    'hdwatchonly.py'
 ]
 
 EXTENDED_SCRIPTS = [

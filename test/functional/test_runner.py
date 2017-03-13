@@ -120,6 +120,7 @@ BASE_SCRIPTS= [
     'bip65-cltv-p2p.py',
     'uptime.py',
     'resendwallettransactions.py',
+    'externalhd.py'
 ]
 
 EXTENDED_SCRIPTS = [

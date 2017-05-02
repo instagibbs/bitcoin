@@ -2639,6 +2639,25 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                         std::vector<CTxOut>::iterator change_position = txNew.vout.begin()+nChangePosInOut;
                         change_position->nValue += excessFee;
                         nFeeRet -= excessFee;
+                    } else if (nChangePosInOut == -1 && nSubtractFeeFromAmount == 0) {
+                        bool ret;
+                        ret = reservekey.GetReservedKey(vchPubKey, true);
+                        scriptChange = GetScriptForDestination(vchPubKey.GetID());
+                        CTxOut newTxOut(nChange, scriptChange);
+                        // Create change output if difference is non-dust level
+						if (newTxOut.IsDust(dustRelayFee)) {
+                            reservekey.ReturnKey();
+						} else {
+                            CMutableTransaction txNewChange(txNew);
+                            std::vector<CTxOut>::iterator position = txNewChange.vout.begin()+nChangePosRequest;
+                            txNewChange.vout.insert(position, newTxOut);
+                            nBytes = GetVirtualTransactionSize(txNewChange);
+                            nFeeNeeded = GetMinimumFee(nBytes, currentConfirmationTarget, ::mempool, ::feeEstimator);
+                            if (excessFee - nFeeNeeded > 0) {
+                                // Success!
+                                txNew = txNewChange;
+                            }
+                        }
                     }
                     break;
                 } else {

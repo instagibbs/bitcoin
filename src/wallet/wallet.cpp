@@ -2619,10 +2619,15 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                     return false;
                 }
 
-                if (nFeeRet >= nFeeNeeded) {
-                    // Reduce fee to only the needed amount if we have change
-                    // output to increase.  This prevents potential overpayment
-                    // in fees if the coins selected to meet nFeeNeeded result
+                // Possibly adjust final fee before signing
+                CAmount excessFee = nFeeRet - nFeeNeeded;
+                if (excessFee == 0) {
+                    break; // Done, enough fee included and no adjustments to make.
+                }
+                else if (excessFee > 0) {
+                    // Reduce fee to only the needed amount.
+                    // This prevents potential overpayment in fees if
+                    // the coins selected to meet nFeeNeeded result
                     // in a transaction that requires less fee than the prior
                     // iteration.
                     // TODO: The case where nSubtractFeeFromAmount > 0 remains
@@ -2630,30 +2635,28 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                     // the payees and not the change output.
                     // TODO: The case where there is no change output remains
                     // to be addressed so we avoid creating too small an output.
-                    if (nFeeRet > nFeeNeeded && nChangePosInOut != -1 && nSubtractFeeFromAmount == 0) {
-                        CAmount extraFeePaid = nFeeRet - nFeeNeeded;
+                    if (nChangePosInOut != -1 && nSubtractFeeFromAmount == 0) {
                         std::vector<CTxOut>::iterator change_position = txNew.vout.begin()+nChangePosInOut;
-                        change_position->nValue += extraFeePaid;
-                        nFeeRet -= extraFeePaid;
+                        change_position->nValue += excessFee;
+                        nFeeRet -= excessFee;
                     }
-                    break; // Done, enough fee included.
-                }
+                    break;
+                } else {
 
-                // Try to reduce change to include necessary fee
-                if (nChangePosInOut != -1 && nSubtractFeeFromAmount == 0) {
-                    CAmount additionalFeeNeeded = nFeeNeeded - nFeeRet;
-                    std::vector<CTxOut>::iterator change_position = txNew.vout.begin()+nChangePosInOut;
-                    // Only reduce change if remaining amount is still a large enough output.
-                    if (change_position->nValue >= MIN_FINAL_CHANGE + additionalFeeNeeded) {
-                        change_position->nValue -= additionalFeeNeeded;
-                        nFeeRet += additionalFeeNeeded;
-                        break; // Done, able to increase fee from change
+                    // Try to reduce change to include necessary fee
+                    if (nChangePosInOut != -1 && nSubtractFeeFromAmount == 0) {
+                        std::vector<CTxOut>::iterator change_position = txNew.vout.begin()+nChangePosInOut;
+                        // Only reduce change if remaining amount is still a large enough output.
+                        if (change_position->nValue >= MIN_FINAL_CHANGE + excessFee) {
+                            change_position->nValue -= excessFee;
+                            nFeeRet += excessFee;
+                            break; // Done, able to increase fee from change
+                        }
                     }
                 }
 
                 // Include more fee and try again.
                 nFeeRet = nFeeNeeded;
-                continue;
             }
         }
 

@@ -527,14 +527,19 @@ public:
      */
     bool fSafe;
 
+    bool fIsWitnessOutput;
+
     COutput(const CWalletTx *txIn, int iIn, int nDepthIn, bool fSpendableIn, bool fSolvableIn, bool fSafeIn)
     {
-        tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn; nInputBytes = -1;
+        tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn; nInputBytes = -1; fIsWitnessOutput = false;
         // If known and signable by the given wallet, compute nInputBytes
         // Failure will keep this value -1
         if (fSpendable && tx) {
             nInputBytes = tx->GetSpendSize(i);
         }
+        int witnessversion = 0;
+        std::vector<unsigned char> witnessprogram;
+        fIsWitnessOutput = tx->tx->vout[i].scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram);
     }
 
     std::string ToString() const;

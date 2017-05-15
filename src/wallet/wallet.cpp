@@ -2175,7 +2175,8 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
 
         int i = output.i;
 
-        CInputCoin coin = CInputCoin(pcoin, i, effectiveFee.GetFee(output.nInputBytes));
+        // Tests do not cache effective size of input, avoid assertion
+        CInputCoin coin = CInputCoin(pcoin, i, effectiveFee.GetFee((output.nInputBytes == -1) ? 0 : output.nInputBytes));
 
         if (coin.eValue == nTargetValue)
         {

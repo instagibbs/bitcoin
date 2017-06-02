@@ -4188,6 +4188,11 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
     }
 
+    if (gArgs.IsArgSet("-hardwarewallet") && !walletInstance->IsExternalHD()) {
+        InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
+        return NULL;
+    }
+
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);
 
     RegisterValidationInterface(walletInstance);

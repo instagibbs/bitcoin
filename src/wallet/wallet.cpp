@@ -1400,7 +1400,17 @@ CAmount CWallet::GetDebit(const CTxIn &txin, const isminefilter& filter) const
 
 isminetype CWallet::IsMine(const CTxOut& txout) const
 {
-    return ::IsMine(*this, txout.scriptPubKey);
+    isminetype mine = ::IsMine(*this, txout.scriptPubKey);
+
+    if (IsHardwareWallet()) {
+        if (mine == ISMINE_WATCH_UNSOLVABLE) {
+            return ISMINE_NO;
+        } else if (mine == ISMINE_WATCH_SOLVABLE) {
+            return ISMINE_SPENDABLE;
+        }
+    }
+
+    return mine;
 }
 
 CAmount CWallet::GetCredit(const CTxOut& txout, const isminefilter& filter) const

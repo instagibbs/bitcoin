@@ -1456,6 +1456,12 @@ bool CWallet::IsHardwareWallet() const
     return !GetArg("-hardwarewallet", "").empty();
 }
 
+bool CWallet::CallHardwareWallet(const CTransaction& tx, const std::set<CInputCoin>& setCoins, std::string& strFailReason, CMutableTransaction& txRet) const
+{
+    strFailReason = _("Signing transaction failed");
+    return false;
+}
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;
@@ -2883,7 +2889,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
             CTransaction txNewConst(txNew);
 
             if (IsHardwareWallet()) {
-                if (!CallHardwareWallet(txNewConst, setCoins, txNew)) {
+                if (!CallHardwareWallet(txNewConst, setCoins, strFailReason, txNew)) {
                     return false;
                 }
             } else {

@@ -1592,6 +1592,11 @@ bool CWallet::IsExternalHD() const
     return IsHDEnabled() && hdChain.isExternalHD;
 }
 
+bool CWallet::IsHardwareWallet() const
+{
+    return !gArgs.GetArg("-hardwarewallet", "").empty();
+}
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;
@@ -3959,7 +3964,6 @@ std::vector<std::string> CWallet::GetDestValues(const std::string& prefix) const
     return values;
 }
 
-    strUsage += HelpMessageOpt("-externalhd", _("Create a new external-HD wallet from a BIP32 HD public key"));
 CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
 {
     // needed to restore wallet transaction meta data after -zapwallettxes

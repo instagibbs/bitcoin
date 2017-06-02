@@ -1118,8 +1118,11 @@ public:
     bool IsHDEnabled() const;
     /* Returns true if HD is enabled and is watch only */
     bool IsHDWatchOnly() const;
+
     /* Returns true if this wallet is for a hardware wallet */
     bool IsHardwareWallet() const;
+    /* Produces a signed transaction using the hardware wallet */
+    bool CallHardwareWallet(const CTransaction& tx, const std::set<CInputCoin>& setCoins, CMutableTransaction& txRet) const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();

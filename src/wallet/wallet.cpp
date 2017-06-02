@@ -2881,21 +2881,28 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
         if (sign)
         {
             CTransaction txNewConst(txNew);
-            int nIn = 0;
-            for (const auto& coin : setCoins)
-            {
-                const CScript& scriptPubKey = coin.txout.scriptPubKey;
-                SignatureData sigdata;
 
-                if (!ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
-                {
-                    strFailReason = _("Signing transaction failed");
+            if (IsHardwareWallet()) {
+                if (!CallHardwareWallet(txNewConst, setCoins, txNew)) {
                     return false;
-                } else {
-                    UpdateTransaction(txNew, nIn, sigdata);
                 }
+            } else {
+                int nIn = 0;
+                for (const auto& coin : setCoins)
+                {
+                    const CScript& scriptPubKey = coin.txout.scriptPubKey;
+                    SignatureData sigdata;
 
-                nIn++;
+                    if (!ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
+                    {
+                        strFailReason = _("Signing transaction failed");
+                        return false;
+                    } else {
+                        UpdateTransaction(txNew, nIn, sigdata);
+                    }
+
+                    nIn++;
+                }
             }
         }
 

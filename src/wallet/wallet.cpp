@@ -1634,6 +1634,121 @@ UniValue CWallet::CallHardwareWallet(const UniValue valRequest) const
     return valReply;
 }
 
+bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs) const
+{
+    entry.pushKV("txid", tx.GetHash().GetHex());
+    entry.pushKV("hash", tx.GetWitnessHash().GetHex());
+    entry.pushKV("version", tx.nVersion);
+    entry.pushKV("size", (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION));
+    entry.pushKV("vsize", (GetTransactionWeight(tx) + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR);
+    entry.pushKV("locktime", (int64_t)tx.nLockTime);
+
+    UniValue vin(UniValue::VARR);
+    for (const CTxIn& txin : tx.vin) {
+        UniValue in(UniValue::VOBJ);
+
+        in.pushKV("txid", txin.prevout.hash.GetHex());
+        in.pushKV("vout", (int64_t)txin.prevout.n);
+        in.pushKV("sequence", (int64_t)txin.nSequence);
+
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("asm", ScriptToAsmStr(txin.scriptSig, true));
+        o.pushKV("hex", HexStr(txin.scriptSig.begin(), txin.scriptSig.end()));
+        in.pushKV("scriptSig", o);
+
+        if (!txin.scriptWitness.IsNull()) {
+            UniValue txinwitness(UniValue::VARR);
+            for (const auto& item : txin.scriptWitness.stack) {
+                txinwitness.push_back(HexStr(item.begin(), item.end()));
+            }
+            in.pushKV("txinwitness", txinwitness);
+        }
+
+        if (prevtxs != NULL) {
+            const CWalletTx *wtx = GetWalletTx(txin.prevout.hash);
+
+            if (wtx != NULL) {
+                const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
+
+                const auto& it = mapKeyMetadata.find(CScriptID(prevout.scriptPubKey));
+                if (it != mapKeyMetadata.end()) {
+                    in.pushKV("hdKeypath", it->second.hdKeypath);
+
+                    UniValue prevtx(UniValue::VOBJ);
+                    TransactionToHWWUniv(*wtx->tx, prevtx);
+
+                    prevtxs->push_back(prevtx);
+                }
+            }
+        }
+
+        vin.push_back(in);
+    }
+    entry.pushKV("vin", vin);
+
+    UniValue vout(UniValue::VARR);
+    for (unsigned int i = 0; i < tx.vout.size(); i++) {
+        const CTxOut& txout = tx.vout[i];
+        UniValue out(UniValue::VOBJ);
+
+        UniValue outValue(UniValue::VNUM, FormatMoney(txout.nValue));
+        out.pushKV("value", outValue);
+        out.pushKV("n", (int64_t)i);
+
+        UniValue o(UniValue::VOBJ);
+        ScriptPubKeyToUniv(txout.scriptPubKey, o, true);
+        out.pushKV("scriptPubKey", o);
+
+        if (IsChange(txout)) {
+            const auto& it = mapKeyMetadata.find(CScriptID(txout.scriptPubKey));
+            if (it != mapKeyMetadata.end()) {
+                out.pushKV("hdKeypath", it->second.hdKeypath);
+            }
+        }
+
+        vout.push_back(out);
+    }
+    entry.pushKV("vout", vout);
+
+    entry.pushKV("hex", EncodeHexTx(tx)); // the hex-encoded transaction. used the name "hex" to be consistent with the verbose output of "getrawtransaction".
+
+    return true;
+}
+
+bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const
+{
+    UniValue params(UniValue::VARR);
+
+    UniValue tx(UniValue::VOBJ);
+    UniValue prevtxs(UniValue::VARR);
+
+    TransactionToHWWUniv(transaction, tx, &prevtxs);
+
+    params.push_back(tx.write());
+    params.push_back(prevtxs.write());
+
+    const std::string strMethod = "signhwwtransaction";
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj(strMethod, params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& hex = find_value(result, "hex");
+
+        if (!DecodeHexTx(txRet, hex.getValStr())) {
+            strFailReason = _("Signing transaction failed");
+
+            return false;
+        } else {
+            return true;
+        }
+    } else {
+        strFailReason = find_value(error, "message").getValStr();
+        return false;
+    }
+}
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;
@@ -3090,21 +3205,28 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
         if (sign)
         {
             CTransaction txNewConst(txNew);
-            int nIn = 0;
-            for (const auto& coin : setCoins)
-            {
-                const CScript& scriptPubKey = coin.txout.scriptPubKey;
-                SignatureData sigdata;
 
-                if (!ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
-                {
-                    strFailReason = _("Signing transaction failed");
+            if (IsHardwareWallet()) {
+                if (!SignHWWTransaction(txNewConst, strFailReason, txNew)) {
                     return false;
-                } else {
-                    UpdateTransaction(txNew, nIn, sigdata);
                 }
+            } else {
+                int nIn = 0;
+                for (const auto& coin : setCoins)
+                {
+                    const CScript& scriptPubKey = coin.txout.scriptPubKey;
+                    SignatureData sigdata;
 
-                nIn++;
+                    if (!ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
+                    {
+                        strFailReason = _("Signing transaction failed");
+                        return false;
+                    } else {
+                        UpdateTransaction(txNew, nIn, sigdata);
+                    }
+
+                    nIn++;
+                }
             }
         }
 

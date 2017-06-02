@@ -1122,6 +1122,8 @@ public:
     bool IsHDEnabled() const;
     /* Returns true if HD is enabled and is watch only */
     bool IsHDWatchOnly() const;
+    /* Returns true if this wallet is for a hardware wallet */
+    bool IsHardwareWallet() const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();

@@ -3951,6 +3951,11 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
     }
 
+    if (!GetArg("-hardwarewallet", "").empty() && !walletInstance->IsHDWatchOnly()) {
+        InitError(_("Cannot specify hardwarewallet on a non-hdwatchonly wallet"));
+        return NULL;
+    }
+
     if (fFirstRun)
     {
         // Create new keyUser and set as default key

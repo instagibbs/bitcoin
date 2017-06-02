@@ -1143,6 +1143,10 @@ public:
     bool IsHardwareWallet() const;
     /* Sends a JSON-RPC message to the hardware wallet plugin */
     UniValue CallHardwareWallet(const UniValue valRequest) const;
+    /* Converts transaction to hardware wallet plugin UniValue */
+    bool TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs = NULL) const;
+    /* Produces a signed transaction using the hardware wallet */
+    bool SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();

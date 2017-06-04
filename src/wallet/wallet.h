@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include <univalue.h>
+
 extern CWallet* pwalletMain;
 
 /**
@@ -1121,6 +1123,8 @@ public:
 
     /* Returns true if this wallet is for a hardware wallet */
     bool IsHardwareWallet() const;
+    /* Sends a JSON-RPC message to the hardware wallet plugin */
+    UniValue CallHardwareWallet(const UniValue valRequest) const;
     /* Produces a signed transaction using the hardware wallet */
     bool CallHardwareWallet(const CTransaction& tx, const std::set<CInputCoin>& setCoins, std::string& strFailReason, CMutableTransaction& txRet) const;
 

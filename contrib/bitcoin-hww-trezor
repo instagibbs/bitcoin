@@ -1,0 +1,75 @@
+#!/usr/bin/env python2
+from __future__ import print_function
+from bitcoin.core import CTransaction
+from bitcoin.wallet import CBitcoinAddress
+from jsonrpc import JSONRPCResponseManager, Dispatcher
+from trezorlib import types_pb2
+from trezorlib.client import TrezorClient
+from trezorlib.transport_hid import HidTransport
+from trezorlib.tx_api import TxApi
+import binascii, json, sys
+
+class PrevTxsApi(TxApi):
+    def __init__(self, prevtxs):
+        self.transactions = {}
+        for prevtx in prevtxs:
+            txid = prevtx["txid"]
+            tx = CTransaction.deserialize(binascii.unhexlify(prevtx["transaction"]))
+            transaction = self.transactions[txid] = types_pb2.TransactionType()
+
+            transaction.version = tx.nVersion
+            transaction.lock_time = tx.nLockTime
+
+            for txin in tx.vin:
+                vin = transaction.inputs.add()
+                vin.prev_hash = txin.prevout.hash[::-1]
+                vin.prev_index = txin.prevout.n
+                vin.script_sig = txin.scriptSig
+                vin.sequence = txin.nSequence
+
+            for txout in tx.vout:
+                vout = transaction.bin_outputs.add()
+                vout.amount = txout.nValue
+                vout.script_pubkey = txout.scriptPubKey
+
+    def get_tx(self, txhash):
+        return self.transactions[txhash]
+
+def signrawtransaction(hexstring, prevtxs, privkeys):
+    devices = HidTransport.enumerate()
+    assert len(devices) != 0, "No TREZOR found"
+    assert len(devices) == 1, "More than one TREZOR found"
+
+    transport = HidTransport(devices[0])
+    client = TrezorClient(transport)
+    client.set_tx_api(PrevTxsApi(json.loads(prevtxs)))
+
+    transaction = binascii.unhexlify(hexstring)
+    tx = CTransaction.deserialize(transaction)
+    hdKeypaths = json.loads(privkeys)
+
+    inputs = []
+    for txin in tx.vin:
+        inputs.append(types_pb2.TxInputType(
+            prev_hash=txin.prevout.hash[::-1],
+            prev_index=txin.prevout.n,
+            address_n=client.expand_path("m/44'/1'/0'") + client.expand_path(hdKeypaths.pop(0))
+        ))
+
+    outputs = []
+    for txout in tx.vout:
+        outputs.append(types_pb2.TxOutputType(
+            amount=txout.nValue,
+            script_type=types_pb2.PAYTOADDRESS,
+            address=str(CBitcoinAddress.from_scriptPubKey(txout.scriptPubKey))
+        ))
+
+    return { "hex": binascii.hexlify(client.sign_tx("Bitcoin", inputs, outputs)[1]) }
+
+dispatcher = Dispatcher({
+    "signrawtransaction": signrawtransaction,
+})
+
+request = sys.stdin.read()
+response = JSONRPCResponseManager.handle(request, dispatcher)
+print(response.json)

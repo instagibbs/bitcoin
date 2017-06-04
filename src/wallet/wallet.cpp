@@ -1489,6 +1489,40 @@ bool CWallet::CallHardwareWallet(const CTransaction& tx, const std::set<CInputCo
     UniValue params(UniValue::VARR);
     params.push_back(EncodeHexTx(tx));
 
+    UniValue prevtxs(UniValue::VARR);
+    UniValue privkeys(UniValue::VARR);
+
+    for (const auto& coin : setCoins) {
+        auto it = mapKeyMetadata.find(CScriptID(coin.txout.scriptPubKey));
+        if (it != mapKeyMetadata.end()) {
+            const CKeyMetadata& meta = it->second;
+            const CWalletTx *wtx = GetWalletTx(coin.outpoint.hash);
+
+            if (wtx != NULL) {
+                UniValue txout(UniValue::VOBJ);
+                txout.pushKV("txid", coin.outpoint.hash.GetHex());
+                txout.pushKV("vout", (uint64_t)coin.outpoint.n);
+
+                const CScript& scriptPubKey = coin.txout.scriptPubKey;
+                txout.pushKV("scriptPubKey", HexStr(scriptPubKey.begin(), scriptPubKey.end()));
+
+                CScript redeemScript;
+                if (GetCScript(scriptPubKey, redeemScript)) {
+                    txout.pushKV("redeemScript", HexStr(redeemScript.begin(), redeemScript.end()));
+                }
+
+                txout.pushKV("amount", coin.txout.nValue);
+                txout.pushKV("transaction", EncodeHexTx(*wtx->tx));
+
+                prevtxs.push_back(txout);
+                privkeys.push_back(meta.hdKeypath);
+            }
+        }
+    }
+
+    params.push_back(prevtxs.write());
+    params.push_back(privkeys.write());
+
     const std::string strMethod = "signrawtransaction";
     UniValue valReply = CallHardwareWallet(JSONRPCRequestObj(strMethod, params, 1));
 

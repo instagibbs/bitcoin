@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include <univalue.h>
+
 typedef CWallet* CWalletRef;
 extern std::vector<CWalletRef> vpwallets;
 
@@ -1124,6 +1126,8 @@ public:
     bool IsHDWatchOnly() const;
     /* Returns true if this wallet is for a hardware wallet */
     bool IsHardwareWallet() const;
+    /* Sends a JSON-RPC message to the hardware wallet plugin */
+    UniValue CallHardwareWallet(const UniValue valRequest) const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();

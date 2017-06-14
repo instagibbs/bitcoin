@@ -12,7 +12,7 @@ struct {
     }
 } descending;
 
-bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint>>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::vector<std::pair<CAmount, COutPoint>>& out_set, FastRandomContext& rand)
+bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint>>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::vector<std::pair<CAmount, COutPoint>>& out_set, FastRandomContext* rand, bool exclude_first)
 {
     if (utxo_pool.size() <=0) {
         return false;
@@ -20,7 +20,7 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
 
     CAmount selected_value = 0;
     int depth = 0;
-    int tries = 1000000;
+    int tries = 100000;
     std::vector<std::pair<bool, bool>> selection; // First bool: select the utxo at this index; Second bool: traversing second branch of this utxo
     selection.assign(utxo_pool.size(), std::pair<bool, bool>(false, false));
     bool done = false;
@@ -42,7 +42,7 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
             backtrack = true;
         } else { // Continue down this branch
             // Randomly choose to explore either inclusion or exclusion branch
-            if (rand.randbool()) {
+            if (rand == nullptr || (!exclude_first && rand->randbool())) {
                 // Inclusion branch first
                 selection[depth].first = true;
                 selected_value += utxo_pool.at(depth).first;

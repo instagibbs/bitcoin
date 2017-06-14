@@ -15,7 +15,8 @@
 class CoinSelector
 {
 public:
-    static bool BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint>>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::vector<std::pair<CAmount, COutPoint>>& out_set, FastRandomContext& rand);
+    // rand can be nullptr, but only for testing. exclude_first should only ever be true in tests.
+    static bool BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint>>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::vector<std::pair<CAmount, COutPoint>>& out_set, FastRandomContext* rand, bool exclude_first = false);
     
 };
 

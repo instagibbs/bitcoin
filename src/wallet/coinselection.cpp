@@ -2,17 +2,17 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include "coinselection.h"
+#include "wallet/coinselection.h"
 
 // Descending order comparator
 struct {
-    bool operator()(std::pair<CAmount, COutPoint> a, std::pair<CAmount, COutPoint> b) const
+    bool operator()(CInputCoin a, CInputCoin b) const
     {
-        return a.first > b.first;
+        return a.txout.nValue > b.txout.nValue;
     }
 } descending;
 
-bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint>>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::vector<std::pair<CAmount, COutPoint>>& out_set, FastRandomContext* rand, bool exclude_first)
+bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::vector<CInputCoin>& out_set, FastRandomContext* rand)
 {
     if (utxo_pool.size() <=0) {
         return false;
@@ -31,8 +31,8 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
     
     // Calculate remaining
     CAmount remaining = 0;
-    for (std::pair<CAmount, COutPoint> utxo : utxo_pool) {
-        remaining += utxo.first;
+    for (CInputCoin utxo : utxo_pool) {
+        remaining += utxo.txout.nValue;
     }
     
     // Depth first search to find 
@@ -54,12 +54,12 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
             }
         } else { // Continue down this branch
             // Remove this utxo from the remaining utxo amount
-            remaining -= utxo_pool.at(depth).first;
+            remaining -= utxo_pool.at(depth).txout.nValue;
             // Randomly choose to explore either inclusion or exclusion branch
-            if (rand == nullptr || (!exclude_first && rand->randbool())) {
+            if (rand == nullptr || rand->randbool()) {
                 // Inclusion branch first
                 selection[depth].first = true;
-                selected_value += utxo_pool.at(depth).first;
+                selected_value += utxo_pool.at(depth).txout.nValue;
                 ++depth;
             } else {
                 // Exclusion branch first
@@ -77,11 +77,11 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
             while (selection[depth].second) {
                 // Reset this utxo's selection
                 if (selection[depth].first) {
-                    selected_value -= utxo_pool.at(depth).first;
+                    selected_value -= utxo_pool.at(depth).txout.nValue;
                 }
                 selection[depth].first = false;
                 selection[depth].second = false;
-                remaining += utxo_pool.at(depth).first;
+                remaining += utxo_pool.at(depth).txout.nValue;
 
                 // Step back one
                 --depth;
@@ -97,12 +97,12 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
 
                 if(selection[depth].first) { // If it was included, do exclusion now
                     selection[depth].first = false;
-                    selected_value -= utxo_pool.at(depth).first;
+                    selected_value -= utxo_pool.at(depth).txout.nValue;
                     ++depth;
                 }
                 else { // It was excluded first, do inclusion now
                     selection[depth].first = true;
-                    selected_value += utxo_pool.at(depth).first;
+                    selected_value += utxo_pool.at(depth).txout.nValue;
                     ++ depth;
                 }
             }
@@ -120,3 +120,4 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
 
     return true;
 }
+

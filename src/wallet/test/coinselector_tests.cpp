@@ -2,24 +2,28 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include "coinselection.h"
+#include "wallet/wallet.h"
+#include "wallet/coinselection.h"
 #include "amount.h"
 #include "primitives/transaction.h"
 #include "random.h"
 #include "test/test_bitcoin.h"
+#include "wallet/test/wallet_test_fixture.h"
 
 #include <boost/test/unit_test.hpp>
 
-BOOST_FIXTURE_TEST_SUITE(coin_selection_tests, BasicTestingSetup)
+BOOST_FIXTURE_TEST_SUITE(coin_selection_tests, WalletTestingSetup)
 
-static void add_coin(const CAmount& nValue, int nInput, std::vector<std::pair<CAmount, COutPoint>>& set)
+static const CWallet testWallet;
+static void add_coin(const CAmount& nValue, int nInput, std::vector<CInputCoin>& set)
 {
-    uint256 hash;
-    hash.SetNull();
-    COutPoint outpoint(hash, nInput);
-    set.push_back(std::pair<CAmount, COutPoint>(nValue, outpoint));
+    CMutableTransaction tx;
+    tx.vout.resize(nInput+1);
+    tx.vout[nInput].nValue = nValue;
+    std::unique_ptr<CWalletTx> wtx(new CWalletTx(&testWallet, MakeTransactionRef(std::move(tx))));
+    set.emplace_back(CInputCoin(wtx.get(), nInput));
 }
-static bool equal_sets(std::vector<std::pair<CAmount, COutPoint>> a, std::vector<std::pair<CAmount, COutPoint>> b)
+static bool equal_sets(std::vector<CInputCoin> a, std::vector<CInputCoin> b)
 {
     // Sets different if different size
     if (a.size() != b.size()) {
@@ -28,20 +32,20 @@ static bool equal_sets(std::vector<std::pair<CAmount, COutPoint>> a, std::vector
 
     // Check each element
     for (unsigned int i = 0; i < a.size(); ++i) {
-        if (a[i].first != b[i].first || a[i].second != b[i].second) {
+        if (a[i] != b[i]) {
             return false;
         }
     }
-    
+
     return true;
 }
 
 BOOST_AUTO_TEST_CASE(bnb_search_test)
 {
     // Setup 
-    std::vector<std::pair<CAmount, COutPoint>> utxo_pool;
-    std::vector<std::pair<CAmount, COutPoint>> selection;
-    std::vector<std::pair<CAmount, COutPoint>> actual_selection;
+    std::vector<CInputCoin> utxo_pool;
+    std::vector<CInputCoin> selection;
+    std::vector<CInputCoin> actual_selection;
     
     /////////////////////////
     // Known Outcome tests //
@@ -49,7 +53,7 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     BOOST_TEST_MESSAGE("Testing known outcomes");
 
     // Empty utxo pool
-    BOOST_CHECK(!CoinSelector::BranchAndBoundSearch(utxo_pool, 1 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(!SelectCoinsBnB(utxo_pool, 1 * CENT, 0.5 * CENT, selection, nullptr));
     selection.clear();
     
     // Add 1, 2, and 3, utxos
@@ -60,14 +64,14 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     
     // Select 1 Cent
     add_coin(1 * CENT, 1, actual_selection);
-    BOOST_CHECK(CoinSelector::BranchAndBoundSearch(utxo_pool, 1 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(SelectCoinsBnB(utxo_pool, 1 * CENT, 0.5 * CENT, selection, nullptr));
     BOOST_CHECK(equal_sets(selection, actual_selection));
     actual_selection.clear();
     selection.clear();
     
     // Select 2 Cent
     add_coin(2 * CENT, 2, actual_selection);
-    BOOST_CHECK(CoinSelector::BranchAndBoundSearch(utxo_pool, 2 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(SelectCoinsBnB(utxo_pool, 2 * CENT, 0.5 * CENT, selection, nullptr));
     BOOST_CHECK(equal_sets(selection, actual_selection));
     actual_selection.clear();
     selection.clear();
@@ -75,13 +79,13 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     // Select 5 Cent
     add_coin(4 * CENT, 4, actual_selection);
     add_coin(1 * CENT, 1, actual_selection);
-    BOOST_CHECK(CoinSelector::BranchAndBoundSearch(utxo_pool, 5 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(SelectCoinsBnB(utxo_pool, 5 * CENT, 0.5 * CENT, selection, nullptr));
     BOOST_CHECK(equal_sets(selection, actual_selection));
     actual_selection.clear();
     selection.clear();
     
     // Select 11 Cent, not possible
-    BOOST_CHECK(!CoinSelector::BranchAndBoundSearch(utxo_pool, 11 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(!SelectCoinsBnB(utxo_pool, 11 * CENT, 0.5 * CENT, selection, nullptr));
     actual_selection.clear();
     selection.clear();
     
@@ -90,24 +94,15 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     add_coin(5 * CENT, 5, actual_selection);
     add_coin(4 * CENT, 4, actual_selection);
     add_coin(1 * CENT, 1, actual_selection);
-    BOOST_CHECK(CoinSelector::BranchAndBoundSearch(utxo_pool, 10 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(SelectCoinsBnB(utxo_pool, 10 * CENT, 0.5 * CENT, selection, nullptr));
     BOOST_CHECK(equal_sets(selection, actual_selection));
     actual_selection.clear();
     selection.clear();
 
     // Select 0.25 Cent, not possible
-    BOOST_CHECK(!CoinSelector::BranchAndBoundSearch(utxo_pool, 0.25 * CENT, 0.5 * CENT, selection, nullptr));
+    BOOST_CHECK(!SelectCoinsBnB(utxo_pool, 0.25 * CENT, 0.5 * CENT, selection, nullptr));
     actual_selection.clear();
     selection.clear();
-    
-    // Iteration count exhaustion of 100000 passes (17 items)
-    //utxo_pool.clear();
-    //for (int i = 1; i <= 17; ++i) {
-    //    add_coin(i * CENT, i, utxo_pool);
-   // }
-    //BOOST_CHECK(!CoinSelector::BranchAndBoundSearch(utxo_pool, 153 * CENT, 0, selection, nullptr, true));
-    //actual_selection.clear();
-    //selection.clear();
 
     ////////////////////
     // Behavior tests //
@@ -130,14 +125,14 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     bool found_sample_sol = false;
     // Run 100 times, make sure above solution appears and that solutions are valid
     for (int i = 0; i < 100; ++i) {
-        BOOST_CHECK(CoinSelector::BranchAndBoundSearch(utxo_pool, 100 * CENT, 2 * CENT, selection, &rand));
+        BOOST_CHECK(SelectCoinsBnB(utxo_pool, 100 * CENT, 2 * CENT, selection, &rand));
         if (equal_sets(selection, actual_selection)) {
             found_sample_sol = true;
         }
         // Check the solution is within the bounds set
         CAmount selection_value = 0;
         for (auto utxo : selection) {
-            selection_value += utxo.first;
+            selection_value += utxo.txout.nValue;
         }
         BOOST_CHECK(selection_value >= 100 * CENT);
         BOOST_CHECK(selection_value <= 102 * CENT);
@@ -151,9 +146,8 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     }
     // Run 100 times, to make sure it is never finding a solution
     for (int i = 0; i < 100; ++i) {
-        BOOST_CHECK(!CoinSelector::BranchAndBoundSearch(utxo_pool, 1 * CENT, 2 * CENT, selection, &rand));
-    }
-    
+        BOOST_CHECK(!SelectCoinsBnB(utxo_pool, 1 * CENT, 2 * CENT, selection, &rand));
+    } 
 }
 
 BOOST_AUTO_TEST_SUITE_END()

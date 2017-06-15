@@ -29,6 +29,12 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
     // Sort the utxo_pool
     std::sort(utxo_pool.begin(), utxo_pool.end(), descending);
     
+    // Calculate remaining
+    CAmount remaining = 0;
+    for (std::pair<CAmount, COutPoint> utxo : utxo_pool) {
+        remaining += utxo.first;
+    }
+    
     // Depth first search to find 
     while (!done)
     {
@@ -40,7 +46,15 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
             done = true;
         } else if (depth >= (int)utxo_pool.size()) { // Reached a leaf node, no solution here
             backtrack = true;
+        } else if (selected_value + remaining < target_value) { // Cannot possibly reach target with amount remaining
+            if (depth == 0) { // At the first utxo, no possible selections, so exit
+                return false;
+            } else {
+                backtrack = true;
+            }
         } else { // Continue down this branch
+            // Remove this utxo from the remaining utxo amount
+            remaining -= utxo_pool.at(depth).first;
             // Randomly choose to explore either inclusion or exclusion branch
             if (rand == nullptr || (!exclude_first && rand->randbool())) {
                 // Inclusion branch first
@@ -67,6 +81,7 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
                 }
                 selection[depth].first = false;
                 selection[depth].second = false;
+                remaining += utxo_pool.at(depth).first;
 
                 // Step back one
                 --depth;
@@ -92,6 +107,7 @@ bool CoinSelector::BranchAndBoundSearch(std::vector<std::pair<CAmount, COutPoint
                 }
             }
         }
+        --tries;
     }
 
     // Set output set

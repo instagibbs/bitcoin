@@ -82,6 +82,18 @@ static bool equal_sets(CoinSet a, CoinSet b)
     return ret.first == a.end() && ret.second == b.end();
 }
 
+static long make_hard_case(int utxos, std::vector<CInputCoin>& utxo_pool)
+{
+    utxo_pool.clear();
+    long target = 0;
+    for (int i = 0; i < utxos; ++i) {
+        target += (long)1 << (utxos+i);
+        add_coin((long)1 << (utxos+i), 2*i, utxo_pool);
+        add_coin(((long)1 << (utxos+i)) + ((long)1 << (utxos-1-i)), 2*i + 1, utxo_pool);
+    }
+    return target;
+}
+
 // Branch and bound coin selection tests
 BOOST_AUTO_TEST_CASE(bnb_search_test)
 {
@@ -150,6 +162,12 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     BOOST_CHECK(!SelectCoinsBnB(utxo_pool, 0.25 * CENT, 0.5 * CENT, selection, value_ret, nullptr));
     actual_selection.clear();
     selection.clear();
+    
+    // Iteration exhaustion test
+    long target = make_hard_case(17, utxo_pool);
+    BOOST_CHECK(!SelectCoinsBnB(utxo_pool, target, 0, selection, value_ret, nullptr)); // Should exhaust
+    target = make_hard_case(14, utxo_pool);
+    BOOST_CHECK(SelectCoinsBnB(utxo_pool, target, 0, selection, value_ret, nullptr)); // Should not exhaust
 
     ////////////////////
     // Behavior tests //

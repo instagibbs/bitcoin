@@ -56,7 +56,7 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
         } else if (value_ret >= target_value) { // Selected value is within range
             done = true;
         } else if (tries <= 0) { // Too many tries, exit
-            done = true;
+            return false;
         } else if (depth >= (int)utxo_pool.size()) { // Reached a leaf node, no solution here
             backtrack = true;
         } else if (value_ret + remaining < target_value) { // Cannot possibly reach target with amount remaining
@@ -128,8 +128,8 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
         if (selection.at(i).first) {
             out_set.insert(utxo_pool.at(i));
         }
-   }
-
+    }
+    
     return true;
 }
 

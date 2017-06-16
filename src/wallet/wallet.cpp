@@ -9,6 +9,7 @@
 #include "checkpoints.h"
 #include "chain.h"
 #include "wallet/coincontrol.h"
+#include "wallet/coinselection.h"
 #include "consensus/consensus.h"
 #include "consensus/validation.h"
 #include "fs.h"
@@ -21,6 +22,7 @@
 #include "policy/rbf.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "random.h"
 #include "script/script.h"
 #include "script/sign.h"
 #include "scheduler.h"
@@ -63,15 +65,6 @@ const uint256 CMerkleTx::ABANDON_HASH(uint256S("00000000000000000000000000000000
  *
  * @{
  */
-
-struct CompareValueOnly
-{
-    bool operator()(const CInputCoin& t1,
-                    const CInputCoin& t2) const
-    {
-        return t1.txout.nValue < t2.txout.nValue;
-    }
-};
 
 std::string COutput::ToString() const
 {
@@ -2179,65 +2172,15 @@ const CTxOut& CWallet::FindNonChangeParentOutput(const CTransaction& tx, int out
     return ptx->vout[n];
 }
 
-static void ApproximateBestSubset(const std::vector<CInputCoin>& vValue, const CAmount& nTotalLower, const CAmount& nTargetValue,
-                                  std::vector<char>& vfBest, CAmount& nBest, int iterations = 1000)
-{
-    std::vector<char> vfIncluded;
-
-    vfBest.assign(vValue.size(), true);
-    nBest = nTotalLower;
-
-    FastRandomContext insecure_rand;
-
-    for (int nRep = 0; nRep < iterations && nBest != nTargetValue; nRep++)
-    {
-        vfIncluded.assign(vValue.size(), false);
-        CAmount nTotal = 0;
-        bool fReachedTarget = false;
-        for (int nPass = 0; nPass < 2 && !fReachedTarget; nPass++)
-        {
-            for (unsigned int i = 0; i < vValue.size(); i++)
-            {
-                //The solver here uses a randomized algorithm,
-                //the randomness serves no real security purpose but is just
-                //needed to prevent degenerate behavior and it is important
-                //that the rng is fast. We do not use a constant random sequence,
-                //because there may be some privacy improvement by making
-                //the selection random.
-                if (nPass == 0 ? insecure_rand.randbool() : !vfIncluded[i])
-                {
-                    nTotal += vValue[i].txout.nValue;
-                    vfIncluded[i] = true;
-                    if (nTotal >= nTargetValue)
-                    {
-                        fReachedTarget = true;
-                        if (nTotal < nBest)
-                        {
-                            nBest = nTotal;
-                            vfBest = vfIncluded;
-                        }
-                        nTotal -= vValue[i].txout.nValue;
-                        vfIncluded[i] = false;
-                    }
-                }
-            }
-        }
-    }
-}
-
 bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMine, const int nConfTheirs, const uint64_t nMaxAncestors, std::vector<COutput> vCoins,
-                                 std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet) const
+                                 std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, bool use_only_knapsack) const
 {
     setCoinsRet.clear();
     nValueRet = 0;
 
-    // List of values less than target
-    boost::optional<CInputCoin> coinLowestLarger;
     std::vector<CInputCoin> vValue;
-    CAmount nTotalLower = 0;
 
-    random_shuffle(vCoins.begin(), vCoins.end(), GetRandInt);
-
+    // Filter by the min conf specs and add to vValue
     for (const COutput &output : vCoins)
     {
         if (!output.fSpendable)
@@ -2253,82 +2196,19 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
 
         int i = output.i;
 
-        CInputCoin coin = CInputCoin(pcoin, i);
-
-        if (coin.txout.nValue == nTargetValue)
-        {
-            setCoinsRet.insert(coin);
-            nValueRet += coin.txout.nValue;
-            return true;
-        }
-        else if (coin.txout.nValue < nTargetValue + MIN_CHANGE)
-        {
-            vValue.push_back(coin);
-            nTotalLower += coin.txout.nValue;
-        }
-        else if (!coinLowestLarger || coin.txout.nValue < coinLowestLarger->txout.nValue)
-        {
-            coinLowestLarger = coin;
-        }
+        vValue.push_back(CInputCoin(pcoin, i));
     }
+    if (!use_only_knapsack) {
+        // Calculate cost of change
+        // TODO: Actually calculate
+        CAmount cost_of_change = 10000;
 
-    if (nTotalLower == nTargetValue)
-    {
-        for (const auto& input : vValue)
-        {
-            setCoinsRet.insert(input);
-            nValueRet += input.txout.nValue;
-        }
-        return true;
+        FastRandomContext rand;
+        return SelectCoinsBnB(vValue, nTargetValue, cost_of_change, setCoinsRet, nValueRet, &rand) ||
+            KnapsackSolver(vValue, nTargetValue, setCoinsRet, nValueRet);
+    } else {
+        return KnapsackSolver(vValue, nTargetValue, setCoinsRet, nValueRet);
     }
-
-    if (nTotalLower < nTargetValue)
-    {
-        if (!coinLowestLarger)
-            return false;
-        setCoinsRet.insert(coinLowestLarger.get());
-        nValueRet += coinLowestLarger->txout.nValue;
-        return true;
-    }
-
-    // Solve subset sum by stochastic approximation
-    std::sort(vValue.begin(), vValue.end(), CompareValueOnly());
-    std::reverse(vValue.begin(), vValue.end());
-    std::vector<char> vfBest;
-    CAmount nBest;
-
-    ApproximateBestSubset(vValue, nTotalLower, nTargetValue, vfBest, nBest);
-    if (nBest != nTargetValue && nTotalLower >= nTargetValue + MIN_CHANGE)
-        ApproximateBestSubset(vValue, nTotalLower, nTargetValue + MIN_CHANGE, vfBest, nBest);
-
-    // If we have a bigger coin and (either the stochastic approximation didn't find a good solution,
-    //                                   or the next bigger coin is closer), return the bigger coin
-    if (coinLowestLarger &&
-        ((nBest != nTargetValue && nBest < nTargetValue + MIN_CHANGE) || coinLowestLarger->txout.nValue <= nBest))
-    {
-        setCoinsRet.insert(coinLowestLarger.get());
-        nValueRet += coinLowestLarger->txout.nValue;
-    }
-    else {
-        for (unsigned int i = 0; i < vValue.size(); i++)
-            if (vfBest[i])
-            {
-                setCoinsRet.insert(vValue[i]);
-                nValueRet += vValue[i].txout.nValue;
-            }
-
-        if (LogAcceptCategory(BCLog::SELECTCOINS)) {
-            LogPrint(BCLog::SELECTCOINS, "SelectCoins() best subset: ");
-            for (unsigned int i = 0; i < vValue.size(); i++) {
-                if (vfBest[i]) {
-                    LogPrint(BCLog::SELECTCOINS, "%s ", FormatMoney(vValue[i].txout.nValue));
-                }
-            }
-            LogPrint(BCLog::SELECTCOINS, "total %s\n", FormatMoney(nBest));
-        }
-    }
-
-    return true;
 }
 
 bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, const CCoinControl* coinControl) const

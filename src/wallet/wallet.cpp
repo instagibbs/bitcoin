@@ -2241,7 +2241,7 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
         // Calculate cost of change
         // TODO: In the future, we should use the change output actually made for the transaction and calculate the cost
         // requred to spend it.
-        CAmount cost_of_change = effective_fee(148+34); // 148 bytes for the input, 34 bytes for making the output
+        CAmount cost_of_change = effective_fee.GetFee(148+34); // 148 bytes for the input, 34 bytes for making the output
 
         FastRandomContext rand;
         return SelectCoinsBnB(vValue, nTargetValue, cost_of_change, setCoinsRet, nValueRet, &rand) ||
@@ -2510,10 +2510,23 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                     txNew.vout.push_back(txout);
                 }
 
+                // Get the fee rate to use effective values in coin selection
+                // Allow to override the default confirmation target over the CoinControl instance
+                int currentConfirmationTarget = nTxConfirmTarget;
+                if (coinControl && coinControl->nConfirmTarget > 0) {
+                    currentConfirmationTarget = coinControl->nConfirmTarget;
+                }
+
+                CFeeRate nFeeRateNeeded = GetMinimumFeeRate(currentConfirmationTarget, ::mempool, ::feeEstimator);
+
+                if (coinControl && coinControl->fOverrideFeeRate) {
+                    nFeeRateNeeded = coinControl->nFeeRate;
+                }
+
                 // Choose coins to use
                 CAmount nValueIn = 0;
                 setCoins.clear();
-                if (!SelectCoins(vAvailableCoins, nValueToSelect, setCoins, nValueIn, CFeeRate(0), coinControl))
+                if (!SelectCoins(vAvailableCoins, nValueToSelect, setCoins, nValueIn, nFeeRateNeeded, coinControl))
                 {
                     strFailReason = _("Insufficient funds");
                     return false;

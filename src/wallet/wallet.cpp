@@ -2239,8 +2239,9 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
     }
     if (!use_only_knapsack) {
         // Calculate cost of change
-        // TODO: Actually calculate
-        CAmount cost_of_change = 10000;
+        // TODO: In the future, we should use the change output actually made for the transaction and calculate the cost
+        // requred to spend it.
+        CAmount cost_of_change = effective_fee(148+34); // 148 bytes for the input, 34 bytes for making the output
 
         FastRandomContext rand;
         return SelectCoinsBnB(vValue, nTargetValue, cost_of_change, setCoinsRet, nValueRet, &rand) ||

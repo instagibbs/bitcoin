@@ -1405,6 +1405,44 @@ int CWalletTx::GetRequestCount() const
     return nRequests;
 }
 
+int64_t CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *pWallet)
+{
+    CMutableTransaction txNew(tx);
+    std::vector<CInputCoin> vCoins;
+    // Look up the inputs.  We should have already checked that this transaction
+    // IsAllFromMe(ISMINE_SPENDABLE), so every input should already be in our
+    // wallet, with a valid index into the vout array, and the ability to sign.
+    for (auto& input : tx.vin) {
+        const auto mi = pWallet->mapWallet.find(input.prevout.hash);
+        if (mi == pWallet->mapWallet.end()) {
+            return -1;
+        }
+        assert(input.prevout.n < mi->second.tx->vout.size());
+        vCoins.emplace_back(CInputCoin(&(mi->second), input.prevout.n));
+    }
+    if (!pWallet->DummySignTx(txNew, vCoins)) {
+        // This should never happen, because IsAllFromMe(ISMINE_SPENDABLE)
+        // implies that we can sign for every input.
+        return -1;
+    }
+    return GetVirtualTransactionSize(txNew);
+}
+
+int CWalletTx::GetSpendSize(unsigned int i) const
+{
+    CMutableTransaction txn;
+    txn.vin.push_back(CTxIn(COutPoint(GetHash(), i)));
+    int totalBytes = CalculateMaximumSignedTxSize(txn, pwallet);
+    if (totalBytes == -1) return -1;
+    int witnessversion = 0;
+    std::vector<unsigned char> witnessprogram;
+    // We don't want to multi-count segwit empty vin and flag bytes
+    if (tx->vout[i].scriptPubKey.IsWitnessProgram(witnessversion, witnessprogram)) {
+        totalBytes -= 2;
+    }
+    return totalBytes - GetVirtualTransactionSize(CMutableTransaction());
+}
+
 void CWalletTx::GetAmounts(std::list<COutputEntry>& listReceived,
                            std::list<COutputEntry>& listSent, CAmount& nFee, std::string& strSentAccount, const isminefilter& filter) const
 {

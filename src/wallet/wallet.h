@@ -8,6 +8,7 @@
 
 #include "amount.h"
 #include "policy/feerate.h"
+#include "policy/policy.h"
 #include "streams.h"
 #include "tinyformat.h"
 #include "ui_interface.h"
@@ -447,6 +448,9 @@ public:
     CAmount GetImmatureWatchOnlyCredit(const bool& fUseCache=true) const;
     CAmount GetAvailableWatchOnlyCredit(const bool& fUseCache=true) const;
     CAmount GetChange() const;
+    
+    // Get the marginal bytes if spending the specified output from this transaction
+    int GetSpendSize(unsigned int i) const;
 
     void GetAmounts(std::list<COutputEntry>& listReceived,
                     std::list<COutputEntry>& listSent, CAmount& nFee, std::string& strSentAccount, const isminefilter& filter) const;
@@ -506,6 +510,9 @@ public:
     const CWalletTx *tx;
     int i;
     int nDepth;
+    
+    /** Pre-computed estimated size of this output as a fully-signed input in a transaction */
+    int nInputBytes;
 
     /** Whether we have the private keys to spend this output */
     bool fSpendable;
@@ -522,7 +529,12 @@ public:
 
     COutput(const CWalletTx *txIn, int iIn, int nDepthIn, bool fSpendableIn, bool fSolvableIn, bool fSafeIn)
     {
-        tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn;
+        tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn; nInputBytes = -1;
+        // If known and signable by the given wallet, compute nInputBytes
+        // Failure will keep this value -1
+        if (fSpendable && tx) {
+            nInputBytes = tx->GetSpendSize(i);
+        }
     }
 
     std::string ToString() const;
@@ -1208,4 +1220,13 @@ bool CWallet::DummySignTx(CMutableTransaction &txNew, const ContainerType &coins
     }
     return true;
 }
+
+// Calculate the size of the transaction assuming all signatures are max size
+// Use DummySignatureCreator, which inserts 72 byte signatures everywhere.
+// TODO: re-use this in CWallet::CreateTransaction (right now
+// CreateTransaction uses the constructed dummy-signed tx to do a priority
+// calculation, but we should be able to refactor after priority is removed).
+// NOTE: this requires that all inputs must be in mapWallet (eg the tx should
+// be IsAllFromMe).
+int64_t CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *pWallet);
 #endif // BITCOIN_WALLET_WALLET_H

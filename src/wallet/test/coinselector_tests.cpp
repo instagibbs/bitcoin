@@ -11,6 +11,7 @@
 #include "wallet/test/wallet_test_fixture.h"
 
 #include <boost/test/unit_test.hpp>
+#include <random>
 
 BOOST_FIXTURE_TEST_SUITE(coin_selection_tests, WalletTestingSetup)
 
@@ -27,6 +28,7 @@ typedef std::set<CInputCoin> CoinSet;
 
 static std::vector<COutput> vCoins;
 static const CWallet testWallet;
+static CAmount balance = 0;
 
 static void add_coin(const CAmount& nValue, int nInput, std::vector<CInputCoin>& set)
 {
@@ -49,6 +51,7 @@ static void add_coin(const CAmount& nValue, int nInput, CoinSet& set)
 
 static void add_coin(const CAmount& nValue, int nAge = 6*24, bool fIsFromMe = false, int nInput=0)
 {
+    balance += nValue;
     static int nextLockTime = 0;
     CMutableTransaction tx;
     tx.nLockTime = nextLockTime++;        // so all transactions get different hashes
@@ -74,6 +77,7 @@ static void empty_wallet(void)
 {
     vCoins.clear();
     wtxn.clear();
+    balance = 0;
 }
 
 static bool equal_sets(CoinSet a, CoinSet b)
@@ -505,6 +509,46 @@ BOOST_AUTO_TEST_CASE(ApproximateBestSubset)
     BOOST_CHECK_EQUAL(setCoinsRet.size(), 2U);
 
     empty_wallet();
+}
+
+// Tests that with the ideal conditions, the coin selector will always be able to find a solution that can pay the target value
+BOOST_AUTO_TEST_CASE(SelectCoins_test)
+{
+    // Random generator stuff
+    std::default_random_engine generator;
+    std::exponential_distribution<double> distribution (100);
+    FastRandomContext rand;
+
+    // Output stuff
+    CAmount out_value = 0;
+    CoinSet out_set;
+    CAmount target = 0;
+
+    // Run this test 100 times
+    for (int i = 0; i < 100; ++i)
+    {
+        // Reset
+        out_value = 0;
+        target = 0;
+        out_set.clear();
+        empty_wallet();
+        
+        // Make a wallet with 1000 exponentially distributed random inputs
+        for (int j = 0; j < 1000; ++j)
+        {
+            add_coin((unsigned long)(distribution(generator)*10000000));
+        }
+        
+        // Generate a random fee rate in the range of 100 - 400
+        CFeeRate rate(rand.randrange(300) + 100);
+        
+        // Generate a random target value between 1000 and wallet balance
+        target = rand.randrange(balance - 1000) + 1000;
+        
+        // Perform selection
+        BOOST_CHECK(testWallet.SelectCoinsMinConf(target, 1, 6, 0, vCoins, out_set, out_value, rate));
+        BOOST_CHECK_GE(out_value, target);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -977,7 +977,7 @@ public:
      * Estimate the minimum fee rate considering user set parameters
      * and the required fee
      */
-    static CFeeRate GetMinimumFeeRate(unsigned int nConfirmTarget, const CTxMemPool& pool, const CBlockPolicyEstimator& estimator, bool ignoreUserSetFee = false);
+    static CFeeRate GetMinimumFeeRate(unsigned int nConfirmTarget, const CTxMemPool& pool, const CBlockPolicyEstimator& estimator, FeeCalculation *feeCalc, bool ignoreUserSetFee = false);
 
     /**
      * Return the minimum required fee taking into account the

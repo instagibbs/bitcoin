@@ -2517,7 +2517,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                     currentConfirmationTarget = coinControl->nConfirmTarget;
                 }
 
-                CFeeRate nFeeRateNeeded = GetMinimumFeeRate(currentConfirmationTarget, ::mempool, ::feeEstimator);
+                CFeeRate nFeeRateNeeded = GetMinimumFeeRate(currentConfirmationTarget, ::mempool, ::feeEstimator, &feeCalc);
 
                 if (coinControl && coinControl->fOverrideFeeRate) {
                     nFeeRateNeeded = coinControl->nFeeRate;
@@ -2651,11 +2651,6 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                     vin.scriptSig = CScript();
                     vin.scriptWitness.SetNull();
                 }
-
-                // Allow to override the default confirmation target over the CoinControl instance
-                int currentConfirmationTarget = nTxConfirmTarget;
-                if (coinControl && coinControl->nConfirmTarget > 0)
-                    currentConfirmationTarget = coinControl->nConfirmTarget;
 
                 CAmount nFeeNeeded = GetMinimumFee(nBytes, currentConfirmationTarget, ::mempool, ::feeEstimator, &feeCalc);
                 if (coinControl && coinControl->fOverrideFeeRate)
@@ -2872,14 +2867,13 @@ CAmount CWallet::GetMinimumFee(unsigned int nTxBytes, unsigned int nConfirmTarge
     return nFeeNeeded;
 }
 
-CFeeRate CWallet::GetMinimumFeeRate(unsigned int nConfirmTarget, const CTxMemPool& pool, const CBlockPolicyEstimator& estimator, bool ignoreUserSetFee)
+CFeeRate CWallet::GetMinimumFeeRate(unsigned int nConfirmTarget, const CTxMemPool& pool, const CBlockPolicyEstimator& estimator, FeeCalculation *feeCalc, bool ignoreUserSetFee)
 {
     CFeeRate nFeeRateNeeded = payTxFee;
     // payTxFee is the user-set global for desired feerate
     // User didn't set: use -txconfirmtarget to estimate...
     if (nFeeRateNeeded == CFeeRate(0) || ignoreUserSetFee) {
-        int estimateFoundTarget = nConfirmTarget;
-        nFeeRateNeeded = estimator.estimateSmartFee(nConfirmTarget, &estimateFoundTarget, pool);
+        nFeeRateNeeded = estimator.estimateSmartFee(nConfirmTarget, feeCalc, pool);
         // ... unless we don't have enough mempool data for estimatefee, then use fallbackFee
         if (nFeeRateNeeded == CFeeRate(0))
             nFeeRateNeeded = fallbackFee;

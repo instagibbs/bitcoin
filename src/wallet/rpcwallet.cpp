@@ -2769,6 +2769,8 @@ UniValue getwalletinfo(const JSONRPCRequest& request)
             "  \"unlocked_until\": ttt,           (numeric) the timestamp in seconds since epoch (midnight Jan 1 1970 GMT) that the wallet is unlocked for transfers, or 0 if the wallet is locked\n"
             "  \"paytxfee\": x.xxxx,              (numeric) the transaction fee configuration, set in " + CURRENCY_UNIT + "/kB\n"
             "  \"hdmasterkeyid\": \"<hash160>\"     (string, optional) the Hash160 of the HD master pubkey (only present when HD is enabled)\n"
+            "  \"hdmasterkeyid\": \"<hash160>\"   (string) the Hash160 of the HD master pubkey\n" + 
+            "  \"externalhdkey\": \"<hdpubkey>\"  (string) the extended pubkey used for key derivation in external HD mode\n"
             "}\n"
             "\nExamples:\n"
             + HelpExampleCli("getwalletinfo", "")
@@ -2800,6 +2802,10 @@ UniValue getwalletinfo(const JSONRPCRequest& request)
     }
     if (pwallet->IsCrypted()) {
         obj.push_back(Pair("unlocked_until", pwallet->nRelockTime));
+    }
+    if (pwallet->IsExternalHD()) {
+        CBitcoinExtPubKey watchOnly(pwallet->GetHDChain().externalHD);
+        obj.push_back(Pair("externalhdkey", watchOnly.ToString()));
     }
     obj.push_back(Pair("paytxfee",      ValueFromAmount(payTxFee.GetFeePerK())));
     if (!masterKeyID.IsNull())

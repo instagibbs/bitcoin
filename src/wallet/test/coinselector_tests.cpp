@@ -449,8 +449,8 @@ BOOST_AUTO_TEST_CASE(knapsack_tests)
 
             // picking 50 from 100 coins doesn't depend on the shuffle,
             // but does depend on randomness in the stochastic approximation code
-            BOOST_CHECK(testWallet.SelectCoinsMinConf(50 * COIN, 1, 6, 0, vCoins, setCoinsRet , nValueRet));
-            BOOST_CHECK(testWallet.SelectCoinsMinConf(50 * COIN, 1, 6, 0, vCoins, setCoinsRet2, nValueRet));
+            BOOST_CHECK(testWallet.SelectCoinsMinConf(50 * COIN, 1, 6, 0, vCoins, setCoinsRet , nValueRet, CFeeRate(0), true));
+            BOOST_CHECK(testWallet.SelectCoinsMinConf(50 * COIN, 1, 6, 0, vCoins, setCoinsRet2, nValueRet, CFeeRate(0), true));
             BOOST_CHECK(!equal_sets(setCoinsRet, setCoinsRet2));
 
             int fails = 0;
@@ -458,8 +458,8 @@ BOOST_AUTO_TEST_CASE(knapsack_tests)
             {
                 // selecting 1 from 100 identical coins depends on the shuffle; this test will fail 1% of the time
                 // run the test RANDOM_REPEATS times and only complain if all of them fail
-                BOOST_CHECK(testWallet.SelectCoinsMinConf(COIN, 1, 6, 0, vCoins, setCoinsRet , nValueRet));
-                BOOST_CHECK(testWallet.SelectCoinsMinConf(COIN, 1, 6, 0, vCoins, setCoinsRet2, nValueRet));
+                BOOST_CHECK(testWallet.SelectCoinsMinConf(COIN, 1, 6, 0, vCoins, setCoinsRet , nValueRet, CFeeRate(0), true));
+                BOOST_CHECK(testWallet.SelectCoinsMinConf(COIN, 1, 6, 0, vCoins, setCoinsRet2, nValueRet, CFeeRate(0), true));
                 if (equal_sets(setCoinsRet, setCoinsRet2))
                     fails++;
             }
@@ -479,8 +479,8 @@ BOOST_AUTO_TEST_CASE(knapsack_tests)
             {
                 // selecting 1 from 100 identical coins depends on the shuffle; this test will fail 1% of the time
                 // run the test RANDOM_REPEATS times and only complain if all of them fail
-                BOOST_CHECK(testWallet.SelectCoinsMinConf(90*CENT, 1, 6, 0, vCoins, setCoinsRet , nValueRet));
-                BOOST_CHECK(testWallet.SelectCoinsMinConf(90*CENT, 1, 6, 0, vCoins, setCoinsRet2, nValueRet));
+                BOOST_CHECK(testWallet.SelectCoinsMinConf(90*CENT, 1, 6, 0, vCoins, setCoinsRet , nValueRet, CFeeRate(0), true));
+                BOOST_CHECK(testWallet.SelectCoinsMinConf(90*CENT, 1, 6, 0, vCoins, setCoinsRet2, nValueRet, CFeeRate(0), true));
                 if (equal_sets(setCoinsRet, setCoinsRet2))
                     fails++;
             }
@@ -546,7 +546,8 @@ BOOST_AUTO_TEST_CASE(SelectCoins_test)
         target = rand.randrange(balance - 1000) + 1000;
         
         // Perform selection
-        BOOST_CHECK(testWallet.SelectCoinsMinConf(target, 1, 6, 0, vCoins, out_set, out_value, rate));
+        BOOST_CHECK(testWallet.SelectCoinsMinConf(target, 1, 6, 0, vCoins, out_set, out_value, rate, false) || 
+                    testWallet.SelectCoinsMinConf(target, 1, 6, 0, vCoins, out_set, out_value, rate, true));
         BOOST_CHECK_GE(out_value, target);
     }
 }

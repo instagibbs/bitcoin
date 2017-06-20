@@ -162,17 +162,24 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     actual_selection.clear();
     selection.clear();
 
+    // Negative effective value
+    // Select 10 Cent but have 1 Cent not be possible because too small
+    add_coin(5 * CENT, 5, actual_selection);
+    add_coin(3 * CENT, 3, actual_selection);
+    add_coin(2 * CENT, 2, actual_selection);
+    BOOST_CHECK(SelectCoinsBnB(utxo_pool, 10 * CENT, 5000, selection, value_ret, nullptr));
+
     // Select 0.25 Cent, not possible
     BOOST_CHECK(!SelectCoinsBnB(utxo_pool, 0.25 * CENT, 0.5 * CENT, selection, value_ret, nullptr));
     actual_selection.clear();
     selection.clear();
-    
+
     // Iteration exhaustion test
     long target = make_hard_case(17, utxo_pool);
     BOOST_CHECK(!SelectCoinsBnB(utxo_pool, target, 0, selection, value_ret, nullptr)); // Should exhaust
     target = make_hard_case(14, utxo_pool);
     BOOST_CHECK(SelectCoinsBnB(utxo_pool, target, 0, selection, value_ret, nullptr)); // Should not exhaust
-
+    
     ////////////////////
     // Behavior tests //
     ////////////////////

@@ -2241,7 +2241,10 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
             int i = output.i;
             CInputCoin coin(pcoin, i);
             coin.txout.nValue -= (output.nInputBytes < 0 ? 0 : effective_fee.GetFee(output.nInputBytes));
-            vValue.push_back(coin);
+            // Only include outputs that are not negative effective value (i.e. not dust)
+            if (coin.txout.nValue > 0) {
+                vValue.push_back(coin);
+            }
         }
 
         FastRandomContext rand;

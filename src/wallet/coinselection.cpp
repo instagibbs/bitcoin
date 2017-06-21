@@ -51,12 +51,12 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
     // Depth first search to find 
     while (!done)
     {
-        if (value_ret > target_value + cost_of_change) { // Selected value is out of range, go back and try other branch
+        if (tries <= 0) { // Too many tries, exit
+            return false;
+        } else if (value_ret > target_value + cost_of_change) { // Selected value is out of range, go back and try other branch
             backtrack = true;
         } else if (value_ret >= target_value) { // Selected value is within range
             done = true;
-        } else if (tries <= 0) { // Too many tries, exit
-            return false;
         } else if (depth >= (int)utxo_pool.size()) { // Reached a leaf node, no solution here
             backtrack = true;
         } else if (value_ret + remaining < target_value) { // Cannot possibly reach target with amount remaining

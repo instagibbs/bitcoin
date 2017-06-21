@@ -2562,7 +2562,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 }
 
                 const CAmount nChange = nValueIn - nValueToSelect;
-                if (nChange > 0)
+                if (nChange > 0 && (!first_pass || nFeeRet == 0)) // nFeeRet is only 0 on the first pass if BnB was not used. 
                 {
                     // Fill a vout to ourself
                     // TODO: pass in scriptChange instead of reservekey so

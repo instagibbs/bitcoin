@@ -86,14 +86,14 @@ static bool equal_sets(CoinSet a, CoinSet b)
     return ret.first == a.end() && ret.second == b.end();
 }
 
-static long make_hard_case(int utxos, std::vector<CInputCoin>& utxo_pool)
+static CAmount make_hard_case(int utxos, std::vector<CInputCoin>& utxo_pool)
 {
     utxo_pool.clear();
-    long target = 0;
+    CAmount target = 0;
     for (int i = 0; i < utxos; ++i) {
-        target += (long)1 << (utxos+i);
-        add_coin((long)1 << (utxos+i), 2*i, utxo_pool);
-        add_coin(((long)1 << (utxos+i)) + ((long)1 << (utxos-1-i)), 2*i + 1, utxo_pool);
+        target += (CAmount)1 << (utxos+i);
+        add_coin((CAmount)1 << (utxos+i), 2*i, utxo_pool);
+        add_coin(((CAmount)1 << (utxos+i)) + ((CAmount)1 << (utxos-1-i)), 2*i + 1, utxo_pool);
     }
     return target;
 }
@@ -175,7 +175,7 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     selection.clear();
 
     // Iteration exhaustion test
-    long target = make_hard_case(17, utxo_pool);
+    CAmount target = make_hard_case(17, utxo_pool);
     BOOST_CHECK(!SelectCoinsBnB(utxo_pool, target, 0, selection, value_ret)); // Should exhaust
     target = make_hard_case(14, utxo_pool);
     BOOST_CHECK(SelectCoinsBnB(utxo_pool, target, 0, selection, value_ret)); // Should not exhaust
@@ -541,7 +541,7 @@ BOOST_AUTO_TEST_CASE(SelectCoins_test)
         // Make a wallet with 1000 exponentially distributed random inputs
         for (int j = 0; j < 1000; ++j)
         {
-            add_coin((unsigned long)(distribution(generator)*10000000));
+            add_coin((CAmount)(distribution(generator)*10000000));
         }
         
         // Generate a random fee rate in the range of 100 - 400

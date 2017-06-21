@@ -69,7 +69,7 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
             // Remove this utxo from the remaining utxo amount
             remaining -= utxo_pool.at(depth).txout.nValue;
             // Inclusion branch first (Largest First Exploration)
-            selection[depth].first = true;
+            selection.at(depth).first = true;
             value_ret += utxo_pool.at(depth).txout.nValue;
             ++depth;
         }
@@ -80,13 +80,13 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
             --depth;
 
             // Walk backwards to find the first utxo which has not has its second branch traversed
-            while (selection[depth].second) {
+            while (selection.at(depth).second) {
                 // Reset this utxo's selection
-                if (selection[depth].first) {
+                if (selection.at(depth).first) {
                     value_ret -= utxo_pool.at(depth).txout.nValue;
                 }
-                selection[depth].first = false;
-                selection[depth].second = false;
+                selection.at(depth).first = false;
+                selection.at(depth).second = false;
                 remaining += utxo_pool.at(depth).txout.nValue;
 
                 // Step back one
@@ -99,10 +99,10 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
             
             if (!done) {
                 // Now traverse the second branch of the utxo we have arrived at.
-                selection[depth].second = true;
+                selection.at(depth).second = true;
 
                 // These were always included first, try excluding now
-                selection[depth].first = false;
+                selection.at(depth).first = false;
                 value_ret -= utxo_pool.at(depth).txout.nValue;
                 ++depth;
             }

@@ -23,7 +23,7 @@ struct CompareValueOnly
     }
 };
 
-bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::set<CInputCoin>& out_set, CAmount& value_ret)
+bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::set<CInputCoin>& out_set, CAmount& value_ret, std::vector<CAmount>& fee_vec, CAmount& fee_ret)
 {
     out_set.clear();
     value_ret = 0;
@@ -117,6 +117,7 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
     for (unsigned int i = 0; i < selection.size(); ++i) {
         if (selection.at(i).first) {
             out_set.insert(utxo_pool.at(i));
+            fee_ret += fee_vec.at(i);
         }
     }
     

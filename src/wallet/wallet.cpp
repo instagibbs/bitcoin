@@ -2247,8 +2247,7 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
             }
         }
 
-        FastRandomContext rand;
-        return SelectCoinsBnB(vValue, nTargetValue, cost_of_change, setCoinsRet, nValueRet, &rand);
+        return SelectCoinsBnB(vValue, nTargetValue, cost_of_change, setCoinsRet, nValueRet);
     } else {
         // Filter by the min conf specs and add to vValue
         for (const COutput &output : vCoins)
@@ -2564,7 +2563,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 }
 
                 const CAmount nChange = nValueIn - nValueToSelect;
-                if (nChange > 0)
+                if (nChange > 0 && !first_pass)
                 {
                     // Fill a vout to ourself
                     // TODO: pass in scriptChange instead of reservekey so

@@ -23,7 +23,7 @@ struct CompareValueOnly
     }
 };
 
-bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::set<CInputCoin>& out_set, CAmount& value_ret, FastRandomContext* rand)
+bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_value, const CAmount& cost_of_change, std::set<CInputCoin>& out_set, CAmount& value_ret)
 {
     out_set.clear();
     value_ret = 0;
@@ -68,17 +68,10 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
         } else { // Continue down this branch
             // Remove this utxo from the remaining utxo amount
             remaining -= utxo_pool.at(depth).txout.nValue;
-            // Randomly choose to explore either inclusion or exclusion branch
-            if (rand == nullptr || rand->randbool()) {
-                // Inclusion branch first
-                selection[depth].first = true;
-                value_ret += utxo_pool.at(depth).txout.nValue;
-                ++depth;
-            } else {
-                // Exclusion branch first
-                selection[depth].first = false;
-                ++depth;
-            }
+            // Inclusion branch first (Largest First Exploration)
+            selection[depth].first = true;
+            value_ret += utxo_pool.at(depth).txout.nValue;
+            ++depth;
         }
 
         // Step back to the previous utxo and try the other branch
@@ -108,16 +101,10 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
                 // Now traverse the second branch of the utxo we have arrived at.
                 selection[depth].second = true;
 
-                if(selection[depth].first) { // If it was included, do exclusion now
-                    selection[depth].first = false;
-                    value_ret -= utxo_pool.at(depth).txout.nValue;
-                    ++depth;
-                }
-                else { // It was excluded first, do inclusion now
-                    selection[depth].first = true;
-                    value_ret += utxo_pool.at(depth).txout.nValue;
-                    ++ depth;
-                }
+                // These were always included first, try excluding now
+                selection[depth].first = false;
+                value_ret -= utxo_pool.at(depth).txout.nValue;
+                ++depth;
             }
         }
         --tries;

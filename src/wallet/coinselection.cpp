@@ -66,6 +66,9 @@ bool SelectCoinsBnB(std::vector<CInputCoin>& utxo_pool, const CAmount& target_va
                 backtrack = true;
             }
         } else { // Continue down this branch
+            // Assert that this utxo is not negative. It should never be negative, effective value calculation should have removed it
+            assert(utxo_pool.at(depth).txout.nValue >= 0);
+        
             // Remove this utxo from the remaining utxo amount
             remaining -= utxo_pool.at(depth).txout.nValue;
             // Inclusion branch first (Largest First Exploration)

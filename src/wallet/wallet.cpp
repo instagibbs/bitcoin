@@ -2211,7 +2211,7 @@ const CTxOut& CWallet::FindNonChangeParentOutput(const CTransaction& tx, int out
 }
 
 bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMine, const int nConfTheirs, const uint64_t nMaxAncestors, std::vector<COutput> vCoins,
-                                 std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool only_knapsack) const
+                                 std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool& used_bnb, bool only_knapsack) const
 {
     setCoinsRet.clear();
     nValueRet = 0;
@@ -2247,6 +2247,7 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
                 fee_vec.push_back(output.nInputBytes < 0 ? 0 : effective_fee.GetFee(output.nInputBytes));
             }
         }
+        used_bnb = true;
         return SelectCoinsBnB(vValue, nTargetValue, cost_of_change, setCoinsRet, nValueRet, fee_vec, fee_ret);
     } else {
         // Filter by the min conf specs and add to vValue
@@ -2267,12 +2268,12 @@ bool CWallet::SelectCoinsMinConf(const CAmount& nTargetValue, const int nConfMin
             CInputCoin coin(pcoin, i);
             vValue.push_back(coin);
         }
-
+        used_bnb = false;
         return KnapsackSolver(vValue, nTargetValue, setCoinsRet, nValueRet);
     }
 }
 
-bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, const CCoinControl* coinControl, bool knapsack_only) const
+bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool& used_bnb, const CCoinControl* coinControl, bool knapsack_only) const
 {
     std::vector<COutput> vCoins(vAvailableCoins);
 
@@ -2325,13 +2326,13 @@ bool CWallet::SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAm
     bool fRejectLongChains = GetBoolArg("-walletrejectlongchains", DEFAULT_WALLET_REJECT_LONG_CHAINS);
 
     bool res = nTargetValue <= nValueFromPresetInputs ||
-        SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 1, 6, 0, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only) ||
-        SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 1, 1, 0, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only) ||
-        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, 2, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only)) ||
-        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, std::min((size_t)4, nMaxChainLength/3), vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only)) ||
-        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, nMaxChainLength/2, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only)) ||
-        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, nMaxChainLength, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only)) ||
-        (bSpendZeroConfChange && !fRejectLongChains && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, std::numeric_limits<uint64_t>::max(), vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, knapsack_only));
+        SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 1, 6, 0, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only) ||
+        SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 1, 1, 0, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only) ||
+        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, 2, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only)) ||
+        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, std::min((size_t)4, nMaxChainLength/3), vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only)) ||
+        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, nMaxChainLength/2, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only)) ||
+        (bSpendZeroConfChange && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, nMaxChainLength, vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only)) ||
+        (bSpendZeroConfChange && !fRejectLongChains && SelectCoinsMinConf(nTargetValue - nValueFromPresetInputs, 0, 1, std::numeric_limits<uint64_t>::max(), vCoins, setCoinsRet, nValueRet, fee_ret, effective_fee, used_bnb, knapsack_only));
 
     // because SelectCoinsMinConf clears the setCoinsRet, we now add the possible inputs to the coinset
     setCoinsRet.insert(setPresetCoins.begin(), setPresetCoins.end());
@@ -2547,7 +2548,8 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 // Choose coins to use
                 CAmount nValueIn = 0;
                 setCoins.clear();
-                if (!SelectCoins(vAvailableCoins, nValueToSelect, setCoins, nValueIn, nFeeRet, nFeeRateNeeded, coinControl, !first_pass))
+                bool used_bnb = false;
+                if (!SelectCoins(vAvailableCoins, nValueToSelect, setCoins, nValueIn, nFeeRet, nFeeRateNeeded, used_bnb, coinControl, !first_pass))
                 {
                     // On the first pass and SelectCoins fails, that means the BnB selector failed to find
                     // a suitable set. In this case, only run the knapsack selector for all further iterations
@@ -2562,7 +2564,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 }
 
                 const CAmount nChange = nValueIn - nValueToSelect;
-                if (nChange > 0 && (!first_pass || nFeeRet == 0)) // nFeeRet is only 0 on the first pass if BnB was not used. 
+                if (nChange > 0 && !used_bnb) // Don't make change if bnb selector was used
                 {
                     // Fill a vout to ourself
                     // TODO: pass in scriptChange instead of reservekey so

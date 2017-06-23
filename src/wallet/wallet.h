@@ -669,7 +669,8 @@ private:
      * all coins from coinControl are selected; Never select unconfirmed coins
      * if they are not ours
      */
-    bool SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool& used_bnb, const CCoinControl *coinControl = NULL, bool knapsack_only = false) const;
+     // TODO: Change the hard coded change_size later when we aren't just using P2PKH change outputs
+    bool SelectCoins(const std::vector<COutput>& vAvailableCoins, const CAmount& nTargetValue, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool& used_bnb, const CCoinControl *coinControl = NULL, bool knapsack_only = false, int change_size = 148+34) const;
 
     CWalletDB *pwalletdbEncryption;
 
@@ -849,7 +850,8 @@ public:
      * completion the coin set and corresponding actual target value is
      * assembled
      */
-    bool SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int nConfTheirs, uint64_t nMaxAncestors, std::vector<COutput> vCoins, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool& used_bnb, bool only_knapsack = false) const;
+     // TODO: Change the hard coded change_size when we aren't only using P2PKH change outputs
+    bool SelectCoinsMinConf(const CAmount& nTargetValue, int nConfMine, int nConfTheirs, uint64_t nMaxAncestors, std::vector<COutput> vCoins, std::set<CInputCoin>& setCoinsRet, CAmount& nValueRet, CAmount& fee_ret, const CFeeRate effective_fee, bool& used_bnb, bool only_knapsack = false, int change_size = 148+34) const;
 
     bool IsSpent(const uint256& hash, unsigned int n) const;
 

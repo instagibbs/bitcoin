@@ -231,6 +231,11 @@ UniValue validateaddress(const JSONRPCRequest& request)
                     ret.push_back(Pair("hdmasterkeyid", it->second.hdMasterKeyID.GetHex()));
                 }
             }
+
+	        if (pwallet->IsHDWatchOnly()) {
+                CBitcoinExtPubKey watchOnly(pwallet->GetHDChain().masterPubKey);
+                ret.push_back(Pair("hdwatchonlykey", watchOnly.ToString()));
+            }
         }
 #endif
     }

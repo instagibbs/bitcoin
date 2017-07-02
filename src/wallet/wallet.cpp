@@ -2503,7 +2503,22 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 CAmount nValueToSelect = nValue;
                 if (nSubtractFeeFromAmount == 0)
                     nValueToSelect += nFeeRet;
+
+                // Get the fee rate to use effective values in coin selection
+                // Allow to override the default confirmation target over the CoinControl instance
+                int currentConfirmationTarget = nTxConfirmTarget;
+                if (coinControl && coinControl->nConfirmTarget > 0) {
+                    currentConfirmationTarget = coinControl->nConfirmTarget;
+                }
+
+                CFeeRate nFeeRateNeeded = GetMinimumFeeRate(currentConfirmationTarget, ::mempool, ::feeEstimator, &feeCalc);
+
+                if (coinControl && coinControl->fOverrideFeeRate) {
+                    nFeeRateNeeded = coinControl->nFeeRate;
+                }
+
                 // vouts to the payees
+                CAmount output_fees = 0;
                 for (const auto& recipient : vecSend)
                 {
                     CTxOut txout(recipient.nAmount, recipient.scriptPubKey);
@@ -2517,6 +2532,9 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                             fFirst = false;
                             txout.nValue -= nFeeRet % nSubtractFeeFromAmount;
                         }
+                    } else if (first_pass){
+                        // On the first pass BnB selector, include the fee cost for outputs
+                        output_fees +=  nFeeRateNeeded.GetFee(recipient.scriptPubKey.size());
                     }
 
                     if (IsDust(txout, ::dustRelayFee))
@@ -2534,18 +2552,8 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                     }
                     txNew.vout.push_back(txout);
                 }
-
-                // Get the fee rate to use effective values in coin selection
-                // Allow to override the default confirmation target over the CoinControl instance
-                int currentConfirmationTarget = nTxConfirmTarget;
-                if (coinControl && coinControl->nConfirmTarget > 0) {
-                    currentConfirmationTarget = coinControl->nConfirmTarget;
-                }
-
-                CFeeRate nFeeRateNeeded = GetMinimumFeeRate(currentConfirmationTarget, ::mempool, ::feeEstimator, &feeCalc);
-
-                if (coinControl && coinControl->fOverrideFeeRate) {
-                    nFeeRateNeeded = coinControl->nFeeRate;
+                if (first_pass) {
+                    nValueToSelect += output_fees;
                 }
 
                 // Choose coins to use
@@ -2564,6 +2572,9 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                         strFailReason = _("Insufficient funds");
                         return false;
                     }
+                }
+                if (first_pass) {
+                    nFeeRet += output_fees;
                 }
 
                 const CAmount nChange = nValueIn - nValueToSelect;

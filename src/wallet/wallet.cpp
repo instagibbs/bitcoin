@@ -4096,7 +4096,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
     }
 
 
-    std::string externalHd = GetArg("-externalhd", "");
+    std::string externalHd = gArgs.GetArg("-externalhd", "");
     CExtPubKey extPubKey;
     if (!externalHd.empty()) {
         CBitcoinExtPubKey bitcoinExtPubKey(externalHd);

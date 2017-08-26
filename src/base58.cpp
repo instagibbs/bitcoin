@@ -3,10 +3,12 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "base58.h"
+#include "bech32.h"
 
 #include "hash.h"
 #include "script/script.h"
 #include "uint256.h"
+#include "utilstrencodings.h"
 
 #include <assert.h>
 #include <string.h>
@@ -235,7 +237,31 @@ public:
         return EncodeBase58Check(data);
     }
 
-    std::string operator()(const CNoDestination& no) const { return ""; }
+    std::string operator()(const WitnessV0KeyHash& id) const
+    {
+        std::vector<unsigned char> data = {0};
+        ConvertBits<8, 5, true>(data, id.begin(), id.end());
+        return bech32::Encode(m_params.Bech32HRP(), data);
+    }
+
+    std::string operator()(const WitnessV0ScriptHash& id) const
+    {
+        std::vector<unsigned char> data = {0};
+        ConvertBits<8, 5, true>(data, id.begin(), id.end());
+        return bech32::Encode(m_params.Bech32HRP(), data);
+    }
+
+    std::string operator()(const WitnessUnknown& id) const
+    {
+        if (id.version < 1 || id.version > 16 || id.length < 2 || id.length > 40) {
+            return {};
+        }
+        std::vector<unsigned char> data = {(unsigned char)id.version};
+        ConvertBits<8, 5, true>(data, id.program, id.program + id.length);
+        return bech32::Encode(m_params.Bech32HRP(), data);
+    }
+
+    std::string operator()(const CNoDestination& no) const { return {}; }
 };
 
 CTxDestination DecodeDestination(const std::string& str, const CChainParams& params)
@@ -253,6 +279,34 @@ CTxDestination DecodeDestination(const std::string& str, const CChainParams& par
         if (data.size() == 20 + script_prefix.size() && std::equal(script_prefix.begin(), script_prefix.end(), data.begin())) {
             memcpy(hash.begin(), &data[script_prefix.size()], 20);
             return CScriptID(hash);
+        }
+    }
+    auto bech = bech32::Decode(str);
+    if (bech.second.size() > 0 && bech.first == params.Bech32HRP()) {
+        // Bech32 decoding
+        int version = bech.second[0];
+        if (ConvertBits<5, 8, false>(data, bech.second.begin() + 1, bech.second.end())) {
+            if (version == 0) {
+                if (data.size() == 20) {
+                    WitnessV0KeyHash id;
+                    memcpy(id.begin(), data.data(), 20);
+                    return id;
+                }
+                if (data.size() == 32) {
+                    WitnessV0ScriptHash id;
+                    memcpy(id.begin(), data.data(), 32);
+                    return id;
+                }
+                return CNoDestination();
+            }
+            if (version > 16 || data.size() < 2 || data.size() > 40) {
+                return CNoDestination();
+            }
+            WitnessUnknown unk;
+            unk.version = version;
+            memcpy(unk.program, data.data(), data.size());
+            unk.length = data.size();
+            return unk;
         }
     }
     return CNoDestination();

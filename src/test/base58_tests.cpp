@@ -91,6 +91,18 @@ public:
     {
         return (exp_addrType == "none");
     }
+    bool operator()(const WitnessV0KeyHash& id) const
+    {
+        return (exp_addrType == "p2wpkh");
+    }
+    bool operator()(const WitnessV0ScriptHash& id) const
+    {
+        return (exp_addrType == "p2wsh");
+    }
+    bool operator()(const WitnessUnknown& id) const
+    {
+        return (exp_addrType == strprintf("p2w?%c", 'a' + id.version));
+    }
 };
 
 // Visitor to check address payload
@@ -113,6 +125,22 @@ public:
     bool operator()(const CNoDestination &no) const
     {
         return exp_payload.size() == 0;
+    }
+    bool operator()(const WitnessV0KeyHash& id) const
+    {
+        uint160 exp_key(exp_payload);
+        return exp_key == id;
+    }
+    bool operator()(const WitnessV0ScriptHash& id) const
+    {
+        uint256 exp_key;
+        memcpy(exp_key.begin(), exp_payload.data(), exp_payload.size());
+        return exp_key == id;
+    }
+    bool operator()(const WitnessUnknown& id) const
+    {
+        if (id.length != exp_payload.size()) return false;
+        return memcmp(id.program, exp_payload.data(), exp_payload.size()) == 0;
     }
 };
 
@@ -189,6 +217,7 @@ BOOST_AUTO_TEST_CASE(base58_keys_valid_gen)
         const UniValue &metadata = test[2].get_obj();
         bool isPrivkey = find_value(metadata, "isPrivkey").get_bool();
         bool isTestnet = find_value(metadata, "isTestnet").get_bool();
+        bool try_case_flip = find_value(metadata, "tryCaseFlip").isNull() ? false : find_value(metadata, "tryCaseFlip").get_bool();
         if (isTestnet)
             SelectParams(CBaseChainParams::TESTNET);
         else
@@ -218,14 +247,39 @@ BOOST_AUTO_TEST_CASE(base58_keys_valid_gen)
             else if(exp_addrType == "none")
             {
                 dest = CNoDestination();
-            }
-            else
-            {
+            } else if (exp_addrType == "p2wpkh") {
+                WitnessV0KeyHash id;
+                memcpy(id.begin(), exp_payload.data(), 20);
+                dest = id;
+            } else if (exp_addrType == "p2wsh") {
+                WitnessV0ScriptHash id;
+                memcpy(id.begin(), exp_payload.data(), 32);
+                dest = id;
+            } else if (exp_addrType.size() == 5 && exp_addrType.substr(0, 4) == "p2w?") {
+                WitnessUnknown unk;
+                memcpy(unk.program, exp_payload.data(), exp_payload.size());
+                unk.length = exp_payload.size();
+                unk.version = exp_addrType[4] - 'a';
+                dest = unk;
+            } else {
                 BOOST_ERROR("Bad addrtype: " << strTest);
                 continue;
             }
             std::string address = EncodeDestination(dest);
-            BOOST_CHECK_MESSAGE(address == exp_base58string, "mismatch: " + strTest);
+            BOOST_CHECK_MESSAGE(address == exp_base58string, strprintf("mismatch: %s: \"%s\" != \"%s\"", strTest, address, exp_base58string));
+
+            CTxDestination dest2 = DecodeDestination(address);
+            BOOST_CHECK_MESSAGE(dest == dest2, strprintf("mismatch in encoding: %s", strTest));
+
+            for (char& c : address) {
+                if (c >= 'a' && c <= 'z') {
+                    c = (c - 'a') + 'A';
+                } else if (c >= 'A' && c <= 'Z') {
+                    c = (c - 'A') + 'a';
+                }
+            }
+            dest2 = DecodeDestination(address);
+            BOOST_CHECK_MESSAGE(try_case_flip == (dest == dest2), strprintf("mismatch in uppercase encoding: %s", strTest));
         }
     }
 
@@ -251,7 +305,10 @@ BOOST_AUTO_TEST_CASE(base58_keys_invalid)
 
         // must be invalid as public and as private key
         destination = DecodeDestination(exp_base58string);
+        SelectParams(CBaseChainParams::MAIN);
         BOOST_CHECK_MESSAGE(!IsValidDestination(destination), "IsValid pubkey:" + strTest);
+        SelectParams(CBaseChainParams::TESTNET);
+        BOOST_CHECK_MESSAGE(!IsValidDestination(destination), "IsValid pubkey for testnet:" + strTest);
         secret.SetString(exp_base58string);
         BOOST_CHECK_MESSAGE(!secret.IsValid(), "IsValid privkey:" + strTest);
     }

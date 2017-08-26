@@ -142,6 +142,9 @@ isminetype IsMine(const CKeyStore &keystore, const CScript& scriptPubKey, bool& 
             return ISMINE_SPENDABLE;
         break;
     }
+
+    case TX_WITNESS_UNKNOWN:
+        break;
     }
 
     if (keystore.HaveWatchOnly(scriptPubKey)) {

@@ -50,6 +50,16 @@ public:
         if (pwallet && pwallet->GetPubKey(keyID, vchPubKey)) {
             obj.push_back(Pair("pubkey", HexStr(vchPubKey)));
             obj.push_back(Pair("iscompressed", vchPubKey.IsCompressed()));
+
+            const auto& meta = pwallet->mapKeyMetadata;
+            auto it = meta.find(keyID);
+            if (it != meta.end()) {
+                obj.push_back(Pair("timestamp", it->second.nCreateTime));
+                if (!it->second.hdKeypath.empty()) {
+                    obj.push_back(Pair("hdkeypath", it->second.hdKeypath));
+                    obj.push_back(Pair("hdmasterkeyid", it->second.hdMasterKeyID.GetHex()));
+                }
+            }
         }
         return obj;
     }
@@ -71,8 +81,14 @@ public:
                 a.push_back(EncodeDestination(addr));
             }
             obj.push_back(Pair("addresses", a));
-            if (whichType == TX_MULTISIG)
+            if (whichType == TX_MULTISIG) {
                 obj.push_back(Pair("sigsrequired", nRequired));
+            }
+            const auto& meta = pwallet->mapKeyMetadata;
+            auto it = meta.find(scriptID);
+            if (it != meta.end()) {
+                obj.push_back(Pair("timestamp", it->second.nCreateTime));
+            }
         }
         return obj;
     }
@@ -85,9 +101,17 @@ public:
         obj.push_back(Pair("iswitness", true));
         obj.push_back(Pair("witness_version", 0));
         obj.push_back(Pair("witness_program", HexStr(id.begin(), id.end())));
-        if (pwallet && pwallet->GetPubKey(CKeyID(id), pubkey)) {
-            obj.push_back(Pair("pubkey", HexStr(pubkey)));
+        if (pwallet) {
+            if (pwallet->GetPubKey(CKeyID(id), pubkey)) {
+                obj.push_back(Pair("pubkey", HexStr(pubkey)));
+            }
+            const auto& meta = pwallet->mapKeyMetadata;
+            auto it = meta.find(CKeyID(id));
+            if (it != meta.end()) {
+                obj.push_back(Pair("timestamp", it->second.nCreateTime));
+            }
         }
+
         return obj;
     }
 
@@ -99,12 +123,20 @@ public:
         obj.push_back(Pair("iswitness", true));
         obj.push_back(Pair("witness_version", 0));
         obj.push_back(Pair("witness_program", HexStr(id.begin(), id.end())));
-        CRIPEMD160 hasher;
-        uint160 hash;
-        hasher.Write(id.begin(), 32).Finalize(hash.begin());
-        if (pwallet && pwallet->GetCScript(CScriptID(hash), subscript)) {
-            obj.push_back(Pair("hex", HexStr(subscript.begin(), subscript.end())));
+        if (pwallet) {
+            CRIPEMD160 hasher;
+            uint160 hash;
+            hasher.Write(id.begin(), 32).Finalize(hash.begin());
+            if (pwallet->GetCScript(CScriptID(hash), subscript)) {
+                obj.push_back(Pair("hex", HexStr(subscript.begin(), subscript.end())));
+            }
+            const auto& meta = pwallet->mapKeyMetadata;
+            auto it = meta.find(CScriptID(hash));
+            if (it != meta.end()) {
+                obj.push_back(Pair("timestamp", it->second.nCreateTime));
+            }
         }
+
         return obj;
     }
 
@@ -185,21 +217,6 @@ UniValue validateaddress(const JSONRPCRequest& request)
         ret.pushKVs(detail);
         if (pwallet && pwallet->mapAddressBook.count(dest)) {
             ret.push_back(Pair("account", pwallet->mapAddressBook[dest].name));
-        }
-        if (pwallet) {
-            const auto& meta = pwallet->mapKeyMetadata;
-            const CKeyID *keyID = boost::get<CKeyID>(&dest);
-            auto it = keyID ? meta.find(*keyID) : meta.end();
-            if (it == meta.end()) {
-                it = meta.find(CScriptID(scriptPubKey));
-            }
-            if (it != meta.end()) {
-                ret.push_back(Pair("timestamp", it->second.nCreateTime));
-                if (!it->second.hdKeypath.empty()) {
-                    ret.push_back(Pair("hdkeypath", it->second.hdKeypath));
-                    ret.push_back(Pair("hdmasterkeyid", it->second.hdMasterKeyID.GetHex()));
-                }
-            }
         }
 #endif
     }

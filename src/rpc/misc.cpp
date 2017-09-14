@@ -83,6 +83,10 @@ public:
             obj.push_back(Pair("addresses", a));
             if (whichType == TX_MULTISIG) {
                 obj.push_back(Pair("sigsrequired", nRequired));
+            } else if (whichType == TX_WITNESS_V0_KEYHASH) {
+                UniValue detail = boost::apply_visitor(DescribeAddressVisitor(pwallet), addresses[0]);
+                obj.push_back(Pair("hdkeypath", detail["hdkeypath"]));
+                obj.push_back(Pair("hdmasterkeyid", detail["hdmasterkeyid"]));
             }
             const auto& meta = pwallet->mapKeyMetadata;
             auto it = meta.find(scriptID);
@@ -109,6 +113,10 @@ public:
             auto it = meta.find(CKeyID(id));
             if (it != meta.end()) {
                 obj.push_back(Pair("timestamp", it->second.nCreateTime));
+                if (!it->second.hdKeypath.empty()) {
+                    obj.push_back(Pair("hdkeypath", it->second.hdKeypath));
+                    obj.push_back(Pair("hdmasterkeyid", it->second.hdMasterKeyID.GetHex()));
+                }
             }
         }
 

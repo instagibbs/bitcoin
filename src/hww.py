@@ -18,10 +18,12 @@ def signhwwtransaction(txtosign, prevtxstospend):
     # Get prevout information (for now we support p2pkh)
 
     # Get keypaths of things you're spending, prepend m/44'/0'/0'
-    keypath_start = "44'/0'/0'"
+    #keypath_start = "44'/0'/0'"
+    keypath_start = "0'/0'/0'/0'"
     keypaths = []
     prevouts = []
     input_types = []
+    input_pubkeys = []
     sequence_numbers = []
     for vin in tx["vin"]:
         if "hdKeypath" not in vin:
@@ -29,7 +31,10 @@ def signhwwtransaction(txtosign, prevtxstospend):
         else:
             keypaths.append(keypath_start+vin["hdKeypath"][1:])
 
-        prevouts.append((vin["txid"], vin["vout"])) 
+        pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
+        input_pubkeys.append(''.join('{:02x}'.format(x) for x in pubkey_bytes))
+
+        prevouts.append((vin["txid"], vin["vout"]))
         input_type = None
         for prevtx in prevtxs:
             if vin["txid"] == prevtx["txid"]:
@@ -45,7 +50,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
         sequence_numbers.append(seq)
 
     # Define change if possible
-    change_path = "0'/0'/0'/0'"
+    change_path = "0'/0'/0'/1'"
     for output in tx["vout"]:
         if "hdKeypath" in output:
             change_path = keypath_start+output["hdKeypath"][1:]
@@ -81,7 +86,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     input_scripts = []
     for i in range(len(signatures)):
         if input_types[i] == "pubkeyhash":
-            input_scripts.append(get_regular_input_script(signatures[i][0], inputPubKey[i]))
+            input_scripts.append(get_regular_input_script(signatures[i][0], input_pubkeys[i]))
         elif input_types[i] == "pubkey":
             input_scripts.append(get_p2pk_input_script(signatures[i][0]))
         else:
@@ -97,7 +102,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], process_trusted)
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
-    return { "hex": transaction_hex, "prehex": tx["hex"]}
+    return { "hex": transaction_hex, "prehex": tx["hex"], "changepath": change_path, "pubkeys": input_pubkeys}
 
 
 dispatcher = Dispatcher({

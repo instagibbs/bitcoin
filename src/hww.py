@@ -32,7 +32,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
             keypaths.append(keypath_start+vin["hdKeypath"][1:])
 
         pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
-        input_pubkeys.append(''.join('{:02x}'.format(x) for x in pubkey_bytes))
+        input_pubkeys.append(pubkey_bytes)#(''.join('{:02x}'.format(x) for x in pubkey_bytes))
 
         prevouts.append((vin["txid"], vin["vout"]))
         input_type = None
@@ -102,7 +102,15 @@ def signhwwtransaction(txtosign, prevtxstospend):
     transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], process_trusted)
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
-    return { "hex": transaction_hex, "prehex": tx["hex"], "changepath": change_path, "pubkeys": input_pubkeys}
+    publength = []
+    for pubkey in input_pubkeys:
+        publength.append(len(pubkey))
+
+    input_lengths = []
+    for input in input_scripts:
+        input_lengths.append(len(input))
+
+    return { "hex": transaction_hex} #, "prehex": tx["hex"], "changepath": change_path, "publengths":publength, "inputlen":input_lengths, "keypaths":keypaths}
 
 
 dispatcher = Dispatcher({
@@ -112,10 +120,10 @@ dispatcher = Dispatcher({
 logging.basicConfig()
 request = sys.stdin.read()
 response = JSONRPCResponseManager.handle(request, dispatcher)
-jsonout = json.loads(response.json)
-txout = jsonout["result"]["hex"]
-file = open("writeout.txt", 'w')
-file.write(response.json+"\n")
-file.write(txout)
-file.close()
+#jsonout = json.loads(response.json)
+#txout = jsonout["result"]["hex"]
+#file = open("writeout.txt", 'w')
+#file.write(response.json+"\n")
+#file.write(txout)
+#file.close()
 print(response.json)

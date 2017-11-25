@@ -10,10 +10,14 @@ import struct
 def signhwwtransaction(txtosign, prevtxstospend):
     tx = json.loads(txtosign)
     prevtxs = json.loads(prevtxstospend)
-
+    #return {"tx":tx}
     # Load Ledger dongle
+
     dongle = getDongle(True)
     app = btchip(dongle)
+    #dongle.close()
+
+    #return {"tx":tx}
 
     # Get prevout information (for now we support p2pkh)
 
@@ -110,7 +114,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     for input in input_scripts:
         input_lengths.append(len(input))
 
-    return { "hex": transaction_hex} #, "prehex": tx["hex"], "changepath": change_path, "publengths":publength, "inputlen":input_lengths, "keypaths":keypaths}
+    return { "hex": transaction_hex}
 
 
 dispatcher = Dispatcher({
@@ -122,7 +126,7 @@ request = sys.stdin.read()
 response = JSONRPCResponseManager.handle(request, dispatcher)
 #jsonout = json.loads(response.json)
 #txout = jsonout["result"]["hex"]
-#file = open("writeout.txt", 'w')
+#file = open("writeout2.txt", 'w')
 #file.write(response.json+"\n")
 #file.write(txout)
 #file.close()

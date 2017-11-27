@@ -1606,8 +1606,7 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
         std::string line;
         std::ifstream myReadFile ("writeout.txt");
         if (myReadFile.is_open()) {
-            if ( getline (myReadFile,line) ) {
-            } else {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
                 strFailReason = _("Signing transaction to file failed");
                 return false;
             }

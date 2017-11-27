@@ -127,7 +127,7 @@ response = JSONRPCResponseManager.handle(request, dispatcher)
 #jsonout = json.loads(response.json)
 #txout = jsonout["result"]["hex"]
 file = open("writeout.txt", 'w')
-file.write(response.json+"\n")
+file.write(json.loads(response.json)["result"]["hex"]+"\n")
 #file.write(txout)
 file.close()
 print(response.json)

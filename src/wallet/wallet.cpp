@@ -38,6 +38,9 @@
 #include <boost/process.hpp>
 #include <boost/thread.hpp>
 
+#include <iostream>
+#include <fstream>
+
 std::vector<CWalletRef> vpwallets;
 /** Transaction fee set by the user */
 CFeeRate payTxFee(DEFAULT_TRANSACTION_FEE);
@@ -1599,6 +1602,22 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
 
     if (error.isNull()) {
         const UniValue& hex = find_value(result, "hex");
+
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( getline (myReadFile,line) ) {
+            } else {
+                strFailReason = _("Signing transaction to file failed");
+                return false;
+            }
+            if (!DecodeHexTx(txRet, line)) {
+                strFailReason = _("Malformed signed transaction failed");
+                return false;
+            } else {
+                return true;
+            }
+        }
 
         if (!DecodeHexTx(txRet, hex.getValStr())) {
             strFailReason = _("Signing transaction failed");

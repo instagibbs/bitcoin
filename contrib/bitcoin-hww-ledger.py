@@ -7,6 +7,10 @@ from btchip.btchip import *
 from btchip.btchipUtils import *
 import struct
 
+'''
+NOTE: This file should be placed in the base datadir
+'''
+
 def signhwwtransaction(txtosign, prevtxstospend):
     tx = json.loads(txtosign)
     prevtxs = json.loads(prevtxstospend)

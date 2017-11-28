@@ -101,13 +101,12 @@ def signhwwtransaction(txtosign, prevtxstospend):
             raise Exception("Only p2pkh and p2pk supported at this time.")
 
     processed_inputs = trusted_inputs
-    process_trusted = True
 
     trusted_inputs_and_scripts = []
     for processed_input, input_script in zip(processed_inputs, input_scripts):
         trusted_inputs_and_scripts.append([processed_input['value'], input_script, sequence_numbers[i]])
 
-    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], process_trusted)
+    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"])
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
     publength = []

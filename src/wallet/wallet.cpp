@@ -1579,7 +1579,7 @@ bool CWallet::IsHardwareWallet() const
     return !gArgs.GetArg("-hardwarewallet", "").empty();
 }
 
-UniValue CWallet::CallHardwareWallet(const UniValue valRequest) const
+UniValue CWallet::CallHardwareWallet(const UniValue valRequest)
 {
     std::string strCommand = gArgs.GetArg("-hardwarewallet", "");
     std::string strRequest = valRequest.write() + "\n";
@@ -4357,9 +4357,19 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
     }
 
-    if (gArgs.IsArgSet("-hardwarewallet") && !walletInstance->IsExternalHD()) {
-        InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
-        return NULL;
+    if (gArgs.IsArgSet("-hardwarewallet")) {
+        if (!walletInstance->IsExternalHD()) {
+            InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
+            return nullptr;
+        }
+        // Check the script exists where it's expected
+        try {
+            UniValue params(UniValue::VARR);
+            UniValue valReply = CWallet::CallHardwareWallet(JSONRPCRequestObj("helloworld", params, 1));
+        } catch (...) {
+            InitError(_("Error finding valid external signing driver in base data directory."));
+            return nullptr;
+        }
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);

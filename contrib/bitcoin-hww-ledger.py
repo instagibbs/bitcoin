@@ -126,12 +126,6 @@ def signhwwtransaction(txtosign, prevtxstospend):
     return { "hex": transaction_hex}
 
 def signmessage(keypathjson, messagejson):
-    # Write to file as workaround
-    #file = open("writeout.txt", 'w')
-    #file.write(keypathjson+'\n')
-    #file.write(messagejson+'\n')
-    #file.close()
-
 
     keypath = keypathjson#json.loads(keypathjson)
     message = messagejson#json.loads(messagejson)

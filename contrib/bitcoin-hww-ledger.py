@@ -66,7 +66,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     outputData = ""
     trusted_inputs = []
     signatures = [[]]*len(prevouts)
-    
+
     tx_bytes = bytearray(tx["hex"].decode('hex'))
 
     # Compile trusted inputs for non-segwit signing

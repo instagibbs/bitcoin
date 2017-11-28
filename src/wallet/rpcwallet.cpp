@@ -591,20 +591,66 @@ UniValue signmessage(const JSONRPCRequest& request)
     if (!addr.GetKeyID(keyID))
         throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
 
-    CKey key;
-    if (!pwallet->GetKey(keyID, key)) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Private key not available");
+    if (pwallet->IsHardwareWallet()) {
+        UniValue params(UniValue::VARR);
+
+        const auto& meta = pwallet->mapKeyMetadata;
+        auto it = addr.GetKeyID(keyID) ? meta.find(keyID) : meta.end();
+        if (it == meta.end()) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Private key not known to this externalhd wallet");
+        }
+        if (!it->second.hdKeypath.empty()) {
+            params.push_back(it->second.hdKeypath);
+        } else {
+            throw JSONRPCError(RPC_WALLET_ERROR, "No known keypath for this address in the wallet.");
+        }
+
+        params.push_back(strMessage);
+
+        UniValue valReply = pwallet->CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+        const UniValue& result = find_value(valReply, "result");
+        const UniValue& error = find_value(valReply, "error");
+
+        if (error.isNull()) {
+            const UniValue& signature = find_value(result, "signature");
+
+			// Workaround to get the message back
+            std::string line;
+            std::ifstream myReadFile ("writeout.txt");
+            if (myReadFile.is_open()) {
+                if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Signing message to file failed");
+                }
+				return line;
+            } else if (signature.getValStr().empty()) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Signing message failed");
+			} else {
+			    // This isn't working for now FIXME
+                return signature.getValStr();
+            }
+        } else {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Error occured during signing.");
+        }
+
+    } else {
+        CHashWriter ss(SER_GETHASH, 0);
+        ss << strMessageMagic;
+        ss << strMessage;
+
+
+        CKey key;
+        if (!pwallet->GetKey(keyID, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Private key not available");
+        }
+
+        std::vector<unsigned char> vchSig;
+        if (!key.SignCompact(ss.GetHash(), vchSig)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Sign failed");
+        }
+        return EncodeBase64(&vchSig[0], vchSig.size());
     }
 
-    CHashWriter ss(SER_GETHASH, 0);
-    ss << strMessageMagic;
-    ss << strMessage;
-
-    std::vector<unsigned char> vchSig;
-    if (!key.SignCompact(ss.GetHash(), vchSig))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Sign failed");
-
-    return EncodeBase64(&vchSig[0], vchSig.size());
 }
 
 UniValue getreceivedbyaddress(const JSONRPCRequest& request)

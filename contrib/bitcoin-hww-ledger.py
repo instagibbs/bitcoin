@@ -6,28 +6,27 @@ import json
 from btchip.btchip import *
 from btchip.btchipUtils import *
 import struct
+import base64
 
 '''
 NOTE: This file should be placed in the base datadir
 '''
 
+# Keypath prepend, based on xpub path
+#keypath_start = "44'/0'/0'"
+keypath_start = "0'/0'/0'/0'"
+
 def signhwwtransaction(txtosign, prevtxstospend):
     tx = json.loads(txtosign)
     prevtxs = json.loads(prevtxstospend)
-    #return {"tx":tx}
-    # Load Ledger dongle
 
+    # Load Ledger dongle
     dongle = getDongle(True)
     app = btchip(dongle)
-    #dongle.close()
 
-    #return {"tx":tx}
-
-    # Get prevout information (for now we support p2pkh)
+    # Get prevout information (for now we support p2pk(h))
 
     # Get keypaths of things you're spending, prepend m/44'/0'/0'
-    #keypath_start = "44'/0'/0'"
-    keypath_start = "0'/0'/0'/0'"
     keypaths = []
     prevouts = []
     input_types = []
@@ -126,9 +125,53 @@ def signhwwtransaction(txtosign, prevtxstospend):
 
     return { "hex": transaction_hex}
 
+def signmessage(keypathjson, messagejson):
+    # Write to file as workaround
+    #file = open("writeout.txt", 'w')
+    #file.write(keypathjson+'\n')
+    #file.write(messagejson+'\n')
+    #file.close()
+
+
+    keypath = keypathjson#json.loads(keypathjson)
+    message = messagejson#json.loads(messagejson)
+
+    dongle = getDongle(True)
+    app = btchip(dongle)
+
+    total_keypath = keypath_start+keypath[1:]
+
+    app.getWalletPublicKey(total_keypath, True)
+
+    app.signMessagePrepare(total_keypath, bytearray(message, 'utf8'))
+
+    signature = app.signMessageSign()
+
+    # Convert signature to Bitcoin "standard"
+    rLength = signature[3]
+    r = signature[4 : 4 + rLength]
+    sLength = signature[4 + rLength + 1]
+    s = signature[4 + rLength + 2:]
+    if rLength == 33:
+        r = r[1:]
+    if sLength == 33:
+        s = s[1:]
+    r = str(r)
+    s = str(s)
+
+    sig = chr(27 + 4 + (signature[0] & 0x01)) + r + s
+
+    # Write to file as workaround
+    file = open("writeout.txt", 'w')
+    file.write(base64.b64encode(sig))
+    file.close()
+
+    return {"signature":base64.b64encode(sig)}
+
 
 dispatcher = Dispatcher({
     "signhwwtransaction": signhwwtransaction,
+    "signmessage": signmessage,
 })
 
 logging.basicConfig()

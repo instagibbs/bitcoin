@@ -119,6 +119,11 @@ def signhwwtransaction(txtosign, prevtxstospend):
     for input in input_scripts:
         input_lengths.append(len(input))
 
+    # Write to file as workaround
+    file = open("writeout.txt", 'w')
+    file.write(transaction_hex)
+    file.close()
+
     return { "hex": transaction_hex}
 
 
@@ -129,10 +134,4 @@ dispatcher = Dispatcher({
 logging.basicConfig()
 request = sys.stdin.read()
 response = JSONRPCResponseManager.handle(request, dispatcher)
-#jsonout = json.loads(response.json)
-#txout = jsonout["result"]["hex"]
-file = open("writeout.txt", 'w')
-file.write(json.loads(response.json)["result"]["hex"]+"\n")
-#file.write(txout)
-file.close()
 print(response.json)

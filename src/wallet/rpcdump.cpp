@@ -243,6 +243,9 @@ UniValue importaddress(const JSONRPCRequest& request)
             + HelpExampleRpc("importaddress", "\"myscript\", \"testing\", false")
         );
 
+    if (pwallet->IsExternalHD()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "External HD wallets are not allowed to import addresses or keys.");
+    }
 
     std::string strLabel = "";
     if (!request.params[1].isNull())
@@ -408,6 +411,9 @@ UniValue importpubkey(const JSONRPCRequest& request)
             + HelpExampleRpc("importpubkey", "\"mypubkey\", \"testing\", false")
         );
 
+    if (pwallet->IsExternalHD()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "External HD wallets are not allowed to import addresses or keys.");
+    }
 
     std::string strLabel = "";
     if (!request.params[1].isNull())
@@ -464,6 +470,10 @@ UniValue importwallet(const JSONRPCRequest& request)
             "\nImport using the json rpc call\n"
             + HelpExampleRpc("importwallet", "\"test\"")
         );
+
+    if (pwallet->IsExternalHD()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "External HD wallets are not allowed to import addresses or keys.");
+    }
 
     if (fPruneMode)
         throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled in pruned mode");
@@ -1070,6 +1080,10 @@ UniValue importmulti(const JSONRPCRequest& mainRequest)
 
             "\nResponse is an array with the same size as the input that has the execution result :\n"
             "  [{ \"success\": true } , { \"success\": false, \"error\": { \"code\": -1, \"message\": \"Internal Server Error\"} }, ... ]\n");
+
+    if (pwallet->IsExternalHD()) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "External HD wallets are not allowed to import addresses or keys.");
+    }
 
     // clang-format on
 

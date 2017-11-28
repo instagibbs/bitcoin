@@ -31,12 +31,13 @@ def signhwwtransaction(txtosign, prevtxstospend):
     sequence_numbers = []
     for vin in tx["vin"]:
         if "hdKeypath" not in vin:
+            raise Exception("All inputs must be signable by this seed.")
             keypaths.append("")
         else:
             keypaths.append(keypath_start+vin["hdKeypath"][1:])
 
         pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
-        input_pubkeys.append(pubkey_bytes)#(''.join('{:02x}'.format(x) for x in pubkey_bytes))
+        input_pubkeys.append(pubkey_bytes)
 
         prevouts.append((vin["txid"], vin["vout"]))
         input_type = None

@@ -243,6 +243,11 @@ UniValue validateaddress(const JSONRPCRequest& request)
                 if (!meta->hdKeypath.empty()) {
                     ret.push_back(Pair("hdkeypath", meta->hdKeypath));
                     ret.push_back(Pair("hdmasterkeyid", meta->hdMasterKeyID.GetHex()));
+                    if (pwallet->IsHardwareWallet()) {
+                        UniValue params(UniValue::VARR);
+                        params.push_back(meta->hdKeypath);
+                        UniValue valReply = pwallet->CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
+                    }
                 }
             }
 

@@ -168,10 +168,20 @@ def signmessage(keypathjson, messagejson):
 
     return {"signature":base64.b64encode(sig)}
 
+def validateaddress(keypath):
+    dongle = getDongle(True)
+    app = btchip(dongle)
+
+    total_keypath = keypath_start+keypath[1:]
+
+    app.getWalletPublicKey(total_keypath, True)
+
+    return {}
 
 dispatcher = Dispatcher({
     "signhwwtransaction": signhwwtransaction,
     "signmessage": signmessage,
+    "validateaddress": validateaddress
 })
 
 logging.basicConfig()

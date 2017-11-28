@@ -90,16 +90,6 @@ class ExternalHDTest(BitcoinTestFramework):
         assert_equal(len(unspent), 2)
         connect_nodes(self.nodes[1], 0)
         sync_chain([self.nodes[0], self.nodes[1]])
-        # using private key of mxKeRQP6gTdCW6jHhn9FW8bGXD8W1UpR6n
-        self.nodes[1].importprivkey("cTNoggeWzJPVK2EQtLb3Yj1J4sxH8Ktx81X9NvxUFwBv1RoPrxUA")
-        self.nodes[1].sendtoaddress("moZamE3ykhxM5kuBNfnDLnH3iAGd5f8gS5", "0.1")
-        sync_mempools([self.nodes[0], self.nodes[1]])
-        unspent = self.nodes[0].listunspent(0)
-        # The unconfirmed transaction should be safe
-        safe_unconf_found = False
-        for utxo in unspent:
-            safe_unconf_found |= (utxo["confirmations"] == 0 and utxo["safe"])
-        assert(safe_unconf_found)
 
 if __name__ == '__main__':
     ExternalHDTest().main()

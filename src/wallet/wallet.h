@@ -99,6 +99,9 @@ enum WalletFeature
     FEATURE_EXTERNAL_HD = 139901, // External Hierarchical key derivation after BIP32 (HD Wallet)
 
     FEATURE_NO_DEFAULT_KEY = 159900, // Wallet without a default key written
+    
+    FEATURE_EXTERNAL_HD = 1139901, // External Hierarchical key derivation after BIP32 (HD Wallet)
+    // This wallet should never be loaded in stock Bitcoin Core
 
     FEATURE_LATEST = FEATURE_COMPRPUBKEY // HD is optional, use FEATURE_COMPRPUBKEY as latest version
 };

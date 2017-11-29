@@ -4247,8 +4247,10 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             if (!walletInstance->SetHDMasterKey(masterPubKey))
                 throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
         } else {
-            if (!walletInstance->SetExternalHD(extPubKey))
+            walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
+            if (!walletInstance->SetExternalHD(extPubKey)) {
                 throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
+            }
         }
         // Top up the keypool
         if (!walletInstance->TopUpKeyPool()) {

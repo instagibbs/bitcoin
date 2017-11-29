@@ -10,6 +10,8 @@ import base64
 
 '''
 NOTE: This file should be placed in the base datadir
+
+xpub can be derived using https://www.ledgerwallet.com/api/demo.html or any other standard tool
 '''
 
 # Keypath prepend, based on xpub path

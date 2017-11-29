@@ -66,6 +66,7 @@ public:
 
     static const int VERSION_HD_BASE        = 1;
     static const int VERSION_HD_CHAIN_SPLIT = 2;
+    static const int VERSION_HD_PUBDERIV    = 255;
     static const int CURRENT_VERSION        = VERSION_HD_CHAIN_SPLIT;
     int nVersion;
 
@@ -79,6 +80,11 @@ public:
         READWRITE(masterKeyID);
         if (this->nVersion >= VERSION_HD_CHAIN_SPLIT)
             READWRITE(nInternalChainCounter);
+        if (this->nVersion == VERSION_HD_PUBDERIV) {
+            uint32_t deriv_model = 1;
+            READWRITE(deriv_model);
+            assert(deriv_model == 1);
+        }
     }
 
     void SetNull()

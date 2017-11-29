@@ -192,31 +192,32 @@ void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKe
         throw std::runtime_error(std::string(__func__) + ": Master key not found");
 
     masterKey.SetMaster(key.begin(), key.size());
+    std::string new_keypath = "m";
+
+    unsigned int nChildBase = BIP32_HARDENED_KEY_LIMIT;
+    if (hdChain.nVersion == CHDChain::VERSION_HD_PUBDERIV) {
+        nChildBase = 0;
+    }
 
     // derive m/0'
     // use hardened derivation (child keys >= 0x80000000 are hardened after bip32)
-    masterKey.Derive(accountKey, BIP32_HARDENED_KEY_LIMIT);
+    DeriveAndBuildKeypath(masterKey, accountKey, nChildBase, new_keypath);
 
     // derive m/0'/0' (external chain) OR m/0'/1' (internal chain)
     assert(internal ? CanSupportFeature(FEATURE_HD_SPLIT) : true);
-    accountKey.Derive(chainChildKey, BIP32_HARDENED_KEY_LIMIT+(internal ? 1 : 0));
+    DeriveAndBuildKeypath(accountKey, chainChildKey, nChildBase + (internal ? 1 : 0), new_keypath);
 
     // derive child key at next index, skip keys already known to the wallet
+    uint32_t & chain_counter = (internal ? hdChain.nInternalChainCounter : hdChain.nExternalChainCounter);
     do {
         // always derive hardened keys
         // childIndex | BIP32_HARDENED_KEY_LIMIT = derive childIndex in hardened child-index-range
         // example: 1 | BIP32_HARDENED_KEY_LIMIT == 0x80000001 == 2147483649
-        if (internal) {
-            chainChildKey.Derive(childKey, hdChain.nInternalChainCounter | BIP32_HARDENED_KEY_LIMIT);
-            metadata.hdKeypath = "m/0'/1'/" + std::to_string(hdChain.nInternalChainCounter) + "'";
-            hdChain.nInternalChainCounter++;
-        }
-        else {
-            chainChildKey.Derive(childKey, hdChain.nExternalChainCounter | BIP32_HARDENED_KEY_LIMIT);
-            metadata.hdKeypath = "m/0'/0'/" + std::to_string(hdChain.nExternalChainCounter) + "'";
-            hdChain.nExternalChainCounter++;
-        }
+        chainChildKey.Derive(childKey, nChildBase + chain_counter);
+        ++chain_counter;
     } while (HaveKey(childKey.key.GetPubKey().GetID()));
+    new_keypath += "/" + ChildKeyIndexToString(nChildBase + chain_counter);
+    metadata.hdKeypath = new_keypath;
     secret = childKey.key;
     metadata.hdMasterKeyID = hdChain.masterKeyID;
     // update the chain model in the database
@@ -679,7 +680,7 @@ bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
 
         // if we are using HD, replace the HD master key (seed) with a new one
         if (IsHDEnabled()) {
-            if (!SetHDMasterKey(GenerateNewHDMasterKey())) {
+            if (!SetHDMasterKeyHoP(GenerateNewHDMasterKey(), hdChain.nVersion != CHDChain::VERSION_HD_PUBDERIV)) {
                 return false;
             }
         }
@@ -1469,14 +1470,25 @@ CPubKey CWallet::GenerateNewHDMasterKey()
     return pubkey;
 }
 
-bool CWallet::SetHDMasterKey(const CPubKey& pubkey)
+bool CWallet::SetHDMasterKeyHoP(const CPubKey& pubkey, const bool hardened_deriv)
 {
     LOCK(cs_wallet);
     // store the keyid (hash160) together with
     // the child index counter in the database
     // as a hdchain object
     CHDChain newHdChain;
-    newHdChain.nVersion = CanSupportFeature(FEATURE_HD_SPLIT) ? CHDChain::VERSION_HD_CHAIN_SPLIT : CHDChain::VERSION_HD_BASE;
+    if (hardened_deriv) {
+        if (CanSupportFeature(FEATURE_HD_SPLIT)) {
+            newHdChain.nVersion = CHDChain::VERSION_HD_CHAIN_SPLIT;
+        } else {
+            newHdChain.nVersion = CHDChain::VERSION_HD_BASE;
+        }
+    } else {
+        if (!CanSupportFeature(FEATURE_HD_PUBDERIV)) {
+            throw std::runtime_error(std::string(__func__) + ": Tried to initialise a pubderiv master key in non-pubderiv wallet");
+        }
+        newHdChain.nVersion = CHDChain::VERSION_HD_PUBDERIV;
+    }
     newHdChain.masterKeyID = pubkey.GetID();
     SetHDChain(newHdChain, false);
 
@@ -3987,9 +3999,15 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
         walletInstance->SetMinVersion(FEATURE_NO_DEFAULT_KEY);
 
+            bool use_hardened_deriv = true;
+            if (gArgs.GetBoolArg("-usehdpubderiv", false)) {
+                walletInstance->SetMinVersion(FEATURE_HD_PUBDERIV);
+                use_hardened_deriv = false;
+            }
+
         // generate a new master key
         CPubKey masterPubKey = walletInstance->GenerateNewHDMasterKey();
-        if (!walletInstance->SetHDMasterKey(masterPubKey))
+        if (!walletInstance->SetHDMasterKeyHoP(masterPubKey, use_hardened_deriv))
             throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
 
         // Top up the keypool
@@ -4008,6 +4026,12 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
         if (!walletInstance->IsHDEnabled() && useHD) {
             InitError(strprintf(_("Error loading %s: You can't enable HD on an already existing non-HD wallet"), walletFile));
+            return nullptr;
+        }
+    }
+    if (gArgs.IsArgSet("-usehdpubderiv")) {
+        if (walletInstance->hdChain.nVersion != CHDChain::VERSION_HD_PUBDERIV) {
+            InitError(strprintf(_("Error loading %s: You can't enable HD public derivation on an already existing wallet without it"), walletFile));
             return nullptr;
         }
     }

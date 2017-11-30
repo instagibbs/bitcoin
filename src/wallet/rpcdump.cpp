@@ -655,6 +655,9 @@ UniValue dumpprivkey(const JSONRPCRequest& request)
     if (keyid.IsNull()) {
         throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to a key");
     }
+    if (pwallet->IsKeyDerived(keyid)) {
+        throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to a key (derived)");
+    }
     CKey vchSecret;
     if (!pwallet->GetKey(keyid, vchSecret)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Private key for address " + strAddress + " is not known");

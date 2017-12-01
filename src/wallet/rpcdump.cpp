@@ -620,6 +620,46 @@ UniValue importwallet(const JSONRPCRequest& request)
     return NullUniValue;
 }
 
+UniValue getxpub(const JSONRPCRequest& request)
+{
+    CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
+        return NullUniValue;
+    }
+
+    if (request.fHelp || request.params.size() != 0) {
+        throw std::runtime_error(
+            "getxpub\n"
+            "\nGives a watch-only xpub copy of the wallet's HD seed.\n"
+            "\nResult:\n"
+            "\"xpub\"                (string) The watch-only xpub\n"
+        );
+    }
+
+    LOCK2(cs_main, pwallet->cs_wallet);
+
+    EnsureWalletIsUnlocked(pwallet);
+
+    if (!(pwallet->IsHDEnabled() && pwallet->CanSupportFeature(FEATURE_HD_PUBDERIV))) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is not a pubderiv HD wallet.");
+    }
+
+    CKeyID master_keyid = pwallet->GetHDChain().masterKeyID;
+    CKey master_privkey;
+    if (!pwallet->GetKey(master_keyid, master_privkey)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Unable to retrieve HD master private key");
+    }
+
+    CExtKey master_ext_privkey;
+    master_ext_privkey.SetMaster(master_privkey.begin(), master_privkey.size());
+
+    CExtPubKey ext_pubkey = master_ext_privkey.Neuter();
+
+    CBitcoinExtPubKey xpub(ext_pubkey);
+
+    return xpub.ToString();
+}
+
 UniValue dumpprivkey(const JSONRPCRequest& request)
 {
     CWallet * const pwallet = GetWalletForJSONRPCRequest(request);

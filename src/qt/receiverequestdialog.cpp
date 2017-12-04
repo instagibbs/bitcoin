@@ -238,27 +238,33 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
             signature = line;
         } else if (signature_uni.getValStr().empty()) {
             ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
         } else {
             // This isn't working for now FIXME
             signature = signature_uni.getValStr();
         }
     } else {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
     }
 
     CBitcoinAddress addr(info.address.toStdString());
-    if (!addr.IsValid())
+    if (!addr.IsValid()) {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
 
     CKeyID keyID;
-    if (!addr.GetKeyID(keyID))
+    if (!addr.GetKeyID(keyID)) {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
-
+        return;
+    }
     bool fInvalid = false;
     std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
 
     if (fInvalid) {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
     }
 
     std::string strMessageMagic = "Bitcoin Signed Message:\n";
@@ -268,6 +274,10 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
     ss << x_string;
 
     CPubKey pubkey;
-    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || pubkey.GetID() != keyID)
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || pubkey.GetID() != keyID) {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
+
+    ui->outUri->append(tr("Address verified!"));
 }

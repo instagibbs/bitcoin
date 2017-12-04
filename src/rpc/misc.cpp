@@ -245,7 +245,7 @@ UniValue validateaddress(const JSONRPCRequest& request)
                     if (pwallet->IsHardwareWallet()) {
                         UniValue params(UniValue::VARR);
                         params.push_back(it->second.hdKeypath);
-                        UniValue valReply = pwallet->CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
+                        UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
                     }
                 }
             }

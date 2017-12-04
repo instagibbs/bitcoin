@@ -1138,8 +1138,6 @@ public:
 
     /* Returns true if this wallet is for a hardware wallet */
     bool IsHardwareWallet() const;
-    /* Sends a JSON-RPC message to the hardware wallet plugin */
-    static UniValue CallHardwareWallet(const UniValue valRequest);
     /* Converts transaction to hardware wallet plugin UniValue */
     bool TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs = NULL) const;
     /* Produces a signed transaction using the hardware wallet */
@@ -1155,6 +1153,10 @@ public:
     bool SetHDMasterKey(const CPubKey& key);
     bool SetExternalHD(const CExtPubKey& extPubKey);
 };
+
+/* Sends a JSON-RPC message to the hardware wallet plugin */
+UniValue CallHardwareWallet(const UniValue valRequest);
+
 
 /** A key allocated from the key pool. */
 class CReserveKey : public CReserveScript

@@ -1579,7 +1579,7 @@ bool CWallet::IsHardwareWallet() const
     return !gArgs.GetArg("-hardwarewallet", "").empty();
 }
 
-UniValue CWallet::CallHardwareWallet(const UniValue valRequest)
+UniValue CallHardwareWallet(const UniValue valRequest)
 {
     std::string strCommand = gArgs.GetArg("-hardwarewallet", "");
     std::string strRequest = valRequest.write() + "\n";
@@ -4420,7 +4420,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         // Check the script exists where it's expected
         try {
             UniValue params(UniValue::VARR);
-            UniValue valReply = CWallet::CallHardwareWallet(JSONRPCRequestObj("helloworld", params, 1));
+            UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("helloworld", params, 1));
         } catch (...) {
             InitError(_("Error finding valid external signing driver in base data directory."));
             return nullptr;

@@ -139,30 +139,47 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
         return;
     }
 
-    CKey key;
+    if (model->IsHardwareWallet()) {
+        std::string signature;
+        std::string fail_reason;
+        if (!model->SignHWWMessage(ui->messageIn_SM->document()->toPlainText().toStdString(), addr, signature, fail_reason)) {
+            ui->addressIn_SM->setValid(false);
+            ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
+            ui->statusLabel_SM->setText(tr("External signing failed.") + QString(" ") + tr("Please check the device is plugged in, and the address is correct and try again."));
+            return;
+        }
+        ui->statusLabel_SM->setStyleSheet("QLabel { color: green; }");
+        ui->statusLabel_SM->setText(QString("<nobr>") + tr("Message signed.") + QString("</nobr>"));
+        ui->signatureOut_SM->setText(QString::fromStdString(signature));
+        return;
+
+    } else {
+        CKey key;
     if (!model->getPrivKey(*keyID, key))
-    {
-        ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
-        ui->statusLabel_SM->setText(tr("Private key for the entered address is not available."));
-        return;
+        {
+            ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
+            ui->statusLabel_SM->setText(tr("Private key for the entered address is not available."));
+            return;
+        }
+
+        CHashWriter ss(SER_GETHASH, 0);
+        ss << strMessageMagic;
+        ss << ui->messageIn_SM->document()->toPlainText().toStdString();
+
+        std::vector<unsigned char> vchSig;
+        if (!key.SignCompact(ss.GetHash(), vchSig))
+        {
+            ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
+            ui->statusLabel_SM->setText(QString("<nobr>") + tr("Message signing failed.") + QString("</nobr>"));
+            return;
+        }
+
+        ui->statusLabel_SM->setStyleSheet("QLabel { color: green; }");
+        ui->statusLabel_SM->setText(QString("<nobr>") + tr("Message signed.") + QString("</nobr>"));
+
+        ui->signatureOut_SM->setText(QString::fromStdString(EncodeBase64(vchSig.data(), vchSig.size())));
+
     }
-
-    CHashWriter ss(SER_GETHASH, 0);
-    ss << strMessageMagic;
-    ss << ui->messageIn_SM->document()->toPlainText().toStdString();
-
-    std::vector<unsigned char> vchSig;
-    if (!key.SignCompact(ss.GetHash(), vchSig))
-    {
-        ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
-        ui->statusLabel_SM->setText(QString("<nobr>") + tr("Message signing failed.") + QString("</nobr>"));
-        return;
-    }
-
-    ui->statusLabel_SM->setStyleSheet("QLabel { color: green; }");
-    ui->statusLabel_SM->setText(QString("<nobr>") + tr("Message signed.") + QString("</nobr>"));
-
-    ui->signatureOut_SM->setText(QString::fromStdString(EncodeBase64(vchSig.data(), vchSig.size())));
 }
 
 void SignVerifyMessageDialog::on_copySignatureButton_SM_clicked()

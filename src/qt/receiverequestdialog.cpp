@@ -21,6 +21,10 @@
 #include <QUrl>
 #endif
 
+#include <univalue.h>
+#include "rpc/protocol.h"
+#include "../wallet/wallet.h"
+
 #if defined(HAVE_CONFIG_H)
 #include "config/bitcoin-config.h" /* for USE_QRCODE */
 #endif
@@ -206,4 +210,11 @@ void ReceiveRequestDialog::on_btnCopyURI_clicked()
 void ReceiveRequestDialog::on_btnCopyAddress_clicked()
 {
     GUIUtil::setClipboard(info.address);
+}
+
+void ReceiveRequestDialog::on_btnShowAddr_clicked()
+{
+    UniValue params(UniValue::VARR);
+    params.push_back(info.keypath.toStdString());
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
 }

@@ -592,47 +592,12 @@ UniValue signmessage(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
 
     if (pwallet->IsHardwareWallet()) {
-        UniValue params(UniValue::VARR);
-
-        const auto& meta = pwallet->mapKeyMetadata;
-        auto it = addr.GetKeyID(keyID) ? meta.find(keyID) : meta.end();
-        if (it == meta.end()) {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Private key not known to this externalhd wallet");
+        std::string fail_reason;
+        std::string signature;
+        if (!pwallet->SignHWWMessage(strMessage, addr, signature, fail_reason)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Hardware signing failed: "+fail_reason);
         }
-        if (!it->second.hdKeypath.empty()) {
-            params.push_back(it->second.hdKeypath);
-        } else {
-            throw JSONRPCError(RPC_WALLET_ERROR, "No known keypath for this address in the wallet.");
-        }
-
-        params.push_back(strMessage);
-
-        UniValue valReply = pwallet->CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
-
-        const UniValue& result = find_value(valReply, "result");
-        const UniValue& error = find_value(valReply, "error");
-
-        if (error.isNull()) {
-            const UniValue& signature = find_value(result, "signature");
-
-			// Workaround to get the message back
-            std::string line;
-            std::ifstream myReadFile ("writeout.txt");
-            if (myReadFile.is_open()) {
-                if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
-                    throw JSONRPCError(RPC_WALLET_ERROR, "Signing message to file failed");
-                }
-				return line;
-            } else if (signature.getValStr().empty()) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "Signing message failed");
-			} else {
-			    // This isn't working for now FIXME
-                return signature.getValStr();
-            }
-        } else {
-            throw JSONRPCError(RPC_WALLET_ERROR, "Error occured during signing.");
-        }
-
+        return signature;
     } else {
         CHashWriter ss(SER_GETHASH, 0);
         ss << strMessageMagic;

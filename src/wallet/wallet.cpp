@@ -1686,6 +1686,60 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
     return true;
 }
 
+bool CWallet::SignHWWMessage(const std::string& message, const CBitcoinAddress& address, std::string& signature, std::string& fail_reason)
+{
+    assert(IsHardwareWallet());
+    UniValue params(UniValue::VARR);
+    signature = "";
+
+    CKeyID keyID;
+
+    const auto& meta = mapKeyMetadata;
+    auto it = address.GetKeyID(keyID) ? meta.find(keyID) : meta.end();
+    if (it == meta.end()) {
+        fail_reason = _("Private key not known to this externalhd wallet");
+        return false;
+    }
+    if (!it->second.hdKeypath.empty()) {
+        params.push_back(it->second.hdKeypath);
+    } else {
+        fail_reason = _("No known keypath for this address in the wallet.");
+        return false;
+    }
+
+    params.push_back(message);
+
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& signature_uni = find_value(result, "signature");
+
+        // Workaround to get the message back
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                fail_reason = _("Signing message to file failed");
+                return false;
+            }
+            signature = line;
+            return true;
+        } else if (signature_uni.getValStr().empty()) {
+            fail_reason = _("Signing message failed");
+            return false;
+        } else {
+            // This isn't working for now FIXME
+            signature = signature_uni.getValStr();
+            return true;
+        }
+    }
+    fail_reason = _("Error occured during signing.");
+    return false;
+}
+
 bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const
 {
     UniValue params(UniValue::VARR);

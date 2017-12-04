@@ -215,8 +215,58 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
 {
     UniValue params(UniValue::VARR);
     params.push_back(info.keypath.toStdString());
-    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
-    // TODO Have signer sign, then verify, showing error text if wrong
-    // This only protects against strange edge cases where hardware device
-    // thinks it knows a key but can't actually sign for it.
+    params.push_back("x");
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+    std::string signature;
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& signature_uni = find_value(result, "signature");
+
+        // Workaround to get the message back
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+                return;
+            }
+            // Do Nothing
+            signature = line;
+        } else if (signature_uni.getValStr().empty()) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        } else {
+            // This isn't working for now FIXME
+            signature = signature_uni.getValStr();
+        }
+    } else {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+    }
+
+    CBitcoinAddress addr(info.address.toStdString());
+    if (!addr.IsValid())
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+
+    CKeyID keyID;
+    if (!addr.GetKeyID(keyID))
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+
+    bool fInvalid = false;
+    std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
+
+    if (fInvalid) {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+    }
+
+    std::string strMessageMagic = "Bitcoin Signed Message:\n";
+    std::string x_string = "x";
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << strMessageMagic;
+    ss << x_string;
+
+    CPubKey pubkey;
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || pubkey.GetID() != keyID)
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
 }

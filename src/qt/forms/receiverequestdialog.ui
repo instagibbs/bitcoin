@@ -100,6 +100,16 @@
       </widget>
      </item>
      <item>
+      <widget class="QPushButton" name="btnShowAddr">
+       <property name="text">
+        <string>&amp;Show Addr on Device</string>
+       </property>
+       <property name="autoDefault">
+        <bool>false</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
       <spacer name="horizontalSpacer_2">
        <property name="orientation">
         <enum>Qt::Horizontal</enum>

@@ -132,10 +132,12 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
 
     QString address;
     QString label = ui->reqLabel->text();
+    std::string keypath;
     /* Generate new receiving address */
-    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "");
+    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "", &keypath);
     SendCoinsRecipient info(address, label,
         ui->reqAmount->value(), ui->reqMessage->text());
+    info.keypath = QString::fromStdString(keypath);
     ReceiveRequestDialog *dialog = new ReceiveRequestDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setModel(model->getOptionsModel());

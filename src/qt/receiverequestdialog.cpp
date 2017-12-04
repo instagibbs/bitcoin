@@ -217,4 +217,7 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
     UniValue params(UniValue::VARR);
     params.push_back(info.keypath.toStdString());
     UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
+    // TODO Have signer sign, then verify, showing error text if wrong
+    // This only protects against strange edge cases where hardware device
+    // thinks it knows a key but can't actually sign for it.
 }

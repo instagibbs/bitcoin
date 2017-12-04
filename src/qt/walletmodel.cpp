@@ -756,3 +756,13 @@ bool WalletModel::getDefaultWalletRbf() const
 {
     return fWalletRbf;
 }
+
+bool WalletModel::IsHardwareWallet() const
+{
+    return wallet->IsHardwareWallet();
+}
+
+bool WalletModel::SignHWWMessage(const std::string& message, const CBitcoinAddress& address, std::string& signature, std::string& fail_reason)
+{
+    return wallet->SignHWWMessage(message, address, signature, fail_reason);
+}

@@ -167,6 +167,10 @@ public:
     // Wallet backup
     bool backupWallet(const QString &filename);
 
+    bool IsHardwareWallet() const;
+
+    bool SignHWWMessage(const std::string& message, const CBitcoinAddress& address, std::string& signature, std::string& fail_reason);
+
     // RAI object for unlocking wallet, returned by requestUnlock()
     class UnlockContext
     {

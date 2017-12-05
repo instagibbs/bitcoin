@@ -113,14 +113,6 @@ def signhwwtransaction(txtosign, prevtxstospend):
     transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"])
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
-    publength = []
-    for pubkey in input_pubkeys:
-        publength.append(len(pubkey))
-
-    input_lengths = []
-    for input in input_scripts:
-        input_lengths.append(len(input))
-
     # Write to file as workaround
     file = open("writeout.txt", 'w')
     file.write(transaction_hex)

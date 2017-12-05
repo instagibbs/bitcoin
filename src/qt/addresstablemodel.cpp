@@ -386,7 +386,7 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
         }
         wallet->LearnRelatedScripts(newKey, g_address_type);
         strAddress = EncodeDestination(GetDestinationForKey(newKey, g_address_type));
-        if (wallet->IsHardwareWallet() && keypath) {
+        if (wallet->IsExternalHD() && keypath) {
             const auto& meta = wallet->mapKeyMetadata;
             CKeyID keyID;
             auto it = meta.find(newKey.GetID());

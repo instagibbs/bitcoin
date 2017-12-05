@@ -18,8 +18,7 @@ or installed with `pip install btchip-python`
 '''
 
 # Keypath prepend, based on xpub path
-#keypath_start = "44'/0'/0'"
-keypath_start = "0'/0'/0'/0'"
+keypath_start = "44'/0'/0'"
 
 def signhwwtransaction(txtosign, prevtxstospend):
     tx = json.loads(txtosign)

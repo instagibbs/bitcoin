@@ -38,13 +38,13 @@ def signhwwtransaction(txtosign, prevtxstospend):
     sequence_numbers = []
     for vin in tx["vin"]:
         if "hdKeypath" not in vin:
-            raise Exception("All inputs must be signable by this seed.")
             keypaths.append("")
+            input_pubkeys.append("")
         else:
             keypaths.append(keypath_start+vin["hdKeypath"][1:])
+            pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
+            input_pubkeys.append(pubkey_bytes)
 
-        pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
-        input_pubkeys.append(pubkey_bytes)
 
         prevouts.append((vin["txid"], vin["vout"]))
         input_type = None
@@ -73,6 +73,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     outputData = ""
     trusted_inputs = []
     signatures = [[]]*len(prevouts)
+    input_scripts = [""]*len(prevouts)
 
     tx_bytes = bytearray(tx["hex"].decode('hex'))
 
@@ -84,23 +85,23 @@ def signhwwtransaction(txtosign, prevtxstospend):
         prevoutScriptPubkey.append(inputTransaction.outputs[prevouts[i][1]].script)
 
     newTx = True
-    # Now we legacy sign the transaction, input by input
+    # Now we legacy sign the transaction, input by input for the ones we know
     for i in range(len(prevouts)):
         signature = []
         prevoutscript = prevoutScriptPubkey[i]
         app.startUntrustedTransaction(newTx, i, trusted_inputs, prevoutscript, tx["version"])
         newTx = False
         outputData = app.finalizeInput("DUMMY", -1, -1, change_path, tx_bytes)
+        if keypaths[i] == "":
+            continue
         # Provide the key that is signing the input
         signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))
         signatures[i] = signature
 
-    input_scripts = []
-    for i in range(len(signatures)):
         if input_types[i] == "pubkeyhash":
-            input_scripts.append(get_regular_input_script(signatures[i][0], input_pubkeys[i]))
+            input_scripts[i] = get_regular_input_script(signatures[i][0], input_pubkeys[i])
         elif input_types[i] == "pubkey":
-            input_scripts.append(get_p2pk_input_script(signatures[i][0]))
+            input_scripts[i] = get_p2pk_input_script(signatures[i][0])
         else:
             raise Exception("Only p2pkh and p2pk supported at this time.")
 

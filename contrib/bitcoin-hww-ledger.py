@@ -122,8 +122,8 @@ def signhwwtransaction(txtosign, prevtxstospend):
 
 def signmessage(keypathjson, messagejson):
 
-    keypath = keypathjson#json.loads(keypathjson)
-    message = messagejson#json.loads(messagejson)
+    keypath = keypathjson
+    message = messagejson
 
     dongle = getDongle(True)
     app = btchip(dongle)

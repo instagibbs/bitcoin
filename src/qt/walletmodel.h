@@ -40,6 +40,8 @@ public:
     explicit SendCoinsRecipient() : amount(0), fSubtractFeeFromAmount(false), nVersion(SendCoinsRecipient::CURRENT_VERSION) { }
     explicit SendCoinsRecipient(const QString &addr, const QString &_label, const CAmount& _amount, const QString &_message):
         address(addr), label(_label), amount(_amount), message(_message), fSubtractFeeFromAmount(false), nVersion(SendCoinsRecipient::CURRENT_VERSION) {}
+    explicit SendCoinsRecipient(const QString &addr, const QString &_label, const CAmount& _amount, const QString &_message, const int &_nVersion, const QString &_keypath):
+        address(addr), label(_label), amount(_amount), message(_message), fSubtractFeeFromAmount(false), nVersion(_nVersion), keypath(_keypath) {}
 
     // If from an unauthenticated payment request, this is used for storing
     // the addresses, e.g. address-A<br />address-B<br />address-C.
@@ -62,6 +64,7 @@ public:
     bool fSubtractFeeFromAmount; // memory only
 
     static const int CURRENT_VERSION = 1;
+    static const int EXTERNAL_VERSION = 2;
     int nVersion;
 
     ADD_SERIALIZE_METHODS;
@@ -84,14 +87,18 @@ public:
         READWRITE(sMessage);
         READWRITE(sPaymentRequest);
         READWRITE(sAuthenticatedMerchant);
-        READWRITE(sKeypath);
+        if (this->nVersion == SendCoinsRecipient::EXTERNAL_VERSION) {
+            READWRITE(sKeypath);
+        }
 
         if (ser_action.ForRead())
         {
             address = QString::fromStdString(sAddress);
             label = QString::fromStdString(sLabel);
             message = QString::fromStdString(sMessage);
-            keypath = QString::fromStdString(sKeypath);
+            if (this->nVersion == SendCoinsRecipient::EXTERNAL_VERSION) {
+                keypath = QString::fromStdString(sKeypath);
+            }
             if (!sPaymentRequest.empty())
                 paymentRequest.parse(QByteArray::fromRawData(sPaymentRequest.data(), sPaymentRequest.size()));
             authenticatedMerchant = QString::fromStdString(sAuthenticatedMerchant);

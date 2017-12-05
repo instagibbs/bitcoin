@@ -385,7 +385,7 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
             }
         }
         strAddress = CBitcoinAddress(newKey.GetID()).ToString();
-        if (wallet->IsHardwareWallet() && keypath) {
+        if (wallet->IsExternalHD() && keypath) {
             const auto& meta = wallet->mapKeyMetadata;
             CKeyID keyID;
             auto it = meta.find(newKey.GetID());

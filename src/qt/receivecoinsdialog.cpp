@@ -140,7 +140,7 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
     // non-empty keypath implies IsExternalHD
     if (!keypath.empty()) {
         info = SendCoinsRecipient(address, label,
-            ui->reqAmount->value(), ui->reqMessage->text(), SendCoinsRecipient::EXTERNAL_VERSION, QString::fromStdString(keypath));
+            ui->reqAmount->value(), ui->reqMessage->text(), 2 /* EXTERNAL_VERSION */, QString::fromStdString(keypath));
     }
     ReceiveRequestDialog *dialog = new ReceiveRequestDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);

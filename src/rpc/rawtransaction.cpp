@@ -877,6 +877,7 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
         if (pwallet->SignHWWTransaction(mtx, strFailReason, txRet)) {
             mtx = txRet;
         }
+    }
 #endif
 
     // Validate the output of signing and give back appropriate errors

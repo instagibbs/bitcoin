@@ -1644,12 +1644,14 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
                 const auto& it = mapKeyMetadata.find(CScriptID(prevout.scriptPubKey));
                 if (it != mapKeyMetadata.end()) {
                     in.pushKV("hdKeypath", it->second.hdKeypath);
-
-                    UniValue prevtx(UniValue::VOBJ);
-                    TransactionToHWWUniv(*wtx->tx, prevtx);
-
-                    prevtxs->push_back(prevtx);
                 }
+                UniValue prevtx(UniValue::VOBJ);
+                TransactionToHWWUniv(*wtx->tx, prevtx);
+                prevtxs->push_back(prevtx);
+            } else {
+                // Cannot legacy sign any transaction without the full transaction
+                // Cannot segwit sign any transaction without the input amounts
+                return false;
             }
         }
 
@@ -1747,7 +1749,11 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
     UniValue tx(UniValue::VOBJ);
     UniValue prevtxs(UniValue::VARR);
 
-    TransactionToHWWUniv(transaction, tx, &prevtxs);
+    // Failure only means we don't have all necessary information to sign our inputs
+    if (!TransactionToHWWUniv(transaction, tx, &prevtxs)) {
+        strFailReason = "lack-prev-txns";
+        return false;
+    }
 
     params.push_back(tx.write());
     params.push_back(prevtxs.write());

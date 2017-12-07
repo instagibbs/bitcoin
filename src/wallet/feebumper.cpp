@@ -232,7 +232,19 @@ CFeeBumper::CFeeBumper(const CWallet *pWallet, const uint256 txidIn, const CCoin
 
 bool CFeeBumper::signTransaction(CWallet *pWallet)
 {
-     return pWallet->SignTransaction(mtx);
+    // Bumping can only be done in the case of the wallet knowing all input
+    // transactions, and all keys either on HWW xor inside wallet db
+    if (pWallet->IsHardwareWallet()) {
+        const CTransaction txn = mtx;
+        std::string fail_reason;
+        if (!pWallet->SignHWWTransaction(txn, fail_reason, mtx)) {
+            return false;
+        }
+        return true;
+    } else {
+        return pWallet->SignTransaction(mtx);
+    }
+
 }
 
 bool CFeeBumper::commit(CWallet *pWallet)

@@ -3162,7 +3162,7 @@ UniValue signhwwtransaction(const JSONRPCRequest& request)
     }
 
     std::string fail_reason;
-    if (!pwallet->SignHWWTransaction(mtx, fail_reason, mtx)) {
+    if (!pwallet->SignHWWTransaction(mtx, fail_reason, mtx, &prev_transactions)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Unable to sign transaction.");
     }
 

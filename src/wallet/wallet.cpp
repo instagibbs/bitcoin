@@ -1635,23 +1635,24 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
             in.pushKV("txinwitness", txinwitness);
         }
 
-        if (prevtxs != NULL) {
-            const CWalletTx *wtx = GetWalletTx(txin.prevout.hash);
+        const CWalletTx *wtx = GetWalletTx(txin.prevout.hash);
 
-            if (wtx != NULL) {
-                const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
+        if (wtx != NULL) {
+            const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
 
-                const auto& it = mapKeyMetadata.find(CScriptID(prevout.scriptPubKey));
-                if (it != mapKeyMetadata.end()) {
-                    in.pushKV("hdKeypath", it->second.hdKeypath);
-                }
-                UniValue prevtx(UniValue::VOBJ);
-                TransactionToHWWUniv(*wtx->tx, prevtx);
+            const auto& it = mapKeyMetadata.find(CScriptID(prevout.scriptPubKey));
+            if (it != mapKeyMetadata.end()) {
+                in.pushKV("hdKeypath", it->second.hdKeypath);
+            }
+            UniValue prevtx(UniValue::VOBJ);
+            TransactionToHWWUniv(*wtx->tx, prevtx);
+            // Return whatever prev transactions you can
+            if (prevtxs) {
                 prevtxs->push_back(prevtx);
-            } else {
-                // Cannot legacy sign any transaction without the full transaction
-                // Cannot segwit sign any transaction without the input amounts
-                return false;
+            }
+        } else {
+            if (prevtxs) {
+                prevtxs->push_back(NullUniValue);
             }
         }
 
@@ -1749,12 +1750,18 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
     UniValue tx(UniValue::VOBJ);
     UniValue prevtxs(UniValue::VARR);
 
-    // Failure only means we don't have all necessary information to sign our inputs
     if (!prev_txns && !TransactionToHWWUniv(transaction, tx, &prevtxs)) {
-        strFailReason = "lack-prev-txns";
+        strFailReason = "Could not decode main transaction for signing";
         return false;
-    } else if (!TransactionToHWWUniv(transaction, tx, nullptr)) {
-
+    } else if (prev_txns && TransactionToHWWUniv(transaction, tx, nullptr)) {
+        for (unsigned int i = 0; i < prev_txns->size(); i++) {
+            UniValue prev_tx(UniValue::VOBJ);
+            if (!TransactionToHWWUniv((*prev_txns)[i], prev_tx, nullptr)) {
+                strFailReason = "Could not decode prevtxs";
+                return false;
+            }
+            prevtxs.push_back(prev_tx);
+        }
     }
 
     params.push_back(tx.write());

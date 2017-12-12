@@ -1144,7 +1144,7 @@ public:
     /* Converts transaction to hardware wallet plugin UniValue */
     bool TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs = NULL) const;
     /* Produces a signed transaction using the hardware wallet */
-    bool SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const;
+    bool SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet, const std::vector<CMutableTransaction>* prev_txns = nullptr) const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();

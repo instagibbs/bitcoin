@@ -3104,6 +3104,8 @@ UniValue bumpfee(const JSONRPCRequest& request)
     return result;
 }
 
+extern void TxInErrorToJSON(const CTxIn& txin, UniValue& vErrorsRet, const std::string& strMessage);
+
 UniValue signhwwtransaction(const JSONRPCRequest& request)
 {
     CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
@@ -3166,7 +3168,32 @@ UniValue signhwwtransaction(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_WALLET_ERROR, "Unable to sign transaction.");
     }
 
-    return EncodeHexTx(mtx, RPCSerializationFlags());
+	// Script verification errors
+    UniValue vErrors(UniValue::VARR);
+
+    // Validate the output of signing and give back appropriate errors
+    for (unsigned int i = 0; i < mtx.vin.size(); i++) {
+        CTxIn& txin = mtx.vin[i];
+        const CScript& prevPubKey = prev_transactions[i].vout[txin.prevout.n].scriptPubKey;
+        const CAmount& amount = prev_transactions[i].vout[txin.prevout.n].nValue;
+
+		const CTransaction txNew(prev_transactions[i]);
+        ScriptError serror = SCRIPT_ERR_OK;
+        if (!VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txNew, i, amount), &serror)) {
+            TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
+        }
+    }
+
+    bool fComplete = vErrors.empty();
+
+    UniValue result(UniValue::VOBJ);
+    result.push_back(Pair("hex", EncodeHexTx(mtx)));
+    result.push_back(Pair("complete", fComplete));
+    if (!vErrors.empty()) {
+        result.push_back(Pair("errors", vErrors));
+    }
+
+    return result;
 }
 
 UniValue generate(const JSONRPCRequest& request)

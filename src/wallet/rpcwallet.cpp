@@ -3334,6 +3334,71 @@ UniValue bumpfee(const JSONRPCRequest& request)
     return result;
 }
 
+UniValue signhwwtransaction(const JSONRPCRequest& request)
+{
+    CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
+
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
+        return NullUniValue;
+    }
+
+    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2) {
+        throw std::runtime_error(
+            "signhwwtransaction \"hexstring\" [prevtxs] \n"
+            "\nSign inputs for raw transaction (serialized, hex-encoded).\n"
+            "The second argument is an array of previous transactions that\n"
+            "this transaction depends on but may not yet be in the block chain.\n"
+            "\nArguments:\n"
+            "1. \"hexstring\"     (string, required) The transaction hex string\n"
+            "2. \"prevtxs\"       (string, required) An json array of previous dependent transactions in hex\n"
+            "    [                (json array of strings)"
+            "    ]\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"hex\" : \"value\",           (string) The hex-encoded raw transaction with signature(s)\n"
+            "  \"complete\" : true|false,   (boolean) If the transaction has a complete set of signatures\n"
+            "  \"errors\" : [                 (json array of objects) Script verification errors (if there are any)\n"
+            "    {\n"
+            "      \"txid\" : \"hash\",           (string) The hash of the referenced, previous transaction\n"
+            "      \"vout\" : n,                (numeric) The index of the output to spent and used as input\n"
+            "      \"scriptSig\" : \"hex\",       (string) The hex-encoded signature script\n"
+            "      \"sequence\" : n,            (numeric) Script sequence number\n"
+            "      \"error\" : \"text\"           (string) Verification or signing error related to the input\n"
+            "    }\n"
+            "    ,...\n"
+            "  ]\n"
+            "}\n"
+
+            "\nExamples:\n"
+            + HelpExampleCli("signhwwtransaction", "\"myhex\", \"[prevtxs]\"")
+            + HelpExampleRpc("signhwwtransaction", "\"myhex\", \"[prevtxs]\"")
+        );
+    }
+
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, request.params[0].get_str(), true)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
+
+    std::vector<CMutableTransaction> prev_transactions;
+    UniValue prevTxs = request.params[1].get_array();
+    for (unsigned int idx = 0; idx < prevTxs.size(); idx++) {\
+        const std::string prevtx = prevTxs[idx].get_str();
+        CMutableTransaction temp_mtx;
+        if (!DecodeHexTx(temp_mtx, prevtx, true)) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "prevtx decode failed");
+        }
+        prev_transactions.push_back(temp_mtx);
+    }
+
+    std::string fail_reason;
+    if (!pwallet->SignHWWTransaction(mtx, fail_reason, mtx)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Unable to sign transaction.");
+    }
+
+    return EncodeHexTx(mtx, RPCSerializationFlags());
+}
+
 UniValue generate(const JSONRPCRequest& request)
 {
     CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
@@ -3515,6 +3580,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "setaccount",               &setaccount,               {"address","account"} },
     { "wallet",             "settxfee",                 &settxfee,                 {"amount"} },
     { "wallet",             "signmessage",              &signmessage,              {"address","message"} },
+    { "wallet",             "signhwwtransaction",       &signhwwtransaction,       {"hexstring", "prevtxs"} },
     { "wallet",             "walletlock",               &walletlock,               {} },
     { "wallet",             "walletpassphrasechange",   &walletpassphrasechange,   {"oldpassphrase","newpassphrase"} },
     { "wallet",             "walletpassphrase",         &walletpassphrase,         {"passphrase","timeout"} },

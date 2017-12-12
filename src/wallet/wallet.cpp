@@ -1742,7 +1742,7 @@ bool CWallet::SignHWWMessage(const std::string& message, const CBitcoinAddress& 
     return false;
 }
 
-bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const
+bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet, const std::vector<CMutableTransaction>* prev_txns) const
 {
     UniValue params(UniValue::VARR);
 
@@ -1750,9 +1750,11 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
     UniValue prevtxs(UniValue::VARR);
 
     // Failure only means we don't have all necessary information to sign our inputs
-    if (!TransactionToHWWUniv(transaction, tx, &prevtxs)) {
+    if (!prev_txns && !TransactionToHWWUniv(transaction, tx, &prevtxs)) {
         strFailReason = "lack-prev-txns";
         return false;
+    } else if (!TransactionToHWWUniv(transaction, tx, nullptr)) {
+
     }
 
     params.push_back(tx.write());

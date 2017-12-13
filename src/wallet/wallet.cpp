@@ -3263,6 +3263,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
             // Sign using hww
             if (IsHardwareWallet()) {
                 if (!SignHWWTransaction(txNew, strFailReason, txNew)) {
+                    strFailReason = _("Hardware wallet signing failed. Make sure the dongle is connected and bitcoin app loaded.");
                     return false;
                 }
             }

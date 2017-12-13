@@ -93,6 +93,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
         newTx = False
         outputData = app.finalizeInput("DUMMY", -1, -1, change_path, tx_bytes)
         if keypaths[i] == "":
+            input_scripts[i] = bytearray(tx["vin"][i]["scriptSig"]["hex"].decode('hex'))
             continue
         # Provide the key that is signing the input
         signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))

@@ -846,6 +846,18 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
     // Script verification errors
     UniValue vErrors(UniValue::VARR);
 
+#ifdef ENABLE_WALLET
+    // Sign as much as possible with hww
+    if (pwallet && pwallet->IsHardwareWallet()) {
+        std::string strFailReason;
+        CMutableTransaction txRet;
+        // Success means decodes message
+        if (pwallet->SignHWWTransaction(mtx, strFailReason, txRet)) {
+            mtx = txRet;
+        }
+    }
+#endif
+
     // Use CTransaction for the constant parts of the
     // transaction to avoid rehashing.
     const CTransaction txConst(mtx);
@@ -867,18 +879,6 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
 
         UpdateTransaction(mtx, i, sigdata);
     }
-
-#ifdef ENABLE_WALLET
-    // Once more, with feeling
-    if (pwallet && pwallet->IsHardwareWallet()) {
-        std::string strFailReason;
-        CMutableTransaction txRet;
-        // Success means decodes message
-        if (pwallet->SignHWWTransaction(mtx, strFailReason, txRet)) {
-            mtx = txRet;
-        }
-    }
-#endif
 
     // Validate the output of signing and give back appropriate errors
     for (unsigned int i = 0; i < mtx.vin.size(); i++) {

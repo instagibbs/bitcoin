@@ -102,10 +102,6 @@ UniValue importprivkey(const JSONRPCRequest& request)
 
     LOCK2(cs_main, pwallet->cs_wallet);
 
-    if (pwallet->IsExternalHD()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "External HD wallets are not allowed to import addresses or keys.");
-    }
-
     EnsureWalletIsUnlocked(pwallet);
 
     std::string strSecret = request.params[0].get_str();

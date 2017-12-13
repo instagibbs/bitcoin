@@ -3259,30 +3259,43 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
 
         if (sign)
         {
-            CTransaction txNewConst(txNew);
 
+            // Sign using hww
             if (IsHardwareWallet()) {
-                if (!SignHWWTransaction(txNewConst, strFailReason, txNew)) {
+                if (!SignHWWTransaction(txNew, strFailReason, txNew)) {
                     return false;
                 }
-            } else {
-                int nIn = 0;
-                for (const auto& coin : setCoins)
-                {
-                    const CScript& scriptPubKey = coin.txout.scriptPubKey;
-                    SignatureData sigdata;
-
-                    if (!ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
-                    {
-                        strFailReason = _("Signing transaction failed");
-                        return false;
-                    } else {
-                        UpdateTransaction(txNew, nIn, sigdata);
-                    }
-
-                    nIn++;
-                }
             }
+
+            CTransaction txNewConst(txNew);
+
+            // Sign using software wallet
+            int nIn = 0;
+            for (const auto& coin : setCoins)
+            {
+                const CScript& scriptPubKey = coin.txout.scriptPubKey;
+                SignatureData sigdata;
+
+                ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata);
+                UpdateTransaction(txNew, nIn, sigdata);
+
+                nIn++;
+            }
+            CTransaction txFinalConst(txNew);
+            // See if signing completed
+            nIn = 0;
+            for (const auto& coin : setCoins)
+            {
+                const CScript& scriptPubKey = coin.txout.scriptPubKey;
+
+                ScriptError serror = SCRIPT_ERR_OK;
+                if (!VerifyScript(txNew.vin[nIn].scriptSig, scriptPubKey, &txNew.vin[nIn].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txFinalConst, nIn, coin.txout.nValue), &serror)) {
+                    strFailReason = _("Transaction signing failed.");
+                }
+
+                nIn++;
+            }
+
         }
 
         // Embed the constructed transaction data in wtxNew.

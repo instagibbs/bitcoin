@@ -3177,7 +3177,7 @@ UniValue signhwwtransaction(const JSONRPCRequest& request)
         const CScript& prevPubKey = prev_transactions[i].vout[txin.prevout.n].scriptPubKey;
         const CAmount& amount = prev_transactions[i].vout[txin.prevout.n].nValue;
 
-		const CTransaction txNew(prev_transactions[i]);
+		const CTransaction txNew(mtx);
         ScriptError serror = SCRIPT_ERR_OK;
         if (!VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txNew, i, amount), &serror)) {
             TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));

@@ -636,7 +636,7 @@ UniValue signmessage(const JSONRPCRequest& request)
     if (pwallet->IsHardwareWallet()) {
         std::string fail_reason;
         std::string signature;
-        if (!pwallet->SignHWWMessage(strMessage, addr, signature, fail_reason)) {
+        if (!pwallet->SignHWWMessage(strMessage, dest, signature, fail_reason)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "Hardware signing failed: "+fail_reason);
         }
         return signature;

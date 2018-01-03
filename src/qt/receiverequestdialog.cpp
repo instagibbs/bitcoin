@@ -247,17 +247,13 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
         return;
     }
 
-    CBitcoinAddress addr(info.address.toStdString());
-    if (!addr.IsValid()) {
+    CTxDestination dest = DecodeDestination(info.address.toStdString());
+    auto id = boost::get<CKeyID>(&dest);
+    if (!id) {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
         return;
     }
 
-    CKeyID keyID;
-    if (!addr.GetKeyID(keyID)) {
-        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
-        return;
-    }
     bool fInvalid = false;
     std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
 
@@ -273,7 +269,7 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
     ss << x_string;
 
     CPubKey pubkey;
-    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || pubkey.GetID() != keyID) {
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || pubkey.GetID() != *id) {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
         return;
     }

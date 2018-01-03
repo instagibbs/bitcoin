@@ -181,7 +181,7 @@ public:
 
     bool IsHardwareWallet() const;
 
-    bool SignHWWMessage(const std::string& message, const CBitcoinAddress& address, std::string& signature, std::string& fail_reason);
+    bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason);
 
     // RAI object for unlocking wallet, returned by requestUnlock()
     class UnlockContext

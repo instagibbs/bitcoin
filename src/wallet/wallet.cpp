@@ -11,6 +11,7 @@
 #include <wallet/coincontrol.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <core_io.h>
 #include <fs.h>
 #include <wallet/init.h>
 #include <key.h>
@@ -407,7 +408,7 @@ bool CWallet::AddWatchOnly(const CPubKey &pubkey, const CKeyMetadata& meta, int6
     auto script = GetScriptForDestination(pubkey.GetID());
     if (!HaveWatchOnly(script))
     {
-        mapKeyMetadata[CScriptID(script)] = meta;
+        m_script_metadata[CScriptID(script)] = meta;
         if (!AddWatchOnly(script, nCreateTime))
             return false;
     }
@@ -418,7 +419,7 @@ bool CWallet::AddWatchOnly(const CPubKey &pubkey, const CKeyMetadata& meta, int6
     script = GetScriptForRawPubKey(pubkey);
     if (!HaveWatchOnly(script))
     {
-        mapKeyMetadata[CScriptID(script)] = meta;
+        m_script_metadata[CScriptID(script)] = meta;
         if (!AddWatchOnly(script, nCreateTime))
             return false;
     }
@@ -1673,8 +1674,8 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         if (wtx != NULL) {
             const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
 
-            const auto& it = mapKeyMetadata.find(CScriptID(prevout.scriptPubKey));
-            if (it != mapKeyMetadata.end()) {
+            const auto& it = m_script_metadata.find(CScriptID(prevout.scriptPubKey));
+            if (it != m_script_metadata.end()) {
                 in.pushKV("hdKeypath", it->second.hdKeypath);
             }
             UniValue prevtx(UniValue::VOBJ);
@@ -1707,8 +1708,8 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         out.pushKV("scriptPubKey", o);
 
         if (IsChange(txout)) {
-            const auto& it = mapKeyMetadata.find(CScriptID(txout.scriptPubKey));
-            if (it != mapKeyMetadata.end()) {
+            const auto& it = m_script_metadata.find(CScriptID(txout.scriptPubKey));
+            if (it != m_script_metadata.end()) {
                 out.pushKV("hdKeypath", it->second.hdKeypath);
             }
         }
@@ -1722,7 +1723,7 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
     return true;
 }
 
-bool CWallet::SignHWWMessage(const std::string& message, const CBitcoinAddress& address, std::string& signature, std::string& fail_reason)
+bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason)
 {
     assert(IsHardwareWallet());
     UniValue params(UniValue::VARR);
@@ -1730,8 +1731,9 @@ bool CWallet::SignHWWMessage(const std::string& message, const CBitcoinAddress& 
 
     CKeyID keyID;
 
-    const auto& meta = mapKeyMetadata;
-    auto it = address.GetKeyID(keyID) ? meta.find(keyID) : meta.end();
+    auto id = boost::get<CKeyID>(&dest);
+    const auto& meta = m_script_metadata;
+    auto it = id ? meta.find(*id) : meta.end();
     if (it == meta.end()) {
         fail_reason = _("Private key not known to this externalhd wallet");
         return false;
@@ -2292,7 +2294,7 @@ bool CWalletTx::IsTrusted() const
             // If the wallet is external HD, check if it is a key we generated
             if (!pwallet->IsExternalHD() || isMine != ISMINE_WATCH_SOLVABLE)
                 return false;
-            const auto& meta = pwallet->mapKeyMetadata;
+            const auto& meta = pwallet->m_script_metadata;
             auto it = meta.find(CScriptID(parentOut.scriptPubKey));
             if (it == meta.end() ||
                 it->second.hdKeypath.empty())

@@ -10,6 +10,7 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 
+#include <util.h>
 #include <QClipboard>
 #include <QDrag>
 #include <QMenu>
@@ -213,9 +214,13 @@ void ReceiveRequestDialog::on_btnCopyAddress_clicked()
 
 void ReceiveRequestDialog::on_btnShowAddr_clicked()
 {
+    CTxDestination dest = DecodeDestination(info.address.toStdString());
+
     UniValue params(UniValue::VARR);
     params.push_back(info.keypath.toStdString());
     params.push_back("x");
+    params.push_back(boost::get<CScriptID>(&dest) ? true : false);
+    params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
     UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
 
     std::string signature;
@@ -247,13 +252,6 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
         return;
     }
 
-    CTxDestination dest = DecodeDestination(info.address.toStdString());
-    auto id = boost::get<CKeyID>(&dest);
-    if (!id) {
-        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
-        return;
-    }
-
     bool fInvalid = false;
     std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
 
@@ -269,7 +267,28 @@ void ReceiveRequestDialog::on_btnShowAddr_clicked()
     ss << x_string;
 
     CPubKey pubkey;
-    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || pubkey.GetID() != *id) {
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig)) {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
+
+    if (boost::get<CKeyID>(&dest)) {
+        if (pubkey.GetID() != *boost::get<CKeyID>(&dest)) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        }
+    } else if (boost::get<CScriptID>(&dest)) {
+        // Try to match hash160 of pubkey recovered from the signature to the p2sh
+        if (CScriptID(GetScriptForDestination(WitnessV0KeyHash(pubkey.GetID()))) != *boost::get<CScriptID>(&dest)) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        }
+    } else if (boost::get<WitnessV0KeyHash>(&dest)) {
+        if (CKeyID(*boost::get<WitnessV0KeyHash>(&dest)) != pubkey.GetID()) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        }
+    } else {
         ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
         return;
     }

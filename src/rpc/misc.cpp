@@ -244,8 +244,17 @@ UniValue validateaddress(const JSONRPCRequest& request)
                     ret.push_back(Pair("hdkeypath", meta->hdKeypath));
                     ret.push_back(Pair("hdmasterkeyid", meta->hdMasterKeyID.GetHex()));
                     if (pwallet->IsHardwareWallet()) {
+                        bool segwit = false;
+                        bool native_segwit = false;
+                        if (!detail["iswitness"].isNull() && detail["iswitness"].get_bool()) {
+                            native_segwit = true;
+                        } else if (!detail["embedded"].isNull() && !detail["embedded"]["iswitness"].isNull()) {
+                            segwit = detail["embedded"]["iswitness"].get_bool();
+                        }
                         UniValue params(UniValue::VARR);
                         params.push_back(meta->hdKeypath);
+                        params.push_back(segwit);
+                        params.push_back(native_segwit);
                         UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));
                     }
                 }

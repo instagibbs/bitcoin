@@ -122,7 +122,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
 
     return { "hex": transaction_hex}
 
-def signmessage(keypathjson, messagejson):
+def signmessage(keypathjson, messagejson, segwit, native):
 
     keypath = keypathjson
     message = messagejson
@@ -132,7 +132,7 @@ def signmessage(keypathjson, messagejson):
 
     total_keypath = keypath_start+keypath[1:]
 
-    app.getWalletPublicKey(total_keypath, True)
+    app.getWalletPublicKey(total_keypath, True, segwit, native)
 
     app.signMessagePrepare(total_keypath, bytearray(message, 'utf8'))
 
@@ -159,13 +159,13 @@ def signmessage(keypathjson, messagejson):
 
     return {"signature":base64.b64encode(sig)}
 
-def validateaddress(keypath):
+def validateaddress(keypath, segwit, native):
     dongle = getDongle(True)
     app = btchip(dongle)
 
     total_keypath = keypath_start+keypath[1:]
 
-    app.getWalletPublicKey(total_keypath, True)
+    app.getWalletPublicKey(total_keypath, True, segwit, native)
 
     return {}
 

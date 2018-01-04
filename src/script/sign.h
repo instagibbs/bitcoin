@@ -123,8 +123,10 @@ struct PartiallySignedTransaction
     uint64_t num_ins = 0;
     bool use_in_index = false;
 
+    void SetNull();
+    bool IsNull();
     PartiallySignedTransaction() {}
-    PartiallySignedTransaction(const CMutableTransaction& tx, const std::map<uint160, CScript>& redeem_scripts, const std::map<uint256, CScript>& witness_scripts, const std::vector<PartiallySignedInput>& inputs);
+    PartiallySignedTransaction(const CMutableTransaction& tx, const std::map<uint160, CScript>& redeem_scripts, const std::map<uint256, CScript>& witness_scripts, const std::vector<PartiallySignedInput>& inputs, const std::map<CPubKey, std::vector<uint32_t>> hd_keypaths);
 
     template <typename Stream>
     inline void Serialize(Stream& s) const {

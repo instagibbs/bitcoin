@@ -693,12 +693,13 @@ bool IsSolvable(const SigningProvider& provider, const CScript& script)
     return false;
 }
 
-PartiallySignedTransaction::PartiallySignedTransaction(const CMutableTransaction& tx, const std::map<uint160, CScript>& redeem_scripts, const std::map<uint256, CScript>& witness_scripts, const std::vector<PartiallySignedInput>& inputs)
+PartiallySignedTransaction::PartiallySignedTransaction(const CMutableTransaction& tx, const std::map<uint160, CScript>& redeem_scripts, const std::map<uint256, CScript>& witness_scripts, const std::vector<PartiallySignedInput>& inputs, const std::map<CPubKey, std::vector<uint32_t>> hd_keypaths)
 {
     this->tx = tx;
     this->redeem_scripts = redeem_scripts;
     this->witness_scripts = witness_scripts;
     this->inputs = inputs;
+    this->hd_keypaths = hd_keypaths;
 
     SanitizeForSerialization();
 }
@@ -730,6 +731,20 @@ void PartiallySignedTransaction::SanitizeForSerialization()
             inputs[i].SetNull();
         }
     }
+}
+
+void PartiallySignedTransaction::SetNull()
+{
+    tx = CMutableTransaction();
+    redeem_scripts.clear();
+    witness_scripts.clear();
+    inputs.clear();
+    hd_keypaths.clear();
+}
+
+bool PartiallySignedTransaction::IsNull()
+{
+    return tx.vin.empty() && tx.vout.empty() && redeem_scripts.empty() && witness_scripts.empty() && inputs.empty() && hd_keypaths.empty();
 }
 
 void PartiallySignedInput::SetNull()

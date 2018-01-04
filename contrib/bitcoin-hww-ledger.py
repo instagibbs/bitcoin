@@ -183,6 +183,13 @@ def signhwwtransaction(txtosign, prevtxstospend):
                 input_scripts[i] = ""
                 witnesses[i] = get_witness_keyhash_witness(signatures[i][0], input_pubkeys[i])
 
+    witness = bytearray()
+    if has_segwit:
+        for i in range(len(witnessesToInsert)):
+            writeVarint((2 if len(witnessesToInsert[i]) != 0 else 0), witness)#push two items to stack
+            if len(witnessesToInsert[i]) != 0:
+                witness.extend(witnessesToInsert[i])
+
     processed_inputs = trusted_inputs
 
     trusted_inputs_and_scripts = []

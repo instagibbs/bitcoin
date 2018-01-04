@@ -1746,6 +1746,8 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
     }
 
     params.push_back(message);
+    params.push_back(boost::get<CScriptID>(&dest) ? true : false);
+    params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
 
     UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
 

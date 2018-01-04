@@ -36,6 +36,8 @@ def signhwwtransaction(txtosign, prevtxstospend):
     input_types = []
     input_pubkeys = []
     sequence_numbers = []
+    # only for segwit
+    input_amounts = []
     for vin in tx["vin"]:
         if "hdKeypath" not in vin:
             keypaths.append("")
@@ -48,11 +50,14 @@ def signhwwtransaction(txtosign, prevtxstospend):
 
         prevouts.append((vin["txid"], vin["vout"]))
         input_type = None
+        input_amount = -1
         for prevtx in prevtxs:
             if vin["txid"] == prevtx["txid"]:
                 input_type = prevtx["vout"][vin["vout"]]["scriptPubKey"]["type"]
+                input_amount = prevtx["vout"]["value"]
                 break
         input_types.append(input_type)
+        input_amounts.append(input_amount)
 
         seq = format(vin["sequence"], 'x')
         seq = seq.zfill(len(seq)+len(seq)%2)
@@ -68,43 +73,115 @@ def signhwwtransaction(txtosign, prevtxstospend):
             change_path = keypath_start+output["hdKeypath"][1:]
             break
 
-    # Build trusted inputs
+    # Build trusted(legacy) and segwit inputs
     prevoutScriptPubkey = []
     outputData = ""
     trusted_inputs = []
+    segwit_inputs = []
     signatures = [[]]*len(prevouts)
     input_scripts = [""]*len(prevouts)
 
     tx_bytes = bytearray(tx["hex"].decode('hex'))
 
-    # Compile trusted inputs for non-segwit signing
-    for i in range(len(prevouts)):
-        inputTransaction = bitcoinTransaction(bytearray(prevtxs[i]["hex"].decode('hex')))
-        trusted_inputs.append(app.getTrustedInput(inputTransaction, prevouts[i][1]))
-        trusted_inputs[-1]["sequence"] = sequence_numbers[i]
-        prevoutScriptPubkey.append(inputTransaction.outputs[prevouts[i][1]].script)
+    has_legacy = False
+    has_segwit = False
 
-    newTx = True
-    # Now we legacy sign the transaction, input by input for the ones we know
+    # Any input with a keypath will be signed
+    # Anytime a key is passed in, p2sh is assumed to be p2sh-p2wpkh
     for i in range(len(prevouts)):
-        signature = []
-        prevoutscript = prevoutScriptPubkey[i]
-        app.startUntrustedTransaction(newTx, i, trusted_inputs, prevoutscript, tx["version"])
-        newTx = False
-        outputData = app.finalizeInput("DUMMY", -1, -1, change_path, tx_bytes)
         if keypaths[i] == "":
-            input_scripts[i] = bytearray(tx["vin"][i]["scriptSig"]["hex"].decode('hex'))
             continue
-        # Provide the key that is signing the input
-        signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))
-        signatures[i] = signature
-
-        if input_types[i] == "pubkeyhash":
-            input_scripts[i] = get_regular_input_script(signatures[i][0], input_pubkeys[i])
-        elif input_types[i] == "pubkey":
-            input_scripts[i] = get_p2pk_input_script(signatures[i][0])
+        if input_types[i] == "pubkeyhash" or input_types[i] == "pubkey":
+            has_legacy = True
+        elif input_types[i] == "scripthash" or input_types[i] == "witness_v0_keyhash":
+            has_segwit = True
         else:
-            raise Exception("Only p2pkh and p2pk supported at this time.")
+            raise Exception("Unsupported input type for signing: "+input_types[i])
+    if has_legacy:
+        # Compile trusted inputs for non-segwit signing
+        for i in range(len(prevouts)):
+            inputTransaction = bitcoinTransaction(bytearray(prevtxs[i]["hex"].decode('hex')))
+            trusted_inputs.append(app.getTrustedInput(inputTransaction, prevouts[i][1]))
+            trusted_inputs[-1]["sequence"] = sequence_numbers[i]
+            prevoutScriptPubkey.append(inputTransaction.outputs[prevouts[i][1]].script)
+
+        newTx = True
+        # Now we legacy sign the transaction, input by input for the ones we know
+        for i in range(len(prevouts)):
+            signature = []
+            prevoutscript = prevoutScriptPubkey[i]
+            app.startUntrustedTransaction(newTx, i, trusted_inputs, prevoutscript, tx["version"])
+            newTx = False
+            outputData = app.finalizeInput("DUMMY", -1, -1, change_path, tx_bytes)
+            if keypaths[i] == "":
+                input_scripts[i] = bytearray(tx["vin"][i]["scriptSig"]["hex"].decode('hex'))
+                continue
+            # Provide the key that is signing the input
+            signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))
+            if input_types[i] != "pubkeyhash" and input_types[i] != "pubkey":
+                continue
+            signatures[i] = signature
+
+            # We're signing everything we can, tossing what's unneeded
+            if input_types[i] == "pubkeyhash":
+                input_scripts[i] = get_regular_input_script(signatures[i][0], input_pubkeys[i])
+            elif input_types[i] == "pubkey":
+                input_scripts[i] = get_p2pk_input_script(signatures[i][0])
+
+    witnesses = [bytearray(0x00)]*len(prevouts)
+    if has_segwit:
+        # Build segwit inputs
+        for i in range(len(prevouts)):
+            if input_amounts[i] == -1:
+                raise Exception("Not all input amounts given for a segwit tx")
+            txid = bytearray(prevouts[i][0].decode('hex'))
+            txid.reverse()
+            vout = prevouts[i][1]
+            amount = input_amounts[i]
+            segwit_inputs.append({"value":txid+struct.pack("<I", vout)+struct.pack("<Q", int(amount*100000000)), "witness":True, "sequence":sequence_numbers[i]})
+
+        newTx = True
+        # Process them front with all inputs
+        prevoutscript = bytearray()
+        for i in range(len(prevouts)):
+            app.startUntrustedTransaction(newTx, i, segwit_inputs, prevoutscript, tx["version"])
+            newTx = False
+
+        # Then finalize, and process each input as a single-input transaction
+        outputData = app.finalizeInput("DUMMY", -1, -1, change_path, tx_bytes)
+        # Sign segwit inputs
+        for i in range(len(prevouts)):
+            if keypaths[i] == "":
+                input_scripts[i] = bytearray(tx["vin"][i]["scriptSig"]["hex"].decode('hex'))
+                continue
+
+            if input_types[i] != "scripthash" and input_types[i] != "witness_v0_keyhash":
+                continue
+
+            signature = []
+            # For p2wpkh, we need to convert the script into something sensible to the ledger:
+            # OP_DUP OP_HASH160 <program> OP_EQUALVERIFY OP_CHECKSIG
+            sha2 = hashlib.sha256()
+            sha2.update(input_pubkeys[i])
+            riped = hashlib.new('ripemd160')
+            riped.update(sha2.digest())
+            prevoutscript_key = riped.digest()
+            prevoutscript = bytearray("76a914".decode('hex'))+prevoutscript_key+bytearray("88ac").decode("hex")
+
+            app.startUntrustedTransaction(newTx, 0, [segwit_inputs[i]], prevoutscript, tx["version"])
+            signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))
+            signatures[i] = signature
+
+            if input_types[i] == "scripthash":
+                # Just the redeemscript, we need to insert the signature to witness
+                inputScript = bytearray()
+                write_pushed_data_size(prevoutscript_key+2), inputScript)#+2 for version and push
+                inputScript.extend(bytearray("0014".decode('hex'))+prevoutscript_key)
+                input_scripts[i].append(inputScript)
+                witnesses[i] = get_witness_keyhash_witness(signatures[i][0], input_pubkeys[i])
+            elif input_types[i] == "witness_v0_keyhash":
+                input_scripts[i] = ""
+                witnesses[i] = get_witness_keyhash_witness(signatures[i][0], input_pubkeys[i])
 
     processed_inputs = trusted_inputs
 

@@ -185,6 +185,8 @@ CPubKey CWallet::GenerateNewKey(CWalletDB &walletdb, bool internal)
     else {
         if (!AddWatchOnly(pubkey, metadata, nCreationTime))
             throw std::runtime_error(std::string(__func__) + ": AddWatchOnly failed");
+        LOCK(cs_KeyStore);
+        ImplicitlyLearnRelatedKeyScripts(pubkey);
     }
     return pubkey;
 }
@@ -1675,9 +1677,23 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
             const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
 
             //TODO get keypath for p2sh
-            const auto& it = m_script_metadata.find(CScriptID(prevout.scriptPubKey));
+            CScriptID id(prevout.scriptPubKey);
+            CScript subscript;
+            const auto& it = m_script_metadata.find(id);
             if (it != m_script_metadata.end()) {
                 in.pushKV("hdKeypath", it->second.hdKeypath);
+            } else {
+                txnouttype type;
+                std::vector<CTxDestination> addresses;
+                int nRequired;
+                ExtractDestinations(prevout.scriptPubKey, type, addresses, nRequired);
+                if (addresses.size() == 1) {
+                    auto key_id = boost::get<CKeyID>(&addresses[0]);
+                    if (key_id) {
+                        const auto& it2 = mapKeyMetadata.find(*key_id);
+                        in.pushKV("hdKeypath", it2->second.hdKeypath);
+                    }
+                }
             }
             UniValue prevtx(UniValue::VOBJ);
             TransactionToHWWUniv(*wtx->tx, prevtx);

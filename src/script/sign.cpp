@@ -693,6 +693,7 @@ bool IsSolvable(const SigningProvider& provider, const CScript& script)
     return false;
 }
 
+PartiallySignedTransaction::PartiallySignedTransaction(const PartiallySignedTransaction& psbtx_in) : tx(psbtx_in.tx), redeem_scripts(psbtx_in.redeem_scripts), witness_scripts(psbtx_in.witness_scripts), inputs(psbtx_in.inputs), unknown(psbtx_in.unknown), hd_keypaths(psbtx_in.hd_keypaths), num_ins(psbtx_in.num_ins), use_in_index(psbtx_in.use_in_index) {}
 PartiallySignedTransaction::PartiallySignedTransaction(const CMutableTransaction& tx, const std::map<uint160, CScript>& redeem_scripts, const std::map<uint256, CScript>& witness_scripts, const std::vector<PartiallySignedInput>& inputs, const std::map<CPubKey, std::vector<uint32_t>> hd_keypaths)
 {
     this->tx = tx;

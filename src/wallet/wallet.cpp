@@ -1674,6 +1674,7 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         if (wtx != NULL) {
             const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
 
+            //TODO get keypath for p2sh
             const auto& it = m_script_metadata.find(CScriptID(prevout.scriptPubKey));
             if (it != m_script_metadata.end()) {
                 in.pushKV("hdKeypath", it->second.hdKeypath);

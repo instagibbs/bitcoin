@@ -135,6 +135,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
             has_segwit = True
         else:
             raise Exception("Unsupported input type for signing: "+input_types[i])
+
     if has_legacy:
         # Compile trusted inputs for non-segwit signing
         for i in range(len(prevouts)):

@@ -28,8 +28,6 @@ def signhwwtransaction(txtosign, prevtxstospend):
     dongle = getDongle(True)
     app = btchip(dongle)
 
-    # Get prevout information (for now we support p2pk(h))
-
     # Get keypaths of things you're spending, prepend m/44'/0'/0'
     keypaths = []
     prevouts = []
@@ -185,18 +183,18 @@ def signhwwtransaction(txtosign, prevtxstospend):
 
     witness = bytearray()
     if has_segwit:
-        for i in range(len(witnessesToInsert)):
-            writeVarint((2 if len(witnessesToInsert[i]) != 0 else 0), witness)#push two items to stack
-            if len(witnessesToInsert[i]) != 0:
-                witness.extend(witnessesToInsert[i])
+        for i in range(len(witnesses)):
+            writeVarint((2 if len(witnesses[i]) != 0 else 0), witness)#push two items to stack
+            if len(witnesses[i]) != 0:
+                witness.extend(witnesses[i])
 
-    processed_inputs = trusted_inputs
+    processed_inputs = segwit_inputs if has_segwit else trusted_inputs
 
     trusted_inputs_and_scripts = []
     for processed_input, input_script in zip(processed_inputs, input_scripts):
         trusted_inputs_and_scripts.append([processed_input['value'], input_script, sequence_numbers[i]])
 
-    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"])
+    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], !has_segwit, witness)
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
     # Write to file as workaround

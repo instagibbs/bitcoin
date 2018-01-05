@@ -17,6 +17,45 @@ btchip python library can be found here https://github.com/LedgerHQ/btchip-pytho
 or installed with `pip install btchip-python`
 '''
 
+# TODO: get these upstreamed to btchip-python
+def format_transaction(dongleOutputData, trustedInputsAndInputScripts, version=0x01, lockTime=0, trusted=True, witness=""):
+        transaction = bitcoinTransaction()
+        transaction.version = []
+        transaction.witnessScript = witness
+        transaction.witness = True if witness != "" else False
+        writeUint32LE(version, transaction.version)
+        for item in trustedInputsAndInputScripts:
+                newInput = bitcoinInput()
+                newInput.prevOut = item[0][4:4+36] if trusted else item[0][:36]
+                newInput.script = item[1]
+                if len(item) > 2:
+                        newInput.sequence = bytearray(item[2].decode('hex'))
+                else:
+                        newInput.sequence = bytearray([0xff, 0xff, 0xff, 0xff])
+                transaction.inputs.append(newInput)
+        result = transaction.serialize(True)
+        result.extend(dongleOutputData)
+        if witness != "":
+            result.extend(witness)
+        writeUint32BE(lockTime, result)
+        return bytearray(result)
+
+def get_witness_keyhash_witness(signature, pubkey):
+    result = []
+    writeVarint(len(signature), result)
+    result.extend(signature)
+    writeVarint(len(pubkey), result)
+    result.extend(pubkey)
+    return bytearray(result)
+
+def build_witness_stack(witnesses):
+    witness = bytearray()
+    for i in range(len(witnesses)):
+        writeVarint((2 if len(witnesses[i]) != 0 else 0), witness)
+        if len(witnesses[i]) != 0:
+            witness.extend(witnesses[i])
+    return witness
+
 # Keypath prepend, based on xpub path
 keypath_start = "44'/0'/0'"
 
@@ -52,8 +91,9 @@ def signhwwtransaction(txtosign, prevtxstospend):
         for prevtx in prevtxs:
             if vin["txid"] == prevtx["txid"]:
                 input_type = prevtx["vout"][vin["vout"]]["scriptPubKey"]["type"]
-                input_amount = prevtx["vout"]["value"]
+                input_amount = prevtx["vout"][vin["vout"]]["value"]
                 break
+
         input_types.append(input_type)
         input_amounts.append(input_amount)
 
@@ -173,7 +213,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
             if input_types[i] == "scripthash":
                 # Just the redeemscript, we need to insert the signature to witness
                 inputScript = bytearray()
-                write_pushed_data_size(prevoutscript_key+2), inputScript)#+2 for version and push
+                write_pushed_data_size(prevoutscript_key+2, inputScript)#+2 for version and push
                 inputScript.extend(bytearray("0014".decode('hex'))+prevoutscript_key)
                 input_scripts[i].append(inputScript)
                 witnesses[i] = get_witness_keyhash_witness(signatures[i][0], input_pubkeys[i])
@@ -183,10 +223,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
 
     witness = bytearray()
     if has_segwit:
-        for i in range(len(witnesses)):
-            writeVarint((2 if len(witnesses[i]) != 0 else 0), witness)#push two items to stack
-            if len(witnesses[i]) != 0:
-                witness.extend(witnesses[i])
+        witness = build_witness_stack(witnesses)
 
     processed_inputs = segwit_inputs if has_segwit else trusted_inputs
 
@@ -194,7 +231,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     for processed_input, input_script in zip(processed_inputs, input_scripts):
         trusted_inputs_and_scripts.append([processed_input['value'], input_script, sequence_numbers[i]])
 
-    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], !has_segwit, witness)
+    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], has_segwit, witness)
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
     # Write to file as workaround

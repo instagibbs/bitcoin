@@ -1708,6 +1708,7 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         out.pushKV("scriptPubKey", o);
 
         if (IsChange(txout)) {
+            // TODO also search for p2sh style change
             const auto& it = m_script_metadata.find(CScriptID(txout.scriptPubKey));
             if (it != m_script_metadata.end()) {
                 out.pushKV("hdKeypath", it->second.hdKeypath);

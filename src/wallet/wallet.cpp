@@ -3277,9 +3277,9 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 const CScript& scriptPubKey = coin.txout.scriptPubKey;
                 SignatureData sigdata;
 
-                ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata);
-                UpdateTransaction(txNew, nIn, sigdata);
-
+                if (ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata)) {
+                    UpdateTransaction(txNew, nIn, sigdata);
+                }
                 nIn++;
             }
             CTransaction txFinalConst(txNew);

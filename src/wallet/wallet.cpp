@@ -3292,6 +3292,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 ScriptError serror = SCRIPT_ERR_OK;
                 if (!VerifyScript(txNew.vin[nIn].scriptSig, scriptPubKey, &txNew.vin[nIn].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txFinalConst, nIn, coin.txout.nValue), &serror)) {
                     strFailReason = _("Transaction signing failed.");
+                    return false;
                 }
 
                 nIn++;

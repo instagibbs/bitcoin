@@ -7,6 +7,7 @@ from btchip.btchip import *
 from btchip.btchipUtils import *
 import struct
 import base64
+import hashlib
 
 '''
 NOTE: This file should be placed in the base datadir
@@ -202,12 +203,21 @@ def signhwwtransaction(txtosign, prevtxstospend):
             signature = []
             # For p2wpkh, we need to convert the script into something sensible to the ledger:
             # OP_DUP OP_HASH160 <program> OP_EQUALVERIFY OP_CHECKSIG
+
+            # Compute keyhash
             sha2 = hashlib.sha256()
             sha2.update(input_pubkeys[i])
             riped = hashlib.new('ripemd160')
             riped.update(sha2.digest())
-            prevoutscript_key = riped.digest()
-            prevoutscript = bytearray("76a914".decode('hex'))+prevoutscript_key+bytearray("88ac").decode("hex")
+            key_hash = riped.digest()
+
+            scriptsig = bytearray("0014".decode('hex'))+key_hash
+            sha2 = hashlib.sha256()
+            sha2.update(scriptsig)
+            riped = hashlib.new('ripemd160')
+            riped.update(sha2.digest())
+            script_hash = riped.digest()
+            prevoutscript = bytearray("76a914".decode('hex'))+key_hash+bytearray("88ac".decode("hex"))
 
             app.startUntrustedTransaction(newTx, 0, [segwit_inputs[i]], prevoutscript, tx["version"])
             signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))
@@ -216,9 +226,9 @@ def signhwwtransaction(txtosign, prevtxstospend):
             if input_types[i] == "scripthash":
                 # Just the redeemscript, we need to insert the signature to witness
                 inputScript = bytearray()
-                write_pushed_data_size(prevoutscript_key+2, inputScript)#+2 for version and push
-                inputScript.extend(bytearray("0014".decode('hex'))+prevoutscript_key)
-                input_scripts[i].append(inputScript)
+                write_pushed_data_size(scriptsig, inputScript)#+2 for version and push
+                inputScript.extend(scriptsig)
+                input_scripts[i] = inputScript
                 witnesses[i] = get_witness_keyhash_witness(signatures[i][0], input_pubkeys[i])
             elif input_types[i] == "witness_v0_keyhash":
                 input_scripts[i] = ""

@@ -37,7 +37,7 @@ def format_transaction(dongleOutputData, trustedInputsAndInputScripts, version=0
         result.extend(dongleOutputData)
         if witness != "":
             result.extend(witness)
-        writeUint32BE(lockTime, result)
+        writeUint32LE(lockTime, result)
         return bytearray(result)
 
 def get_witness_keyhash_witness(signature, pubkey):
@@ -136,6 +136,8 @@ def signhwwtransaction(txtosign, prevtxstospend):
         else:
             raise Exception("Unsupported input type for signing: "+input_types[i])
 
+    assert(has_legacy or has_segwit)
+
     if has_legacy:
         # Compile trusted inputs for non-segwit signing
         for i in range(len(prevouts)):
@@ -232,7 +234,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     for processed_input, input_script in zip(processed_inputs, input_scripts):
         trusted_inputs_and_scripts.append([processed_input['value'], input_script, sequence_numbers[i]])
 
-    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], has_segwit, witness)
+    transaction = format_transaction(outputData['outputData'], trusted_inputs_and_scripts, tx["version"], tx["locktime"], not has_segwit, witness)
     transaction_hex = ''.join('{:02x}'.format(x) for x in transaction)
 
     # Write to file as workaround

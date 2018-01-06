@@ -1688,9 +1688,9 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
                 int nRequired;
                 ExtractDestinations(prevout.scriptPubKey, type, addresses, nRequired);
                 if (addresses.size() == 1) {
-                    auto key_id = boost::get<CKeyID>(&addresses[0]);
-                    if (key_id) {
-                        const auto& it2 = mapKeyMetadata.find(*key_id);
+                    auto script_id = boost::get<CScriptID>(&addresses[0]);
+                    if (script_id) {
+                        const auto& it2 = m_script_metadata.find(*script_id);
                         in.pushKV("hdKeypath", it2->second.hdKeypath);
                     }
                 }

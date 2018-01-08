@@ -77,7 +77,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     # only for segwit
     input_amounts = []
     for vin in tx["vin"]:
-        if "hdKeypath" not in vin:
+        if "hdKeypath" not in vin or len(vin["hdKeypath"]) == 0:
             keypaths.append("")
             input_pubkeys.append("")
         else:
@@ -108,7 +108,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
     # Define change if possible
     change_path = "0'/0'/0'/1'"
     for output in tx["vout"]:
-        if "hdKeypath" in output:
+        if "hdKeypath" in output and len(output["hdKeypath"]) != 0:
             change_path = keypath_start+output["hdKeypath"][1:]
             break
 

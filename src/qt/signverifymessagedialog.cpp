@@ -145,7 +145,7 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
         if (!model->SignHWWMessage(ui->messageIn_SM->document()->toPlainText().toStdString(), destination, signature, fail_reason)) {
             ui->addressIn_SM->setValid(false);
             ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
-            ui->statusLabel_SM->setText(tr("External signing failed.") + QString(" ") + tr("Please check the device is plugged in, and the address is correct and try again."));
+            ui->statusLabel_SM->setText(tr("External signing failed: ") + QString::fromStdString(fail_reason) + tr("Please check the device is plugged in, and the address is correct and try again."));
             return;
         }
         ui->statusLabel_SM->setStyleSheet("QLabel { color: green; }");
@@ -155,7 +155,7 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
 
     } else {
         CKey key;
-    if (!model->getPrivKey(*keyID, key))
+        if (!model->getPrivKey(*keyID, key))
         {
             ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
             ui->statusLabel_SM->setText(tr("Private key for the entered address is not available."));

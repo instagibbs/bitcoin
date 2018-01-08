@@ -1676,22 +1676,13 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         if (wtx != NULL) {
             const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
 
-            //TODO get keypath for p2sh
-            CScriptID id(prevout.scriptPubKey);
-            CScript subscript;
-            const auto& it = m_script_metadata.find(id);
-            if (it != m_script_metadata.end()) {
-                in.pushKV("hdKeypath", it->second.hdKeypath);
-            } else {
-                txnouttype type;
-                std::vector<CTxDestination> addresses;
-                int nRequired;
-                ExtractDestinations(prevout.scriptPubKey, type, addresses, nRequired);
-                if (addresses.size() == 1) {
-                    auto script_id = boost::get<CScriptID>(&addresses[0]);
-                    if (script_id) {
-                        const auto& it2 = m_script_metadata.find(*script_id);
-                        in.pushKV("hdKeypath", it2->second.hdKeypath);
+            CTxDestination address;
+            if (ExtractDestination(prevout.scriptPubKey, address)) {
+                CKeyID key_id = GetKeyForDestination(*this, address);
+                if (!key_id.IsNull()) {
+                    auto it = mapKeyMetadata.find(key_id);
+                    if (it != mapKeyMetadata.end()) {
+                        in.pushKV("hdKeypath", it->second.hdKeypath);
                     }
                 }
             }
@@ -1725,10 +1716,15 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         out.pushKV("scriptPubKey", o);
 
         if (IsChange(txout)) {
-            // TODO also search for p2sh style change
-            const auto& it = m_script_metadata.find(CScriptID(txout.scriptPubKey));
-            if (it != m_script_metadata.end()) {
-                out.pushKV("hdKeypath", it->second.hdKeypath);
+            CTxDestination address;
+            if (ExtractDestination(txout.scriptPubKey, address)) {
+                CKeyID key_id = GetKeyForDestination(*this, address);
+                if (!key_id.IsNull()) {
+                    auto it = mapKeyMetadata.find(key_id);
+                    if (it != mapKeyMetadata.end()) {
+                        out.pushKV("hdKeypath", it->second.hdKeypath);
+                    }
+                }
             }
         }
 
@@ -1747,19 +1743,18 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
     UniValue params(UniValue::VARR);
     signature = "";
 
-    CKeyID keyID;
-
-    auto id = boost::get<CKeyID>(&dest);
-    const auto& meta = m_script_metadata;
-    auto it = id ? meta.find(*id) : meta.end();
-    if (it == meta.end()) {
-        fail_reason = _("Private key not known to this externalhd wallet");
-        return false;
-    }
-    if (!it->second.hdKeypath.empty()) {
-        params.push_back(it->second.hdKeypath);
+    CKeyID key_id = GetKeyForDestination(*this, dest);
+    if (!key_id.IsNull()) {
+        auto it = mapKeyMetadata.find(key_id);
+        if (it != mapKeyMetadata.end()) {
+            if (!it->second.hdKeypath.empty()) {
+                params.push_back(it->second.hdKeypath);
+            } else {
+                fail_reason = _("Keypath not known by wallet");
+            }
+        }
     } else {
-        fail_reason = _("No known keypath for this address in the wallet.");
+        fail_reason = _("Private key not known to this externalhd wallet");
         return false;
     }
 

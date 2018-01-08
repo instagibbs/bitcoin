@@ -211,23 +211,23 @@ def signhwwtransaction(txtosign, prevtxstospend):
             riped.update(sha2.digest())
             key_hash = riped.digest()
 
-            scriptsig = bytearray("0014".decode('hex'))+key_hash
+            redeemscript = bytearray("0014".decode('hex'))+key_hash
             sha2 = hashlib.sha256()
-            sha2.update(scriptsig)
+            sha2.update(redeemscript)
             riped = hashlib.new('ripemd160')
             riped.update(sha2.digest())
             script_hash = riped.digest()
-            prevoutscript = bytearray("76a914".decode('hex'))+key_hash+bytearray("88ac".decode("hex"))
+            scriptCode = bytearray("76a914".decode('hex'))+key_hash+bytearray("88ac".decode("hex"))
 
-            app.startUntrustedTransaction(newTx, 0, [segwit_inputs[i]], prevoutscript, tx["version"])
+            app.startUntrustedTransaction(newTx, 0, [segwit_inputs[i]], scriptCode, tx["version"])
             signature.append(app.untrustedHashSign(keypaths[i], "", tx["locktime"], 0x01))
             signatures[i] = signature
 
             if input_types[i] == "scripthash":
                 # Just the redeemscript, we need to insert the signature to witness
                 inputScript = bytearray()
-                write_pushed_data_size(scriptsig, inputScript)#+2 for version and push
-                inputScript.extend(scriptsig)
+                write_pushed_data_size(redeemscript, inputScript)
+                inputScript.extend(redeemscript)
                 input_scripts[i] = inputScript
                 witnesses[i] = get_witness_keyhash_witness(signatures[i][0], input_pubkeys[i])
             elif input_types[i] == "witness_v0_keyhash":

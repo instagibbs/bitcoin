@@ -5,9 +5,10 @@
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import *
-import os, stat
-
-xpub = "yourtpubhere"
+import os, stat, sys
+if len(sys.argv) < 2:
+    raise Exception("You must enter a tpub for testing.")
+xpub = sys.argv[1]
 
 class ExternalHDTest(BitcoinTestFramework):
 
@@ -133,11 +134,8 @@ class ExternalHDTest(BitcoinTestFramework):
         self.nodes[0].generate(1)
         node0_bal += 25
 
-        self.sync_all()
-
         # Mature fees
         self.nodes[0].generatetoaddress(100, "mwoD9tx3Sh3vciyM9hs3fDAVGqxWFLgMv7")
-        self.sync_all()
 
         assert_equal(self.nodes[0].getbalance(), node0_bal)
 
@@ -148,6 +146,14 @@ class ExternalHDTest(BitcoinTestFramework):
         #privkey has 17 btc
         self.nodes[0].importprivkey(privkey)
         node0_bal += 17
+        assert_equal(self.nodes[0].getbalance(), node0_bal)
+
+        print("Sending all funds, including imported to self")
+        self.nodes[0].sendtoaddress(native_address, node0_bal, "", "", True)
+
+        self.nodes[0].generate(1)
+        self.nodes[0].generatetoaddress(100, "mwoD9tx3Sh3vciyM9hs3fDAVGqxWFLgMv7")
+        node0_bal += Decimal("12.5")
         assert_equal(self.nodes[0].getbalance(), node0_bal)
 
 if __name__ == '__main__':

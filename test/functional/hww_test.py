@@ -7,13 +7,15 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import *
 import os, stat
 
+xpub = "yourxpubhere"
+
 from pdb import set_trace
 class ExternalHDTest(BitcoinTestFramework):
 
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
-        self.extra_args = [["-externalhd=putxpubhere"]]
+        self.extra_args = [["-externalhd="+xpub]]
 
     def setup_network(self, split=False):
         self.add_nodes(1, self.extra_args)
@@ -31,7 +33,7 @@ class ExternalHDTest(BitcoinTestFramework):
         contrib_file = open('contrib/bitcoin-hww-ledger.py', 'r')
         datadir_file = open(hww_driver_path+"/bitcoin-hww-ledger.py", 'w')
         for line in contrib_file:
-            datadir_file.write(line.replace('44\'', '0\'/0\''))
+            datadir_file.write(line)
 
         datadir_file.close()
         contrib_file.close()
@@ -40,7 +42,7 @@ class ExternalHDTest(BitcoinTestFramework):
 
         self.stop_nodes()
 
-        self.start_nodes([['-externalhd=pubxpubhere', '-hardwarewallet=bitcoin-hww-ledger.py']])
+        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet=bitcoin-hww-ledger.py']])
 
         print("Begin hardwarewallet tests...")
 

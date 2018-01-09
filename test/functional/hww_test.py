@@ -7,9 +7,8 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import *
 import os, stat
 
-xpub = "yourxpubhere"
+xpub = "yourtpubhere"
 
-from pdb import set_trace
 class ExternalHDTest(BitcoinTestFramework):
 
     def set_test_params(self):
@@ -70,7 +69,7 @@ class ExternalHDTest(BitcoinTestFramework):
         print("Validating user change addresses:")
         print("P2SH: "+p2sh_change)
         self.nodes[0].validateaddress(p2sh_change)
-        print("Native segwit(regtest != testnet, first and last part might differ): "+native_change)
+        print("Native segwit: "+native_change)
         self.nodes[0].validateaddress(native_change)
         print("Legacy: "+legacy_change)
         self.nodes[0].validateaddress(legacy_change)
@@ -98,12 +97,13 @@ class ExternalHDTest(BitcoinTestFramework):
         privkey_address = "n3NkSZqoPMCQN5FENxUBw4qVATbytH6FDK"
         privkey = "cNaQCDwmmh4dS9LzCgVtyy1e1xjCJ21GUDHe9K98nzb689JvinGV"
 
-        set_trace()
-        print(privkey_address)
+        print("non-segwit signing steps may show p2sh change, bug filed")
+        print("Send of 10 to: "+privkey_address)
         self.nodes[0].sendtoaddress(privkey_address, 10) #change not being recognized by ledger
+        # Seems to be related to p2sh change???
         node0_bal -= 10
         print("2 to " + legacy_address)
-        self.nodes[0].sendtoaddress(legacy_address, 2) #signing fails here
+        self.nodes[0].sendtoaddress(legacy_address, 2)
         print("3 to " + p2sh_address)
         self.nodes[0].sendtoaddress(p2sh_address, 3)
         print("4 to " + native_address)
@@ -112,7 +112,7 @@ class ExternalHDTest(BitcoinTestFramework):
         # Self-send to cause a mixed spend
         print("Mixed input spending of all funds to self. Ledger will need to sign twice.")
         print(str(self.nodes[0].getbalance()) + " minus fees to "+ native_address)
-        self.sendtoaddress(native_address, self.nodes[0].getbalance(), "", "", True)
+        self.nodes[0].sendtoaddress(native_address, self.nodes[0].getbalance(), "", "", True)
 
         self.nodes[0].generate(1)
         node0_bal += 50
@@ -120,7 +120,7 @@ class ExternalHDTest(BitcoinTestFramework):
         self.sync_all()
 
         # Mature fees
-        self.nodes[1].generate(100)
+        self.nodes[0].generatetoaddress(100, "mwoD9tx3Sh3vciyM9hs3fDAVGqxWFLgMv7")
         self.sync_all()
 
         assert_equal(self.nodes[0].getbalance(), node0_bal)
@@ -136,17 +136,17 @@ class ExternalHDTest(BitcoinTestFramework):
         self.sync_all()
 
         # Mature fees
-        self.nodes[1].generate(100)
+        self.nodes[0].generatetoaddress(100, "mwoD9tx3Sh3vciyM9hs3fDAVGqxWFLgMv7")
         self.sync_all()
 
         assert_equal(self.nodes[0].getbalance(), node0_bal)
 
         print("Wallet sending checks out.")
 
-        assert_raises_rpc_error(-4, "External HD wallets are not allowed to import addresses or keys.", self.nodes[0].importaddress(privkey_address))
+        assert_raises_rpc_error(-4, "External HD wallets are not allowed to import addresses or keys.", self.nodes[0].importaddress, privkey_address)
 
         #privkey has 17 btc
-        self.node[0].importprivkey(privkey)
+        self.nodes[0].importprivkey(privkey)
         node0_bal += 17
         assert_equal(self.nodes[0].getbalance(), node0_bal)
 

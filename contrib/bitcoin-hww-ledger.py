@@ -109,6 +109,9 @@ def signhwwtransaction(txtosign, prevtxstospend):
     change_path = "0'/0'/0'/1'"
     for output in tx["vout"]:
         if "hdKeypath" in output and len(output["hdKeypath"]) != 0:
+            # Core marks anything not in address book as change... make sure it's 1/k
+            if output["hdKeypath"].split('/')[-2] != '1':
+                continue
             change_path = keypath_start+output["hdKeypath"][1:]
             break
 

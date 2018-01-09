@@ -183,7 +183,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
             txid.reverse()
             vout = prevouts[i][1]
             amount = input_amounts[i]
-            segwit_inputs.append({"value":txid+struct.pack("<I", vout)+struct.pack("<Q", int(amount*100000000)), "witness":True, "sequence":sequence_numbers[i]})
+            segwit_inputs.append({"value":txid+struct.pack("<I", vout)+struct.pack("<Q", amount), "witness":True, "sequence":sequence_numbers[i]})
 
         newTx = True
         # Process them front with all inputs

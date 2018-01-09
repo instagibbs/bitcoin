@@ -1707,8 +1707,7 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         const CTxOut& txout = tx.vout[i];
         UniValue out(UniValue::VOBJ);
 
-        UniValue outValue(UniValue::VNUM, FormatMoney(txout.nValue));
-        out.pushKV("value", outValue);
+        out.pushKV("value", txout.nValue);
         out.pushKV("n", (int64_t)i);
 
         UniValue o(UniValue::VOBJ);

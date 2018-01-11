@@ -156,5 +156,9 @@ class ExternalHDTest(BitcoinTestFramework):
         node0_bal += Decimal("12.5")
         assert_equal(self.nodes[0].getbalance(), node0_bal)
 
+        # TODO Add sign{hww, raw}transaction tests
+
+        # TODO Add bumpfee tests
+
 if __name__ == '__main__':
     ExternalHDTest().main()

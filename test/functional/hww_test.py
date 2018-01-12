@@ -6,6 +6,7 @@
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import *
 import os, stat, sys
+
 if len(sys.argv) < 2:
     raise Exception("You must enter a tpub for testing.")
 xpub = sys.argv[1]
@@ -42,7 +43,7 @@ class ExternalHDTest(BitcoinTestFramework):
 
         self.stop_nodes()
 
-        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet=bitcoin-hww-ledger.py']])
+        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet=bitcoin-hww-ledger.py', '-walletrbf=1']])
 
         print("Begin hardwarewallet tests...")
 
@@ -156,9 +157,26 @@ class ExternalHDTest(BitcoinTestFramework):
         node0_bal += Decimal("12.5")
         assert_equal(self.nodes[0].getbalance(), node0_bal)
 
-        # TODO Add sign{hww, raw}transaction tests
+        utxo = self.nodes[0].listunspent()[0]
 
-        # TODO Add bumpfee tests
+        print("Raw signing test")
+        # Simple sign{hww, raw}transaction test
+        rawtx = self.nodes[0].createrawtransaction([{"txid":utxo["txid"], "vout":utxo["vout"]}], {self.nodes[0].getnewaddress():1})
+
+        signed_tx_ret = self.nodes[0].signrawtransaction(rawtx)
+
+        assert_equal(signed_tx_ret["complete"], True)
+
+        signed_tx_ret = self.nodes[0].signhwwtransaction(rawtx, [self.nodes[0].gettransaction(utxo["txid"])["hex"]])
+
+        assert_equal(signed_tx_ret["complete"], True)
+
+        print("Bumpfee test")
+        # super basic bumpfee test
+        txid = self.nodes[0].sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        txid2 = self.nodes[0].bumpfee(txid)["txid"]
+        self.nodes[0].generate(1)
+        assert_equal(self.nodes[0].gettransaction(txid2)["confirmations"], 1)
 
 if __name__ == '__main__':
     ExternalHDTest().main()

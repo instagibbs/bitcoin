@@ -61,7 +61,7 @@ class ExternalHDTest(BitcoinTestFramework):
         print("Validating user addresses:")
         print("P2SH: "+p2sh_address)
         self.nodes[0].validateaddress(p2sh_address)
-        print("Native segwit(regtest != testnet, first and last part might differ): "+native_address)
+        print("Native segwit: "+native_address)
         self.nodes[0].validateaddress(native_address)
         print("Legacy: "+legacy_address)
         self.nodes[0].validateaddress(legacy_address)

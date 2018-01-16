@@ -11,22 +11,28 @@ if len(sys.argv) < 2:
     raise Exception("You must enter a tpub for testing.")
 xpub = sys.argv[1]
 
+# Node 0 is externally signing node
+# Node 1 is software signing node
+
 class ExternalHDTest(BitcoinTestFramework):
 
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 1
-        self.extra_args = [["-externalhd="+xpub]]
+        self.num_nodes = 2
+        self.extra_args = [["-externalhd="+xpub], []]
 
     def setup_network(self, split=False):
-        self.add_nodes(1, self.extra_args)
+        self.add_nodes(2, self.extra_args)
         self.start_nodes()
+        connect_nodes_bi(self.nodes,0,1)
 
     def run_test(self):
 
         assert_equal(self.nodes[0].getbalance(), 0)
         self.nodes[0].generate(1)
-        self.nodes[0].generatetoaddress(100, "mwoD9tx3Sh3vciyM9hs3fDAVGqxWFLgMv7")
+        self.sync_all()
+        self.nodes[1].generate(100)
+        self.sync_all()
 
         print("Make sure your device is plugged in and loaded to the btc testnet app...")
 
@@ -43,7 +49,8 @@ class ExternalHDTest(BitcoinTestFramework):
 
         self.stop_nodes()
 
-        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet=bitcoin-hww-ledger.py', '-walletrbf=1']])
+        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet=bitcoin-hww-ledger.py', '-walletrbf=1'], []])
+        connect_nodes_bi(self.nodes,0,1)
 
         print("Begin hardwarewallet tests...")
 
@@ -170,6 +177,46 @@ class ExternalHDTest(BitcoinTestFramework):
         signed_tx_ret = self.nodes[0].signhwwtransaction(rawtx, [self.nodes[0].gettransaction(utxo["txid"])["hex"]])
 
         assert_equal(signed_tx_ret["complete"], True)
+
+        # Node 0 signs 2 input transaction, 1 from software, 1 from hardware
+        hw_addr = self.nodes[0].getnewaddress()
+        self.nodes[1].sendtoaddress(hw_addr, 1)
+        self.nodes[1].sendtoaddress(privkey_address, 1)
+        self.sync_all()
+        utxo1 = None
+        utxo2 = None
+        raw1 = None
+        raw2 = None
+        for utxo in self.nodes[0].listunspent(0):
+            if utxo["address"] == hw_addr:
+                utxo1 = (utxo["txid"], utxo["vout"])
+                raw1 = self.nodes[0].gettransaction(utxo1[0])["hex"]
+
+            if utxo["address"] == privkey_address:
+                utxo2 = (utxo["txid"], utxo["vout"])
+                raw2 = self.nodes[0].gettransaction(utxo2[0])["hex"]
+
+        assert(utxo1 and utxo2)
+
+        rawtx2 = self.nodes[0].createrawtransaction([{"txid":utxo1[0], "vout":utxo1[1]}, {"txid":utxo2[0], "vout":utxo2[1]}], {self.nodes[0].getnewaddress():1})
+
+        # This will self-verify the scripts being signed, but not amounts or other policy constraints
+        assert_equal(self.nodes[0].signrawtransaction(rawtx2)["complete"], True)
+        # Only will do one input, has no knowledge of sw wallet
+        assert_equal(self.nodes[0].signhwwtransaction(rawtx2, [raw1, raw2])["complete"], False)
+
+        # Node 1 signs an input, node 0 then signs to complete
+        node1_utxo = self.nodes[1].listunspent(0)[0]
+        rawtx3 = self.nodes[0].createrawtransaction([{"txid":utxo1[0], "vout":utxo1[1]}, {"txid":node1_utxo["txid"], "vout":node1_utxo["vout"]}], {self.nodes[0].getnewaddress():1})
+        part_signed = self.nodes[1].signrawtransaction(rawtx3)
+        assert_equal(part_signed["complete"], False)
+        full_signed = self.nodes[0].signrawtransaction(part_signed["hex"])
+        # Wallet has no notion of 1 of the input transactions, will fail
+        # since either signing mode requires information such as amount, or trusted inputs
+        assert_equal(full_signed["complete"], False)
+        # Passing in the full prevtxs fixes this
+        full_signed = self.nodes[0].signhwwtransaction(part_signed["hex"], [raw1, self.nodes[1].gettransaction(node1_utxo["txid"])["hex"]])
+        assert(full_signed["complete"])
 
         print("Bumpfee test")
         # super basic bumpfee test

@@ -224,6 +224,31 @@ bool CPubKey::Decompress() {
     return true;
 }
 
+bool CPubKey::Derive(CPubKey& pubkeyChild, ChainCode &ccChild, unsigned int nChild, const ChainCode& cc, std::vector<unsigned char>* tweak) {
+    assert(IsValid());
+    assert((nChild >> 31) == 0);
+    assert(begin() + 33 == end());
+    unsigned char out[64];
+    BIP32Hash(cc, nChild, *begin(), begin()+1, out);
+    memcpy(ccChild.begin(), out+32, 32);
+    if (tweak) {
+        tweak->clear();
+        *tweak = std::vector<unsigned char>(out, out+32);
+    }
+    secp256k1_pubkey pubkey;
+    if (!secp256k1_ec_pubkey_parse(secp256k1_context_verify, &pubkey, &(*this)[0], size())) {
+        return false;
+    }
+    if (!secp256k1_ec_pubkey_tweak_add(secp256k1_context_verify, &pubkey, out)) {
+        return false;
+    }
+    unsigned char pub[33];
+    size_t publen = 33;
+    secp256k1_ec_pubkey_serialize(secp256k1_context_verify, pub, &publen, &pubkey, SECP256K1_EC_COMPRESSED);
+    pubkeyChild.Set(pub, pub + publen);
+    return true;
+}
+
 bool CPubKey::Derive(CPubKey& pubkeyChild, ChainCode &ccChild, unsigned int nChild, const ChainCode& cc) const {
     assert(IsValid());
     assert((nChild >> 31) == 0);

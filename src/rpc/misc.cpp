@@ -32,6 +32,23 @@
 
 #include <univalue.h>
 
+#include <secp256k1.h>
+
+namespace {
+static secp256k1_context *ctx;
+
+class CSecp256k1Init {
+public:
+    CSecp256k1Init() {
+        ctx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY | SECP256K1_CONTEXT_SIGN);
+    }
+    ~CSecp256k1Init() {
+        secp256k1_context_destroy(ctx);
+    }
+};
+static CSecp256k1Init instance_of_csecp256k1;
+}
+
 #ifdef ENABLE_WALLET
 class DescribeAddressVisitor : public boost::static_visitor<UniValue>
 {
@@ -522,6 +539,94 @@ static std::string RPCMallocInfo()
 }
 #endif
 
+//! Derive BIP32 tweak from master xpub to child pubkey.
+bool DerivePubTweak(const std::vector<uint32_t>& vPath, const CPubKey& keyMaster, const ChainCode &ccMaster, std::vector<unsigned char>& tweakSum)
+{
+    tweakSum.clear();
+    tweakSum.resize(32);
+    std::vector<unsigned char> tweak;
+    CPubKey keyParent = keyMaster;
+    CPubKey keyChild;
+    ChainCode ccChild;
+    ChainCode ccParent = ccMaster;
+    for (unsigned int i = 0; i < vPath.size(); i++) {
+        if ((vPath[i] >> 31) != 0) {
+            return false;
+        }
+        keyParent.Derive(keyChild, ccChild, vPath[i], ccParent, &tweak);
+        assert(tweak.size() == 32);
+        ccParent = ccChild;
+        keyParent = keyChild;
+        bool ret = secp256k1_ec_privkey_tweak_add(ctx, tweakSum.data(), tweak.data());
+        if (!ret) {
+            return false;
+        }
+    }
+    return true;
+}
+
+UniValue computemasterxprv(const JSONRPCRequest& request)
+{
+    int index = request.params[1].get_int();
+    std::vector<uint32_t> path = {(uint32_t)index};
+    CBitcoinSecret vchSecret;
+    bool fGood = vchSecret.SetString(request.params[2].get_str());
+    if (!fGood) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "privkey is invalid");
+    }
+
+    CKey key = vchSecret.GetKey();
+    if (!key.IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Private key outside allowed range");
+
+    std::vector<unsigned char> privkey_bytes(key.begin(), key.end());
+
+    CBitcoinExtPubKey xbpub;
+    xbpub = CBitcoinExtPubKey(request.params[0].get_str());
+    CExtPubKey xpub = xbpub.GetKey();
+
+    if (!xpub.pubkey.IsFullyValid()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "bitcoin_xpub is invalid for this network.");
+    }
+
+    // Parse master pubkey
+    CPubKey masterpub = xpub.pubkey;
+    secp256k1_pubkey masterpub_secp;
+    int ret = secp256k1_ec_pubkey_parse(ctx, &masterpub_secp, masterpub.begin(), masterpub.size());
+    if (ret != 1) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "bitcoin_xpub could not be parsed.");
+    }
+
+    // Derive tweak
+    std::vector<unsigned char> tweakSum;
+    DerivePubTweak(path, xpub.pubkey, xpub.chaincode, tweakSum);
+
+    // Negate
+    secp256k1_ec_privkey_negate(ctx, tweakSum.data());
+
+    // Add to child privkey
+    secp256k1_ec_privkey_tweak_add(ctx, privkey_bytes.data(), tweakSum.data());
+
+    CKey new_key;
+    new_key.Set(privkey_bytes.data(), privkey_bytes.data()+32, true);
+
+    // Create master xprv
+    CExtKey master_priv;
+	master_priv.vchFingerprint[0] = 0; 
+	master_priv.vchFingerprint[1] = 0; 
+	master_priv.vchFingerprint[2] = 0; 
+	master_priv.vchFingerprint[3] = 0; 
+    master_priv.chaincode = xpub.chaincode;
+    master_priv.key = new_key;
+	master_priv.nDepth = 0;
+	master_priv.nChild = 0;
+
+    CBitcoinExtKey b58extkey;
+    b58extkey.SetKey(master_priv);
+
+    return b58extkey.ToString();
+
+}
+
 UniValue getmemoryinfo(const JSONRPCRequest& request)
 {
     /* Please, avoid using the word "pool" here in the RPC interface or help,
@@ -689,6 +794,7 @@ static const CRPCCommand commands[] =
     { "util",               "createmultisig",         &createmultisig,         {"nrequired","keys"} },
     { "util",               "verifymessage",          &verifymessage,          {"address","signature","message"} },
     { "util",               "signmessagewithprivkey", &signmessagewithprivkey, {"privkey","message"} },
+    { "util",               "computemasterxprv",      &computemasterxprv,      {"xpub", "index", "priv"}},
 
     /* Not shown in help */
     { "hidden",             "setmocktime",            &setmocktime,            {"timestamp"}},

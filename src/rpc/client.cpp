@@ -143,6 +143,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "echojson", 9, "arg9" },
     { "rescanblockchain", 0, "start_height"},
     { "rescanblockchain", 1, "stop_height"},
+    { "computemasterxprv", 1, "index"},
 };
 
 class CRPCConvertTable

@@ -3329,12 +3329,11 @@ UniValue bumpfee(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_WALLET_ERROR, "Can't sign transaction.");
     }
     // commit the bumped transaction
-    uint256 txid;
-    if (feebumper::CommitTransaction(pwallet, hash, std::move(mtx), errors, txid) != feebumper::Result::OK) {
+    if (feebumper::CommitTransaction(pwallet, hash, std::move(mtx), errors) != feebumper::Result::OK) {
         throw JSONRPCError(RPC_WALLET_ERROR, errors[0]);
     }
     UniValue result(UniValue::VOBJ);
-    result.push_back(Pair("txid", txid.GetHex()));
+    result.push_back(Pair("txid", mtx.GetHash().GetHex()));
     result.push_back(Pair("origfee", ValueFromAmount(old_fee)));
     result.push_back(Pair("fee", ValueFromAmount(new_fee)));
     UniValue result_errors(UniValue::VARR);

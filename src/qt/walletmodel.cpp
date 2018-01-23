@@ -714,8 +714,7 @@ bool WalletModel::bumpFee(uint256 hash)
         return false;
     }
     // commit the bumped transaction
-    uint256 txid;
-    if (feebumper::CommitTransaction(wallet, hash, std::move(mtx), errors, txid) != feebumper::Result::OK) {
+    if (feebumper::CommitTransaction(wallet, hash, std::move(mtx), errors) != feebumper::Result::OK) {
         QMessageBox::critical(0, tr("Fee bump error"), tr("Could not commit transaction") + "<br />(" +
             QString::fromStdString(errors[0])+")");
          return false;

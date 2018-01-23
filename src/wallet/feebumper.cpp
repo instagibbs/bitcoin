@@ -239,7 +239,7 @@ bool SignTransaction(CWallet* wallet, CMutableTransaction& mtx) {
     return wallet->SignTransaction(mtx);
 }
 
-Result CommitTransaction(CWallet* wallet, const uint256& txid, CMutableTransaction&& mtx, std::vector<std::string>& errors, uint256& bumped_txid)
+Result CommitTransaction(CWallet* wallet, const uint256& txid, CMutableTransaction&& mtx, std::vector<std::string>& errors)
 {
     LOCK2(cs_main, wallet->cs_wallet);
     if (!errors.empty()) {
@@ -274,7 +274,6 @@ Result CommitTransaction(CWallet* wallet, const uint256& txid, CMutableTransacti
         return Result::WALLET_ERROR;
     }
 
-    bumped_txid = wtxBumped.GetHash();
     if (state.IsInvalid()) {
         // This can happen if the mempool rejected the transaction.  Report
         // what happened in the "errors" response.

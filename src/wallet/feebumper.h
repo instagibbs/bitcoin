@@ -50,8 +50,7 @@ bool SignTransaction(CWallet* wallet, CMutableTransaction& mtx);
 Result CommitTransaction(CWallet* wallet,
                          const uint256& txid,
                          CMutableTransaction&& mtx,
-                         std::vector<std::string>& errors,
-                         uint256& bumped_txid);
+                         std::vector<std::string>& errors);
 
 } // namespace feebumper
 

@@ -669,8 +669,15 @@ bool WalletModel::bumpFee(uint256 hash)
     std::vector<std::string> errors;
     CAmount old_fee;
     CAmount new_fee;
+
+    // Shouldn't happen as button will not be selectable
+    auto it = wallet->mapWallet.find(hash);
+    if (it == wallet->mapWallet.end()) {
+        assert(false);
+    }
+
     CMutableTransaction mtx;
-    if (feebumper::CreateTransaction(wallet, hash, coin_control, 0 /* totalFee */, errors, old_fee, new_fee, mtx) != feebumper::Result::OK) {
+    if (feebumper::CreateTransaction(wallet, it->second, coin_control, 0 /* totalFee */, errors, old_fee, new_fee, mtx) != feebumper::Result::OK) {
         QMessageBox::critical(0, tr("Fee bump error"), tr("Increasing transaction fee failed") + "<br />(" +
             (errors.size() ? QString::fromStdString(errors[0]) : "") +")");
          return false;
@@ -714,7 +721,7 @@ bool WalletModel::bumpFee(uint256 hash)
         return false;
     }
     // commit the bumped transaction
-    if (feebumper::CommitTransaction(wallet, hash, std::move(mtx), errors) != feebumper::Result::OK) {
+    if (feebumper::CommitTransaction(wallet, it->second, std::move(mtx), errors) != feebumper::Result::OK) {
         QMessageBox::critical(0, tr("Fee bump error"), tr("Could not commit transaction") + "<br />(" +
             QString::fromStdString(errors[0])+")");
          return false;

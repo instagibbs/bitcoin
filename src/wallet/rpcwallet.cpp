@@ -3252,8 +3252,8 @@ UniValue bumpfee(const JSONRPCRequest& request)
     }
 
     RPCTypeCheck(request.params, {UniValue::VSTR, UniValue::VOBJ});
-    uint256 hash;
-    hash.SetHex(request.params[0].get_str());
+    uint256 old_txid;
+    old_txid.SetHex(request.params[0].get_str());
 
     // optional parameters
     CAmount totalFee = 0;
@@ -3298,12 +3298,17 @@ UniValue bumpfee(const JSONRPCRequest& request)
     LOCK2(cs_main, pwallet->cs_wallet);
     EnsureWalletIsUnlocked(pwallet);
 
+    // Don't try to bump something you don't have
+    auto it = pwallet->mapWallet.find(old_txid);
+    if (it == pwallet->mapWallet.end()) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid or non-wallet transaction id");
+    }
 
     std::vector<std::string> errors;
     CAmount old_fee;
     CAmount new_fee;
     CMutableTransaction mtx;
-    feebumper::Result res = feebumper::CreateTransaction(pwallet, hash, coin_control, totalFee, errors, old_fee, new_fee, mtx);
+    feebumper::Result res = feebumper::CreateTransaction(pwallet, it->second, coin_control, totalFee, errors, old_fee, new_fee, mtx);
     if (res != feebumper::Result::OK) {
         switch(res) {
             case feebumper::Result::INVALID_ADDRESS_OR_KEY:
@@ -3329,7 +3334,7 @@ UniValue bumpfee(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_WALLET_ERROR, "Can't sign transaction.");
     }
     // commit the bumped transaction
-    if (feebumper::CommitTransaction(pwallet, hash, std::move(mtx), errors) != feebumper::Result::OK) {
+    if (feebumper::CommitTransaction(pwallet, it->second, std::move(mtx), errors) != feebumper::Result::OK) {
         throw JSONRPCError(RPC_WALLET_ERROR, errors[0]);
     }
     UniValue result(UniValue::VOBJ);

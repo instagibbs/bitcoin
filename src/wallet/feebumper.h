@@ -30,7 +30,7 @@ bool TransactionCanBeBumped(CWallet* wallet, const uint256& txid);
 
 //! Create bumpfee transaction.
 Result CreateTransaction(const CWallet* wallet,
-                         const uint256& txid,
+                         const CWalletTx& old_wtx,
                          const CCoinControl& coin_control,
                          CAmount total_fee,
                          std::vector<std::string>& errors,
@@ -48,7 +48,7 @@ bool SignTransaction(CWallet* wallet, CMutableTransaction& mtx);
 //! but sets errors if the tx could not be added to the mempool (will try later)
 //! or if the old transaction could not be marked as replaced.
 Result CommitTransaction(CWallet* wallet,
-                         const uint256& txid,
+                         const CWalletTx& old_wtx,
                          CMutableTransaction&& mtx,
                          std::vector<std::string>& errors);
 

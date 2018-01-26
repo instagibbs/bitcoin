@@ -1621,11 +1621,10 @@ UniValue CallHardwareWallet(const UniValue valRequest)
     std::string strRequest = valRequest.write() + "\n";
 
     std::future<std::string> strReply;
-    std::string scripttocall = GetDataDir(false).string()+"/"+strCommand;
 
     boost::asio::io_service ios;
     boost::process::async_pipe pipe(ios);
-    boost::process::child child(scripttocall, boost::process::std_out > strReply, boost::process::std_in < pipe, ios);
+    boost::process::child child(strCommand, boost::process::std_out > strReply, boost::process::std_in < pipe, ios);
 
     boost::asio::async_write(pipe, boost::process::buffer(strRequest), [&pipe](const boost::system::error_code ec, size_t bytes_transferred) {
         pipe.close();

@@ -90,7 +90,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
         input_type = None
         input_amount = -1
         for prevtx in prevtxs:
-            if prevtx is not None:
+            if prevtx is None:
                 # TODO support segwit signing with minimal required data
                 raise Exception("All prevtxs must be provided by the caller regardless of signing mode")
             if vin["txid"] == prevtx["txid"]:

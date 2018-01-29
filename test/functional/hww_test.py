@@ -49,7 +49,7 @@ class ExternalHDTest(BitcoinTestFramework):
 
         self.stop_nodes()
 
-        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet=bitcoin-hww-ledger.py', '-walletrbf=1'], []])
+        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet='+hww_driver_path+'/bitcoin-hww-ledger.py', '-walletrbf=1'], []])
         connect_nodes_bi(self.nodes,0,1)
 
         print("Begin hardwarewallet tests...")

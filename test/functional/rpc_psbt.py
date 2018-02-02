@@ -18,7 +18,7 @@ class PSBTTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 3
-        self.extra_args = [["-addresstype=legacy"], ["-addresstype=legacy", "-deprecatedrpc=addwitnessaddress"], ["-addresstype=legacy"]]
+        self.extra_args = [["-addresstype=legacy"], ["-addresstype=legacy"], ["-addresstype=legacy"]]
 
     def run_test(self):
 
@@ -42,8 +42,8 @@ class PSBTTest(BitcoinTestFramework):
         pubkey0 = self.nodes[0].validateaddress(self.nodes[0].getnewaddress())['pubkey']
         pubkey1 = self.nodes[1].validateaddress(self.nodes[1].getnewaddress())['pubkey']
         pubkey2 = self.nodes[2].validateaddress(self.nodes[2].getnewaddress())['pubkey']
-        p2sh = self.nodes[1].addmultisigaddress(2, [pubkey0, pubkey1, pubkey2])['address']
-        p2wsh = self.nodes[1].addwitnessaddress(p2sh)
+        p2sh = self.nodes[1].addmultisigaddress(2, [pubkey0, pubkey1, pubkey2], "", "legacy")['address']
+        p2wsh = self.nodes[1].addmultisigaddress(2, [pubkey0, pubkey1, pubkey2], "", "p2sh-segwit")['address']
         p2wpkh = self.nodes[1].getnewaddress()
 
         # fund those addresses

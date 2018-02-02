@@ -1027,9 +1027,9 @@ void write_hd_keypath(std::vector<uint32_t>& keypath, std::string& keypath_str)
     keypath_str = "m/";
     for (uint32_t num : keypath) {
         bool hardened = false;
-        if (num & BIP32_HARDENED_KEY_LIMIT) {
+        if (num & 0x80000000) {
             hardened = true;
-            num &= ~BIP32_HARDENED_KEY_LIMIT;
+            num &= ~0x80000000;
         }
 
         keypath_str += std::to_string(num);

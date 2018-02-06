@@ -453,6 +453,9 @@ public:
         MarkDirty();
     }
 
+
+    int GetSpendSize(const CWalletTx& wallet_tx,  unsigned int i) const;
+
     //! filter decides which addresses will count towards the debit
     CAmount GetDebit(const isminefilter& filter) const;
     CAmount GetCredit(const isminefilter& filter) const;
@@ -518,12 +521,14 @@ public:
     }
 };
 
+
 class COutput
 {
 public:
     const CWalletTx *tx;
     int i;
     int nDepth;
+    int nInputBytes;
 
     /** Whether we have the private keys to spend this output */
     bool fSpendable;
@@ -540,7 +545,12 @@ public:
 
     COutput(const CWalletTx *txIn, int iIn, int nDepthIn, bool fSpendableIn, bool fSolvableIn, bool fSafeIn)
     {
-        tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn;
+        tx = txIn; i = iIn; nDepth = nDepthIn; fSpendable = fSpendableIn; fSolvable = fSolvableIn; fSafe = fSafeIn, nInputBytes = -1;
+        // If known and signable by the given wallet, compute nInputBytes
+        // Failure will keep this value -1
+        if (fSpendable && tx) {
+            nInputBytes = tx->GetSpendSize(*tx, i);
+        }
     }
 
     std::string ToString() const;
@@ -1303,5 +1313,7 @@ public:
         }
     }
 };
+
+int64_t CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *wallet);
 
 #endif // BITCOIN_WALLET_WALLET_H

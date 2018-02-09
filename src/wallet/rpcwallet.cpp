@@ -2994,6 +2994,13 @@ UniValue listunspent(const JSONRPCRequest& request)
     LOCK2(cs_main, pwallet->cs_wallet);
 
     pwallet->AvailableCoins(vecOutputs, !include_unsafe, nullptr, nMinimumAmount, nMaximumAmount, nMinimumSumAmount, nMaximumCount, nMinDepth, nMaxDepth);
+    auto it = vecOutputs.begin();
+    while (it != vecOutputs.end()) {
+        if ((*it).tx->GetDepthInMainChain() == 0 && (!pwallet->IsAllFromMe(*((*it).tx)->tx, ISMINE_ALL) || ((*it).tx)->tx->vout.size() == 1)) {
+            it = vecOutputs.erase(it);
+        }
+        else ++it;
+    }
     for (const COutput& out : vecOutputs) {
         CTxDestination address;
         const CScript& scriptPubKey = out.tx->tx->vout[out.i].scriptPubKey;

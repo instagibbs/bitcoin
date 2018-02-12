@@ -428,11 +428,17 @@ static void SendMoney(CWallet * const pwallet, const CTxDestination &address, CA
     int nChangePosRet = -1;
     CRecipient recipient = {scriptPubKey, nValue, fSubtractFeeFromAmount};
     vecSend.push_back(recipient);
-    if (!pwallet->CreateTransaction(vecSend, wtxNew, reservekey, nFeeRequired, nChangePosRet, strError, coin_control)) {
+    // Consolidation uses legacy transaction creation
+    if (coin_control.legacy_creation && !pwallet->CreateTransactionLegacy(vecSend, wtxNew, reservekey, nFeeRequired, nChangePosRet, strError, coin_control)) {
+        if (!fSubtractFeeFromAmount && nValue + nFeeRequired > curBalance)
+            strError = strprintf("Error: This transaction requires a transaction fee of at least %s", FormatMoney(nFeeRequired));
+        throw JSONRPCError(RPC_WALLET_ERROR, strError);
+    } else if (!coin_control.legacy_creation && !pwallet->CreateTransaction(vecSend, wtxNew, reservekey, nFeeRequired, nChangePosRet, strError, coin_control)) {
         if (!fSubtractFeeFromAmount && nValue + nFeeRequired > curBalance)
             strError = strprintf("Error: This transaction requires a transaction fee of at least %s", FormatMoney(nFeeRequired));
         throw JSONRPCError(RPC_WALLET_ERROR, strError);
     }
+
     CValidationState state;
     if (!pwallet->CommitTransaction(wtxNew, reservekey, g_connman.get(), state)) {
         strError = strprintf("Error: The transaction was rejected! Reason given: %s", state.GetRejectReason());
@@ -528,6 +534,98 @@ UniValue sendtoaddress(const JSONRPCRequest& request)
     SendMoney(pwallet, dest, nAmount, fSubtractFeeFromAmount, wtx, coin_control);
 
     return wtx.GetHash().GetHex();
+}
+
+UniValue consolidate(const JSONRPCRequest& request)
+{
+    CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
+        return NullUniValue;
+    }
+
+    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2)
+        throw std::runtime_error(
+            "consolidate marginal_amount ( total_amount conf_target )\n"
+            "\nConsolidates confirmed utxos of marginal_amount or less in a single transaction.\n"
+            + HelpRequiringPassphrase(pwallet) +
+            "\nArguments:\n"
+            "1. \"maginal_amount\"            (numeric or string, required) The size of utxos to consolidate in " + CURRENCY_UNIT +".\n"
+            "2. \"total_amount\"              (numeric or string, optional) The total amount in " + CURRENCY_UNIT + " to consolidate. May go a little over. eg 0.1\n"
+            "3.  conf_target                  (numeric, optional) Confirmation target (in blocks)\n"
+            "\nResult:\n"
+            "{\n"
+            "    \"txid\"                  (string) The transaction id.\n"
+            "    \"number_utxos\"          (numeric) Number of utxos consolidated.\n"
+            "    \"total_amount\"          (numeric) Total value consolidated in " + CURRENCY_UNIT + "\n"
+            "}\n"
+            "\nExamples:\n"
+            + HelpExampleCli("consolidate", "0.01 1.1")
+            + HelpExampleRpc("consolidate", "0.01, 1.1")
+        );
+
+    ObserveSafeMode();
+
+    // Make sure the results are valid at least up to the most recent block
+    // the user could have gotten from another RPC command prior to now
+    pwallet->BlockUntilSyncedToCurrentChain();
+
+    LOCK2(cs_main, pwallet->cs_wallet);
+
+    CAmount marginal_amount = AmountFromValue(request.params[0]);
+    if (marginal_amount <= 0) {
+        throw JSONRPCError(RPC_TYPE_ERROR, "Invalid marginal amount for consolidation");
+    }
+
+    CAmount total_amount = MAX_MONEY;
+    if (!request.params[1].isNull()) {
+        total_amount = AmountFromValue(request.params[1]);
+        if (total_amount <= 0) {
+            throw JSONRPCError(RPC_TYPE_ERROR, "Invalid total amount for consolidation");
+        }
+    }
+
+    // Wallet comments
+    CWalletTx wtx;
+    wtx.mapValue["comment"] = "consolidation";
+
+    // Use cheapest feerate avilable(unless over-ridden), bip125 by default
+    CCoinControl coin_control;
+    coin_control.signalRbf = true;
+    coin_control.m_fee_mode = FeeEstimateMode::ECONOMICAL;
+    coin_control.m_confirm_target = 1008;
+    coin_control.fAllowOtherInputs = false;
+    coin_control.legacy_creation = true;
+    if (!request.params[2].isNull()) {
+        coin_control.m_confirm_target = ParseConfirmTarget(request.params[2]);
+    }
+
+    EnsureWalletIsUnlocked(pwallet);
+
+    // Send to changekey
+    OutputType output_type = g_change_type != OUTPUT_TYPE_NONE ? g_change_type : g_address_type;
+    CReserveKey reservekey(pwallet);
+    CPubKey vchPubKey;
+    if (!reservekey.GetReservedKey(vchPubKey, true))
+        throw JSONRPCError(RPC_WALLET_KEYPOOL_RAN_OUT, "Error: Keypool ran out, please call keypoolrefill first");
+
+    reservekey.KeepKey();
+
+    pwallet->LearnRelatedScripts(vchPubKey, output_type);
+    CTxDestination dest = GetDestinationForKey(vchPubKey, output_type);
+
+    // Filter available coins here
+    std::vector<COutput> vecOutputs;
+    pwallet->AvailableCoins(vecOutputs, false, nullptr, 0, marginal_amount, total_amount, 100, 1, 9999999);
+    CAmount value_to_send = 0;
+    for (auto& coin : vecOutputs) {
+        value_to_send += coin.tx->tx->vout[coin.i].nValue;
+        coin_control.Select(COutPoint(coin.tx->tx->GetHash(), coin.i));
+    }
+
+    SendMoney(pwallet, dest, value_to_send, true, wtx, coin_control);
+
+    return wtx.GetHash().GetHex();
+
 }
 
 UniValue listaddressgroupings(const JSONRPCRequest& request)
@@ -3543,6 +3641,7 @@ static const CRPCCommand commands[] =
     { "hidden",             "addwitnessaddress",        &addwitnessaddress,        {"address","p2sh"} },
     { "wallet",             "backupwallet",             &backupwallet,             {"destination"} },
     { "wallet",             "bumpfee",                  &bumpfee,                  {"txid", "options"} },
+    { "wallet",             "consolidate",              &consolidate,              {"marginal_amount", "total_amount", "conf_target"} },
     { "wallet",             "dumpprivkey",              &dumpprivkey,              {"address"}  },
     { "wallet",             "dumpwallet",               &dumpwallet,               {"filename"} },
     { "wallet",             "encryptwallet",            &encryptwallet,            {"passphrase"} },

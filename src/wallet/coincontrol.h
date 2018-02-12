@@ -34,6 +34,8 @@ public:
     bool signalRbf;
     //! Fee estimation mode to control arguments to estimateSmartFee
     FeeEstimateMode m_fee_mode;
+    //! Switch between legacy and coinsayer transaction creation
+    bool legacy_creation;
 
     CCoinControl()
     {
@@ -52,6 +54,7 @@ public:
         m_confirm_target.reset();
         signalRbf = fWalletRbf;
         m_fee_mode = FeeEstimateMode::UNSET;
+        legacy_creation = false;
     }
 
     bool HasSelected() const

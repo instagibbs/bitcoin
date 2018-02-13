@@ -2909,7 +2909,6 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
                 output.push_back(Pair("identifier", std::to_string(recipient_num)));
                 output.push_back(Pair("weight", output_prototype_size*4));
                 output.push_back(Pair("amount", recipient.nAmount));
-                output.push_back(Pair("isMandatory", true));
                 outputs.push_back(output);
 
                 txNew.vout.push_back(CTxOut(recipient.nAmount, recipient.scriptPubKey));

@@ -2848,7 +2848,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
             }
             coinsayer_request.push_back(Pair("inputs", inputs));
             coinsayer_request.push_back(Pair("consolidationFeeRate", discard_rate.GetFeePerK()/4000));
-            coinsayer_request.push_back(Pair("minFeeRate", fee_per_k/4000));
+            coinsayer_request.push_back(Pair("minFeeRate", fee_per_k/4000.0));
             coinsayer_request.push_back(Pair("fixedWeight", 48));
 
             // Create change script that will be used if we need change

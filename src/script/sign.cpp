@@ -493,7 +493,12 @@ bool FinalizePartialTransaction(PartiallySignedTransaction& psbt)
                 switch (whichType)
                 {
                 case TX_PUBKEY:
-                    script_ret.push_back(psbt.inputs[i].partial_sigs.find(CPubKey(vSolutions[0]))->second);
+                    {
+                        auto sig_it = psbt.inputs[i].partial_sigs.find(CPubKey(vSolutions[0]));
+                        if (sig_it != psbt.inputs[i].partial_sigs.end()) {
+                            script_ret.push_back(sig_it->second);
+                        }
+                    }
                     break;
                 case TX_WITNESS_V0_KEYHASH:
                     witness = true;

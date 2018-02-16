@@ -4006,7 +4006,6 @@ std::vector<std::string> CWallet::GetDestValues(const std::string& prefix) const
     return values;
 }
 
-    strUsage += HelpMessageOpt("-externalhd", _("Create a new external-HD wallet from a BIP32 HD public key"));
 CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
 {
     // needed to restore wallet transaction meta data after -zapwallettxes

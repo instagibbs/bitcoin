@@ -178,6 +178,8 @@ CPubKey CWallet::GenerateNewKey(CWalletDB &walletdb, bool internal)
     else {
         if (!AddWatchOnly(pubkey, metadata, nCreationTime))
             throw std::runtime_error(std::string(__func__) + ": AddWatchOnly failed");
+        LOCK(cs_KeyStore);
+        ImplicitlyLearnRelatedKeyScripts(pubkey);
     }
     return pubkey;
 }

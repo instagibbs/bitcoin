@@ -630,7 +630,7 @@ UniValue getxpub(const JSONRPCRequest& request)
     if (request.fHelp || request.params.size() != 0) {
         throw std::runtime_error(
             "getxpub\n"
-            "\nGives a watch-only xpub copy of the wallet's HD seed.\n"
+            "\nGives a watch-only xpub copy of the wallet's HD account 0.\n"
             "\nResult:\n"
             "\"xpub\"                (string) The watch-only xpub\n"
         );
@@ -652,8 +652,11 @@ UniValue getxpub(const JSONRPCRequest& request)
 
     CExtKey master_ext_privkey;
     master_ext_privkey.SetMaster(master_privkey.begin(), master_privkey.size());
+    CExtKey account_ext_privkey;
+    // Account 0
+    master_ext_privkey.Derive(account_ext_privkey, 0);
 
-    CExtPubKey ext_pubkey = master_ext_privkey.Neuter();
+    CExtPubKey ext_pubkey = account_ext_privkey.Neuter();
 
     CBitcoinExtPubKey xpub(ext_pubkey);
 

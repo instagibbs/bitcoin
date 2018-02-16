@@ -96,7 +96,7 @@ enum WalletFeature
 
     FEATURE_HD_SPLIT = 139900, // Wallet with HD chain split (change outputs will use m/0'/1'/k)
     // NOTE: If adding intermediate versions here, we need to exclude them from FEATURE_HD_PUBDERIV!
-    FEATURE_HD_PUBDERIV = 9999999,  // Non-standard public derivation; otherwise same as FEATURE_HD_SPLIT
+    FEATURE_HD_PUBDERIV = 1150100,  // Non-standard public derivation; otherwise same as FEATURE_HD_SPLIT
 
     FEATURE_NO_DEFAULT_KEY = 159900, // Wallet without a default key written
 

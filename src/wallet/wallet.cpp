@@ -214,9 +214,9 @@ void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKe
         // childIndex | BIP32_HARDENED_KEY_LIMIT = derive childIndex in hardened child-index-range
         // example: 1 | BIP32_HARDENED_KEY_LIMIT == 0x80000001 == 2147483649
         chainChildKey.Derive(childKey, nChildBase + chain_counter);
+        new_keypath += "/" + ChildKeyIndexToString(nChildBase + chain_counter);
         ++chain_counter;
     } while (HaveKey(childKey.key.GetPubKey().GetID()));
-    new_keypath += "/" + ChildKeyIndexToString(nChildBase + chain_counter);
     metadata.hdKeypath = new_keypath;
     secret = childKey.key;
     metadata.hdMasterKeyID = hdChain.masterKeyID;

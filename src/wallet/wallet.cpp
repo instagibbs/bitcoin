@@ -401,7 +401,7 @@ bool CWallet::AddWatchOnly(const CPubKey &pubkey, const CKeyMetadata& meta, int6
     auto script = GetScriptForDestination(pubkey.GetID());
     if (!HaveWatchOnly(script))
     {
-        mapKeyMetadata[CScriptID(script)] = meta;
+        m_script_metadata[CScriptID(script)] = meta;
         if (!AddWatchOnly(script, nCreateTime))
             return false;
     }
@@ -412,7 +412,7 @@ bool CWallet::AddWatchOnly(const CPubKey &pubkey, const CKeyMetadata& meta, int6
     script = GetScriptForRawPubKey(pubkey);
     if (!HaveWatchOnly(script))
     {
-        mapKeyMetadata[CScriptID(script)] = meta;
+        m_script_metadata[CScriptID(script)] = meta;
         if (!AddWatchOnly(script, nCreateTime))
             return false;
     }
@@ -2063,7 +2063,7 @@ bool CWalletTx::IsTrusted() const
             // If the wallet is external HD, check if it is a key we generated
             if (!pwallet->IsExternalHD() || isMine != ISMINE_WATCH_SOLVABLE)
                 return false;
-            const auto& meta = pwallet->mapKeyMetadata;
+            const auto& meta = pwallet->m_script_metadata;
             auto it = meta.find(CScriptID(parentOut.scriptPubKey));
             if (it == meta.end() ||
                 it->second.hdKeypath.empty())

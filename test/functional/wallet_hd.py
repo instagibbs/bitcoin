@@ -8,6 +8,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     connect_nodes_bi,
+    assert_raises_rpc_error,
 )
 import shutil
 import os
@@ -15,8 +16,8 @@ import os
 class WalletHDTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 2
-        self.extra_args = [[], ['-keypool=0']]
+        self.num_nodes = 3
+        self.extra_args = [['-usehd=0'], ['-usehd=1', '-keypool=0'], ['-usehdpubderiv=1']]
 
     def run_test (self):
         tmpdir = self.options.tmpdir
@@ -24,8 +25,33 @@ class WalletHDTest(BitcoinTestFramework):
         # Make sure can't switch off usehd after wallet creation
         self.stop_node(1)
         self.assert_start_raises_init_error(1, ['-usehd=0'], 'already existing HD wallet')
+        # Same with usehdpubderiv
+        self.assert_start_raises_init_error(1, ['-usehdpubderiv=1'], 'enable HD public derivation')
         self.start_node(1)
         connect_nodes_bi(self.nodes, 0, 1)
+        connect_nodes_bi(self.nodes, 0, 2)
+        connect_nodes_bi(self.nodes, 1, 2)
+
+        self.stop_node(2)
+        self.assert_start_raises_init_error(2, ['-usehd=0'], 'already existing HD wallet')
+        self.assert_start_raises_init_error(2, ['-usehdpubderiv=0'], 'You can\'t disable HD public derivation')
+        self.start_node(2)
+        connect_nodes_bi(self.nodes, 1, 2)
+        connect_nodes_bi(self.nodes, 0, 2)
+
+        # Check non-hardened keypath
+
+        # create an internal key
+        change_addr = self.nodes[2].getrawchangeaddress()
+        change_addrV= self.nodes[2].validateaddress(change_addr)
+        assert_equal(change_addrV["hdkeypath"], "m/0/1/0") #first internal child key
+        # create an external key
+        addr = self.nodes[2].getnewaddress()
+        addrV= self.nodes[2].validateaddress(addr)
+        assert_equal(addrV["hdkeypath"], "m/0/0/1") #first external child key after default key
+
+        # refuse to dumprivkey for non-hardened
+        assert_raises_rpc_error(-3, "Address does not refer to a key (derived)", self.nodes[2].dumpprivkey, addr)
 
         # Make sure we use hd, keep masterkeyid
         masterkeyid = self.nodes[1].getwalletinfo()['hdmasterkeyid']

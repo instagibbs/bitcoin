@@ -4045,8 +4045,12 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
     }
     if (gArgs.IsArgSet("-usehdpubderiv")) {
-        if (walletInstance->hdChain.nVersion != CHDChain::VERSION_HD_PUBDERIV) {
+        bool use_pub = gArgs.GetBoolArg("-usehdpubderiv", DEFAULT_USE_HD_PUB_WALLET);
+        if (use_pub && walletInstance->hdChain.nVersion != CHDChain::VERSION_HD_PUBDERIV) {
             InitError(strprintf(_("Error loading %s: You can't enable HD public derivation on an already existing wallet without it"), walletFile));
+            return nullptr;
+        } else if (!use_pub && walletInstance->hdChain.nVersion == CHDChain::VERSION_HD_PUBDERIV) {
+            InitError(strprintf(_("Error loading %s: You can't disable HD public derivation on an already existing wallet with it"), walletFile));
             return nullptr;
         }
     }

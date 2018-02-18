@@ -3662,7 +3662,7 @@ void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const 
         }
         // Get public keys if hd is enabled
         if (pwallet->IsHDEnabled()) {
-            if (type == TX_PUBKEYHASH) {
+            if (type == TX_PUBKEYHASH || type == TX_WITNESS_V0_KEYHASH) {
                 uint160 hash(solns[0]);
                 CKeyID keyID(hash);
                 add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);

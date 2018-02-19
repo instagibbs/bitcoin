@@ -3679,6 +3679,8 @@ void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const 
             }
         }
 
+        // TODO push hdkeypath for change
+
         // Put the witness utxo for witness outputs
         if (witness || type == TX_WITNESS_V0_KEYHASH || type == TX_WITNESS_V0_SCRIPTHASH || type == TX_WITNESS_UNKNOWN) {
             // Put the witness CTxOut in the input

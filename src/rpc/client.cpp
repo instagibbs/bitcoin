@@ -110,6 +110,8 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "fundrawtransaction", 1, "options" },
     { "fundrawtransaction", 2, "iswitness" },
     { "walletupdatepsbt", 2, "psbtformat"},
+    { "walletupdatepsbt", 3, "include_output_info"},
+    { "walletcreatepsbt", 1, "include_output_info"},
     { "combinepsbt", 0, "txs"},
     { "combinepsbt", 1, "psbtformat"},
     { "gettxout", 1, "n" },

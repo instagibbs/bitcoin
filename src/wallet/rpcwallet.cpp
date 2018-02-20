@@ -4144,7 +4144,7 @@ void add_keypath_to_map(const CWallet* pwallet, const CKeyID& keyID, std::map<CP
     }
 }
 
-void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const CTransaction* txConst)
+void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const CTransaction* txConst, bool include_output_info)
 {
     // Get all of the previous transactions
     bool psbtx_blank = psbtx.IsNull();
@@ -4245,6 +4245,72 @@ void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const 
             psbtx.inputs.push_back(input);
         }
     }
+
+    // Fill in the bip32 keypaths and redeemscripts for the outputs so that hardware wallets can identify change
+    if (include_output_info) {
+        for (const CTxOut& out : txConst->vout) {
+            // Get scriptpubkey and check for redeemScript or witnessscript
+            txnouttype type;
+            std::vector<std::vector<unsigned char>> solns;
+            Solver(out.scriptPubKey, type, solns);
+            // Get script hashes
+            if (type == TX_SCRIPTHASH) {
+                // get the hash and find it in the wallet.
+                CScript redeem_script;
+                uint160 hash(solns[0]);
+                if (!pwallet->GetCScript(CScriptID(hash), redeem_script)) {
+                    // We don't have this script, skip it
+                    continue;
+                }
+
+                // put redeem_script in map
+                psbtx.redeem_scripts.emplace(hash, redeem_script);
+
+                // Now check whether the redeem_script is a witness script
+                solns.clear();
+                Solver(redeem_script, type, solns);
+            }
+            // Get witness scripts
+            if (type == TX_WITNESS_V0_SCRIPTHASH) {
+                // Get the hash from the solver return
+                uint160 hash;
+                CRIPEMD160().Write(&solns[0][0], solns[0].size()).Finalize(hash.begin());
+
+                // Lookup hash from wallet
+                CScript witness_script;
+                if (!pwallet->GetCScript(CScriptID(hash), witness_script)) {
+                    // We don't have this script, skip it
+                    continue;
+                }
+
+                // Put witness script in map
+                uint256 hash256(solns[0]);
+                psbtx.witness_scripts.emplace(hash256, witness_script);
+
+                // Decode the witness script
+                solns.clear();
+                Solver(witness_script, type, solns);
+            }
+            // Get public keys if hd is enabled
+            if (pwallet->IsHDEnabled()) {
+                if (type == TX_PUBKEYHASH || type == TX_WITNESS_V0_KEYHASH) {
+                    uint160 hash(solns[0]);
+                    CKeyID keyID(hash);
+                    add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                } else if (type == TX_PUBKEY) {
+                    CPubKey vchPubKey(solns[0]);
+                    CKeyID keyID = vchPubKey.GetID();
+                    add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                } else if (type == TX_MULTISIG) {
+                    for (auto& soln : solns) {
+                        CPubKey vchPubKey(soln);
+                        CKeyID keyID = vchPubKey.GetID();
+                        add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                    }
+                }
+            }
+        }
+    }
 }
 
 UniValue walletupdatepsbt(const JSONRPCRequest& request)
@@ -4254,9 +4320,9 @@ UniValue walletupdatepsbt(const JSONRPCRequest& request)
         return NullUniValue;
     }
 
-    if (request.fHelp || request.params.size() < 1 || request.params.size() > 3)
+    if (request.fHelp || request.params.size() < 1 || request.params.size() > 4)
         throw std::runtime_error(
-            "walletupdatepsbt \"hexstring\" ( sighashtype psbtformat)\n"
+            "walletupdatepsbt \"hexstring\" ( sighashtype psbtformat include_output_info)\n"
             "\nUpdate a psbt with input information from our wallet and then sign inputs\n"
             "that we an sign for.\n"
             + HelpRequiringPassphrase(pwallet) + "\n"
@@ -4272,6 +4338,8 @@ UniValue walletupdatepsbt(const JSONRPCRequest& request)
             "       \"SINGLE|ANYONECANPAY\"\n"
             "3. \"psbtformat\"              (boolean, optional, default=false) If true, return the complete transaction \n"
             "                             in the PSBT format. Otherwise complete transactions will be in normal network serialization.\n"
+            "4. \"include_output_info\"     (boolean, optional, default=false) If true, returns the PSBT with the redeem scripts, witness\n"
+            "                             scripts, and bip32 keypaths of the outputs if they are available. This is useful for hardware wllets\n"
 
             "\nResult:\n"
             "{\n"
@@ -4332,7 +4400,8 @@ UniValue walletupdatepsbt(const JSONRPCRequest& request)
     const CTransaction txConst(mtx);
 
     // Fill transaction with out data
-    fill_psbt(pwallet, psbtx, &txConst);
+    bool include_output_info = !request.params[3].isNull() && request.params[3].get_bool();
+    fill_psbt(pwallet, psbtx, &txConst, include_output_info);
 
     // Sign what we can:
     SignPartiallySignedTransaction(psbtx, pwallet, nHashType);
@@ -4363,14 +4432,16 @@ UniValue walletcreatepsbt(const JSONRPCRequest& request)
         return NullUniValue;
     }
 
-    if (request.fHelp || request.params.size() != 1)
+    if (request.fHelp || request.params.size() > 2 || request.params.size() < 1)
         throw std::runtime_error(
-                            "walletcreatepsbt \"hexstring\"\n"
+                            "walletcreatepsbt \"hexstring\" (include_output_info)\n"
                             "\nCreates a transaction in the Partially Signed Transaction format from a\n"
                             "raw transaction that was funded with inputs from our wallet, typically from\n"
                             "using fundrawtransaction.\n"
                             "\nArguments:\n"
                             "1. \"hexstring\"            (string, required) The hex string of the raw transaction\n"
+                            "2. \"include_output_info\"  (boolean, optional, default=false) If true, returns the PSBT with the redeem scripts, witness\n"
+                            "                          scripts, and bip32 keypaths of the outputs if they are available. This is useful for hardware wllets\n"
                             "\nResult:\n"
                             "{\n"
                             "  \"hex\": \"value\",         (string)  The resulting raw transaction (hex-encoded string)\n"
@@ -4398,7 +4469,8 @@ UniValue walletcreatepsbt(const JSONRPCRequest& request)
 
     // Fill the psbtx
     const CTransaction txConst(mtx);
-    fill_psbt(pwallet, psbtx, &txConst);
+    bool include_output_info = !request.params[1].isNull() && request.params[1].get_bool();
+    fill_psbt(pwallet, psbtx, &txConst, include_output_info);
     psbtx.tx = mtx;
 
     // Serialize the PSBT
@@ -4423,8 +4495,8 @@ static const CRPCCommand commands[] =
 { //  category              name                                actor (function)                argNames
     //  --------------------- ------------------------          -----------------------         ----------
     { "rawtransactions",    "fundrawtransaction",               &fundrawtransaction,            {"hexstring","options","iswitness"} },
-    { "wallet",             "walletupdatepsbt",                 &walletupdatepsbt,              {"hexstring","sighashtype","psbtformat"} },
-    { "wallet",             "walletcreatepsbt",                 &walletcreatepsbt,              {"hexstring"} },
+    { "wallet",             "walletupdatepsbt",                 &walletupdatepsbt,              {"hexstring","sighashtype","psbtformat","include_output_info"} },
+    { "wallet",             "walletcreatepsbt",                 &walletcreatepsbt,              {"hexstring","include_output_info"} },
     { "hidden",             "resendwallettransactions",         &resendwallettransactions,      {} },
     { "wallet",             "abandontransaction",               &abandontransaction,            {"txid"} },
     { "wallet",             "abortrescan",                      &abortrescan,                   {} },

@@ -3576,20 +3576,40 @@ void add_keypath_to_map(const CWallet* pwallet, const CKeyID& keyID, std::map<CP
     auto it = pwallet->mapKeyMetadata.find(keyID);
     if (it != pwallet->mapKeyMetadata.end()) {
         meta = it->second;
+    } else {
+        CScript scriptPubKey = GetScriptForDestination(keyID);
+		const auto it = pwallet->m_script_metadata.find(CScriptID(scriptPubKey));
+        if (it != pwallet->m_script_metadata.end()) {
+            meta = it->second;
+        }
     }
     if (!meta.hdKeypath.empty()) {
         std::vector<uint32_t> keypath;
         if (!parse_hd_keypath(meta.hdKeypath, keypath)) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Internal keypath is broken");
         }
-        // Get the proper master key id
-        CKey key;
-        pwallet->GetKey(meta.hdMasterKeyID, key);
-        CExtKey masterKey;
-        masterKey.SetMaster(key.begin(), key.size());
-        // Add to map
-        keypath.insert(keypath.begin(), masterKey.key.GetPubKey().GetID().GetUint32(0));
-        hd_keypaths.emplace(vchPubKey, keypath);
+        if (pwallet->IsExternalHD()) {
+            // Prepend bip44 pre-account level pathing
+            // TODO have externalhd require xpub path
+            uint32_t ff_path = 44;
+            ff_path |= BIP32_HARDENED_KEY_LIMIT;
+            keypath.insert(keypath.begin(),BIP32_HARDENED_KEY_LIMIT);
+            keypath.insert(keypath.begin(),BIP32_HARDENED_KEY_LIMIT);
+            keypath.insert(keypath.begin(),ff_path);
+            // Add to map
+            keypath.insert(keypath.begin(), pwallet->GetHDChain().externalHD.pubkey.GetID().GetUint32(0));
+            hd_keypaths.emplace(vchPubKey, keypath);
+
+        } else {
+            // Get the proper master key id
+            CKey key;
+            pwallet->GetKey(meta.hdMasterKeyID, key);
+            CExtKey masterKey;
+            masterKey.SetMaster(key.begin(), key.size());
+            // Add to map
+            keypath.insert(keypath.begin(), masterKey.key.GetPubKey().GetID().GetUint32(0));
+            hd_keypaths.emplace(vchPubKey, keypath);
+        }
     }
 }
 

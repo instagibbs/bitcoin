@@ -3934,7 +3934,6 @@ std::vector<std::string> CWallet::GetDestValues(const std::string& prefix) const
     return values;
 }
 
-    strUsage += HelpMessageOpt("-usehdpubderiv", _("Use hierarchical deterministic key generation (HD) after BIP32 with public derivation. Only has effect during wallet creation/first start") + " " + strprintf(_("(default: %u)"), DEFAULT_USE_HD_PUB_WALLET));
 CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
 {
     // needed to restore wallet transaction meta data after -zapwallettxes

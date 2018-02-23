@@ -178,6 +178,23 @@ CPubKey CWallet::GenerateNewKey(CWalletDB &walletdb, bool internal)
     return pubkey;
 }
 
+std::string ChildKeyIndexToString(const unsigned int child_index)
+{
+    if (0 == (child_index & BIP32_HARDENED_KEY_LIMIT)) {
+        // Unhardened key
+        return std::to_string(child_index);
+    } else {
+        unsigned int base_child_index = child_index & ~BIP32_HARDENED_KEY_LIMIT;
+        return std::to_string(base_child_index) + "'";
+    }
+}
+
+void DeriveAndBuildKeypath(const CExtKey& parent, CExtKey& out, const unsigned int child_index, std::string& inout_keypath)
+{
+    parent.Derive(out, child_index);
+    inout_keypath += "/" + ChildKeyIndexToString(child_index);
+}
+
 void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKey& secret, bool internal)
 {
     // for now we use a fixed keypath scheme of m/0'/0'/k
@@ -3752,10 +3769,10 @@ void CWallet::ListLockedCoins(std::vector<COutPoint>& vOutpts) const
 
 /** @} */ // end of Actions
 
-bool CWallet::IsKeyDerived(const CTxDestination& txdest) const {
+bool CWallet::IsKeyDerived(const CKeyID& keyid) const {
     AssertLockHeld(cs_wallet); // mapKeyMetadata
 
-    const auto it = mapKeyMetadata.find(txdest);
+    const auto it = mapKeyMetadata.find(keyid);
     if (it == mapKeyMetadata.end()) {
         return false;
     }

@@ -17,7 +17,7 @@ class WalletHDTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 3
-        self.extra_args = [['-usehd=0'], ['-usehd=1', '-keypool=0'], ['-usehdpubderiv=1']]
+        self.extra_args = [[], ['-keypool=0'], ['-usehdpubderiv=1']]
 
     def run_test (self):
         tmpdir = self.options.tmpdir
@@ -48,7 +48,7 @@ class WalletHDTest(BitcoinTestFramework):
         # create an external key
         addr = self.nodes[2].getnewaddress()
         addrV= self.nodes[2].validateaddress(addr)
-        assert_equal(addrV["hdkeypath"], "m/0/0/1") #first external child key after default key
+        assert_equal(addrV["hdkeypath"], "m/0/0/0") #first external child key
 
         # refuse to dumprivkey for non-hardened
         assert_raises_rpc_error(-3, "Address does not refer to a key (derived)", self.nodes[2].dumpprivkey, addr)

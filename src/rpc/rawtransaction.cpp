@@ -569,7 +569,7 @@ UniValue decodescript(const JSONRPCRequest& request)
 }
 
 /** Pushes a JSON object for script verification or signing errors to vErrorsRet. */
-static void TxInErrorToJSON(const CTxIn& txin, UniValue& vErrorsRet, const std::string& strMessage)
+void TxInErrorToJSON(const CTxIn& txin, UniValue& vErrorsRet, const std::string& strMessage)
 {
     UniValue entry(UniValue::VOBJ);
     entry.push_back(Pair("txid", txin.prevout.hash.ToString()));
@@ -883,6 +883,18 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
     // Script verification errors
     UniValue vErrors(UniValue::VARR);
 
+#ifdef ENABLE_WALLET
+    // Sign as much as possible with hww
+    if (pwallet && pwallet->IsHardwareWallet()) {
+        std::string strFailReason;
+        CMutableTransaction txRet;
+        // Success means decodes message
+        if (pwallet->SignHWWTransaction(mtx, strFailReason, txRet)) {
+            mtx = txRet;
+        }
+    }
+#endif
+
     // Use CTransaction for the constant parts of the
     // transaction to avoid rehashing.
     const CTransaction txConst(mtx);
@@ -891,7 +903,6 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
         CTxIn& txin = mtx.vin[i];
         const Coin& coin = view.AccessCoin(txin.prevout);
         if (coin.IsSpent()) {
-            TxInErrorToJSON(txin, vErrors, "Input not found or already spent");
             continue;
         }
         const CScript& prevPubKey = coin.out.scriptPubKey;
@@ -904,6 +915,18 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
         sigdata = CombineSignatures(prevPubKey, TransactionSignatureChecker(&txConst, i, amount), sigdata, DataFromTransaction(mtx, i));
 
         UpdateTransaction(mtx, i, sigdata);
+    }
+
+    // Validate the output of signing and give back appropriate errors
+    for (unsigned int i = 0; i < mtx.vin.size(); i++) {
+        CTxIn& txin = mtx.vin[i];
+        const Coin& coin = view.AccessCoin(txin.prevout);
+        if (coin.IsSpent()) {
+            TxInErrorToJSON(txin, vErrors, "Input not found or already spent");
+            continue;
+        }
+        const CScript& prevPubKey = coin.out.scriptPubKey;
+        const CAmount& amount = coin.out.nValue;
 
         ScriptError serror = SCRIPT_ERR_OK;
         if (!VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txConst, i, amount), &serror)) {
@@ -915,6 +938,7 @@ UniValue signrawtransaction(const JSONRPCRequest& request)
             }
         }
     }
+
     bool fComplete = vErrors.empty();
 
     UniValue result(UniValue::VOBJ);

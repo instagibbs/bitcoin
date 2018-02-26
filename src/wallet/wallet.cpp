@@ -672,7 +672,7 @@ void CWallet::AddToSpends(const uint256& wtxid)
 
 bool CWallet::EncryptWallet(const SecureString& strWalletPassphrase)
 {
-    if (IsCrypted())
+    if (IsCrypted() || IsExternalHD())
         return false;
 
     CKeyingMaterial _vMasterKey;

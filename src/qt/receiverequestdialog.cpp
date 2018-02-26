@@ -10,6 +10,7 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 
+#include <util.h>
 #include <QClipboard>
 #include <QDrag>
 #include <QMenu>
@@ -19,6 +20,10 @@
 #if QT_VERSION < 0x050000
 #include <QUrl>
 #endif
+
+#include <univalue.h>
+#include "rpc/protocol.h"
+#include "../wallet/wallet.h"
 
 #if defined(HAVE_CONFIG_H)
 #include <config/bitcoin-config.h> /* for USE_QRCODE */
@@ -209,4 +214,88 @@ void ReceiveRequestDialog::on_btnCopyURI_clicked()
 void ReceiveRequestDialog::on_btnCopyAddress_clicked()
 {
     GUIUtil::setClipboard(info.address);
+}
+
+void ReceiveRequestDialog::on_btnShowAddr_clicked()
+{
+    CTxDestination dest = DecodeDestination(info.address.toStdString());
+
+    UniValue params(UniValue::VARR);
+    params.push_back(info.keypath.toStdString());
+    params.push_back("x");
+    params.push_back(boost::get<CScriptID>(&dest) ? true : false);
+    params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+    std::string signature;
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& signature_uni = find_value(result, "signature");
+
+        // Workaround to get the message back
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+                return;
+            }
+            // Do Nothing
+            signature = line;
+        } else if (signature_uni.getValStr().empty()) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        } else {
+            // This isn't working for now FIXME
+            signature = signature_uni.getValStr();
+        }
+    } else {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
+
+    bool fInvalid = false;
+    std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
+
+    if (fInvalid) {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
+
+    std::string strMessageMagic = "Bitcoin Signed Message:\n";
+    std::string x_string = "x";
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << strMessageMagic;
+    ss << x_string;
+
+    CPubKey pubkey;
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig)) {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
+
+    if (boost::get<CKeyID>(&dest)) {
+        if (pubkey.GetID() != *boost::get<CKeyID>(&dest)) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        }
+    } else if (boost::get<CScriptID>(&dest)) {
+        // Try to match hash160 of pubkey recovered from the signature to the p2sh
+        if (CScriptID(GetScriptForDestination(WitnessV0KeyHash(pubkey.GetID()))) != *boost::get<CScriptID>(&dest)) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        }
+    } else if (boost::get<WitnessV0KeyHash>(&dest)) {
+        if (CKeyID(*boost::get<WitnessV0KeyHash>(&dest)) != pubkey.GetID()) {
+            ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+            return;
+        }
+    } else {
+        ui->lblQRCode->setText(tr("External signer's signature for address could not be validated."));
+        return;
+    }
+
+    ui->outUri->append(tr("Address verified!"));
 }

@@ -341,7 +341,7 @@ void AddressTableModel::updateEntry(const QString &address,
     priv->updateEntry(address, label, isMine, purpose, status);
 }
 
-QString AddressTableModel::addRow(const QString &type, const QString &label, const QString &address, const OutputType address_type)
+QString AddressTableModel::addRow(const QString &type, const QString &label, const QString &address, const OutputType address_type, std::string* keypath)
 {
     std::string strLabel = label.toStdString();
     std::string strAddress = address.toStdString();
@@ -386,6 +386,16 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
         }
         wallet->LearnRelatedScripts(newKey, address_type);
         strAddress = EncodeDestination(GetDestinationForKey(newKey, address_type));
+        if (wallet->IsExternalHD() && keypath) {
+            const auto& meta = wallet->mapKeyMetadata;
+            CKeyID keyID;
+            auto it = meta.find(newKey.GetID());
+            if (it != meta.end()) {
+                if (!it->second.hdKeypath.empty()) {
+                    *keypath = it->second.hdKeypath;
+                }
+            }
+        }
     }
     else
     {

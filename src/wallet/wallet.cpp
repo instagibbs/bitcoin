@@ -11,6 +11,7 @@
 #include <wallet/coincontrol.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <core_io.h>
 #include <fs.h>
 #include <wallet/init.h>
 #include <key.h>
@@ -37,6 +38,9 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/process.hpp>
 #include <boost/thread.hpp>
+
+#include <iostream>
+#include <fstream>
 
 std::vector<CWalletRef> vpwallets;
 /** Transaction fee set by the user */
@@ -1601,7 +1605,7 @@ bool CWallet::IsHardwareWallet() const
     return !gArgs.GetArg("-hardwarewallet", "").empty();
 }
 
-UniValue CWallet::CallHardwareWallet(const UniValue valRequest) const
+UniValue CallHardwareWallet(const UniValue valRequest)
 {
     std::string strCommand = gArgs.GetArg("-hardwarewallet", "");
     std::string strRequest = valRequest.write() + "\n";
@@ -1656,21 +1660,30 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
             in.pushKV("txinwitness", txinwitness);
         }
 
-        if (prevtxs != NULL) {
-            const CWalletTx *wtx = GetWalletTx(txin.prevout.hash);
+        const CWalletTx *wtx = GetWalletTx(txin.prevout.hash);
 
-            if (wtx != NULL) {
-                const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
+        if (wtx != NULL) {
+            const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
 
-                const auto& it = mapKeyMetadata.find(CScriptID(prevout.scriptPubKey));
-                if (it != mapKeyMetadata.end()) {
-                    in.pushKV("hdKeypath", it->second.hdKeypath);
-
-                    UniValue prevtx(UniValue::VOBJ);
-                    TransactionToHWWUniv(*wtx->tx, prevtx);
-
-                    prevtxs->push_back(prevtx);
+            CTxDestination address;
+            if (ExtractDestination(prevout.scriptPubKey, address)) {
+                CKeyID key_id = GetKeyForDestination(*this, address);
+                if (!key_id.IsNull()) {
+                    auto it = mapKeyMetadata.find(key_id);
+                    if (it != mapKeyMetadata.end()) {
+                        in.pushKV("hdKeypath", it->second.hdKeypath);
+                    }
                 }
+            }
+            UniValue prevtx(UniValue::VOBJ);
+            TransactionToHWWUniv(*wtx->tx, prevtx);
+            // Return whatever prev transactions you can
+            if (prevtxs) {
+                prevtxs->push_back(prevtx);
+            }
+        } else {
+            if (prevtxs) {
+                prevtxs->push_back(NullUniValue);
             }
         }
 
@@ -1683,8 +1696,7 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         const CTxOut& txout = tx.vout[i];
         UniValue out(UniValue::VOBJ);
 
-        UniValue outValue(UniValue::VNUM, FormatMoney(txout.nValue));
-        out.pushKV("value", outValue);
+        out.pushKV("value", txout.nValue);
         out.pushKV("n", (int64_t)i);
 
         UniValue o(UniValue::VOBJ);
@@ -1692,9 +1704,15 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
         out.pushKV("scriptPubKey", o);
 
         if (IsChange(txout)) {
-            const auto& it = mapKeyMetadata.find(CScriptID(txout.scriptPubKey));
-            if (it != mapKeyMetadata.end()) {
-                out.pushKV("hdKeypath", it->second.hdKeypath);
+            CTxDestination address;
+            if (ExtractDestination(txout.scriptPubKey, address)) {
+                CKeyID key_id = GetKeyForDestination(*this, address);
+                if (!key_id.IsNull()) {
+                    auto it = mapKeyMetadata.find(key_id);
+                    if (it != mapKeyMetadata.end()) {
+                        out.pushKV("hdKeypath", it->second.hdKeypath);
+                    }
+                }
             }
         }
 
@@ -1707,14 +1725,82 @@ bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniV
     return true;
 }
 
-bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const
+bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason)
+{
+    assert(IsHardwareWallet());
+    UniValue params(UniValue::VARR);
+    signature = "";
+
+    CKeyID key_id = GetKeyForDestination(*this, dest);
+    if (!key_id.IsNull()) {
+        auto it = mapKeyMetadata.find(key_id);
+        if (it != mapKeyMetadata.end()) {
+            if (!it->second.hdKeypath.empty()) {
+                params.push_back(it->second.hdKeypath);
+            } else {
+                fail_reason = _("Keypath not known by wallet");
+            }
+        }
+    } else {
+        fail_reason = _("Private key not known to this externalhd wallet");
+        return false;
+    }
+
+    params.push_back(message);
+    params.push_back(boost::get<CScriptID>(&dest) ? true : false);
+    params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
+
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& signature_uni = find_value(result, "signature");
+
+        // Workaround to get the message back
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                fail_reason = _("Signing message to file failed");
+                return false;
+            }
+            signature = line;
+            return true;
+        } else if (signature_uni.getValStr().empty()) {
+            fail_reason = _("Signing message failed");
+            return false;
+        } else {
+            // This isn't working for now FIXME
+            signature = signature_uni.getValStr();
+            return true;
+        }
+    }
+    fail_reason = _("Error occured during signing.");
+    return false;
+}
+
+bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet, const std::vector<CMutableTransaction>* prev_txns) const
 {
     UniValue params(UniValue::VARR);
 
     UniValue tx(UniValue::VOBJ);
     UniValue prevtxs(UniValue::VARR);
 
-    TransactionToHWWUniv(transaction, tx, &prevtxs);
+    if (!prev_txns && !TransactionToHWWUniv(transaction, tx, &prevtxs)) {
+        strFailReason = "Could not decode main transaction for signing";
+        return false;
+    } else if (prev_txns && TransactionToHWWUniv(transaction, tx, nullptr)) {
+        for (unsigned int i = 0; i < prev_txns->size(); i++) {
+            UniValue prev_tx(UniValue::VOBJ);
+            if (!TransactionToHWWUniv((*prev_txns)[i], prev_tx, nullptr)) {
+                strFailReason = "Could not decode prevtxs";
+                return false;
+            }
+            prevtxs.push_back(prev_tx);
+        }
+    }
 
     params.push_back(tx.write());
     params.push_back(prevtxs.write());
@@ -1727,6 +1813,21 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
 
     if (error.isNull()) {
         const UniValue& hex = find_value(result, "hex");
+
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                strFailReason = _("Signing transaction to file failed");
+                return false;
+            }
+            if (!DecodeHexTx(txRet, line)) {
+                strFailReason = _("Malformed signed transaction failed");
+                return false;
+            } else {
+                return true;
+            }
+        }
 
         if (!DecodeHexTx(txRet, hex.getValStr())) {
             strFailReason = _("Signing transaction failed");
@@ -3244,30 +3345,45 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CWalletT
 
         if (sign)
         {
-            CTransaction txNewConst(txNew);
 
+            // Sign using hww
             if (IsHardwareWallet()) {
-                if (!SignHWWTransaction(txNewConst, strFailReason, txNew)) {
+                if (!SignHWWTransaction(txNew, strFailReason, txNew)) {
+                    strFailReason = _("Hardware wallet signing failed. Make sure the dongle is connected and bitcoin app loaded.");
                     return false;
                 }
-            } else {
-                int nIn = 0;
-                for (const auto& coin : setCoins)
-                {
-                    const CScript& scriptPubKey = coin.txout.scriptPubKey;
-                    SignatureData sigdata;
-
-                    if (!ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
-                    {
-                        strFailReason = _("Signing transaction failed");
-                        return false;
-                    } else {
-                        UpdateTransaction(txNew, nIn, sigdata);
-                    }
-
-                    nIn++;
-                }
             }
+
+            CTransaction txNewConst(txNew);
+
+            // Sign using software wallet
+            int nIn = 0;
+            for (const auto& coin : setCoins)
+            {
+                const CScript& scriptPubKey = coin.txout.scriptPubKey;
+                SignatureData sigdata;
+
+                if (ProduceSignature(TransactionSignatureCreator(this, &txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata)) {
+                    UpdateTransaction(txNew, nIn, sigdata);
+                }
+                nIn++;
+            }
+            CTransaction txFinalConst(txNew);
+            // See if signing completed
+            nIn = 0;
+            for (const auto& coin : setCoins)
+            {
+                const CScript& scriptPubKey = coin.txout.scriptPubKey;
+
+                ScriptError serror = SCRIPT_ERR_OK;
+                if (!VerifyScript(txNew.vin[nIn].scriptSig, scriptPubKey, &txNew.vin[nIn].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txFinalConst, nIn, coin.txout.nValue), &serror)) {
+                    strFailReason = _("Transaction signing failed.");
+                    return false;
+                }
+
+                nIn++;
+            }
+
         }
 
         // Embed the constructed transaction data in wtxNew.

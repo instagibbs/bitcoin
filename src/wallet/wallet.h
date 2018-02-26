@@ -18,6 +18,7 @@
 #include <wallet/crypter.h>
 #include <wallet/walletdb.h>
 #include <wallet/rpcwallet.h>
+#include "base58.h"
 
 #include <algorithm>
 #include <atomic>
@@ -96,9 +97,11 @@ enum WalletFeature
     FEATURE_HD = 130000, // Hierarchical key derivation after BIP32 (HD Wallet)
 
     FEATURE_HD_SPLIT = 139900, // Wallet with HD chain split (change outputs will use m/0'/1'/k)
-    FEATURE_EXTERNAL_HD = 139901, // External Hierarchical key derivation after BIP32 (HD Wallet)
 
     FEATURE_NO_DEFAULT_KEY = 159900, // Wallet without a default key written
+    
+    FEATURE_EXTERNAL_HD = 1159900, // External Hierarchical key derivation after BIP32 (HD Wallet)
+    // This wallet should never be loaded in stock Bitcoin Core
 
     FEATURE_LATEST = FEATURE_COMPRPUBKEY // HD is optional, use FEATURE_COMPRPUBKEY as latest version
 };
@@ -1038,6 +1041,8 @@ public:
     CAmount GetChange(const CTransaction& tx) const;
     void SetBestChain(const CBlockLocator& loc) override;
 
+    bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason);
+
     DBErrors LoadWallet(bool& fFirstRunRet);
     DBErrors ZapWalletTx(std::vector<CWalletTx>& vWtx);
     DBErrors ZapSelectTx(std::vector<uint256>& vHashIn, std::vector<uint256>& vHashOut);
@@ -1141,12 +1146,10 @@ public:
     bool IsExternalHD() const;
     /* Returns true if this wallet is for a hardware wallet */
     bool IsHardwareWallet() const;
-    /* Sends a JSON-RPC message to the hardware wallet plugin */
-    UniValue CallHardwareWallet(const UniValue valRequest) const;
     /* Converts transaction to hardware wallet plugin UniValue */
     bool TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs = NULL) const;
     /* Produces a signed transaction using the hardware wallet */
-    bool SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet) const;
+    bool SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet, const std::vector<CMutableTransaction>* prev_txns = nullptr) const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();
@@ -1186,6 +1189,10 @@ public:
      */
     CTxDestination AddAndGetDestinationForScript(const CScript& script, OutputType);
 };
+
+/* Sends a JSON-RPC message to the hardware wallet plugin */
+UniValue CallHardwareWallet(const UniValue valRequest);
+
 
 /** A key allocated from the key pool. */
 class CReserveKey final : public CReserveScript

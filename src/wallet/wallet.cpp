@@ -4394,8 +4394,10 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             if (!walletInstance->SetHDMasterKey(masterPubKey))
                 throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
         } else {
-            if (!walletInstance->SetExternalHD(extPubKey))
+            walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
+            if (!walletInstance->SetExternalHD(extPubKey)) {
                 throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
+            }
         }
         // Top up the keypool
         if (!walletInstance->TopUpKeyPool()) {
@@ -4417,9 +4419,19 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
     }
 
-    if (gArgs.IsArgSet("-hardwarewallet") && !walletInstance->IsExternalHD()) {
-        InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
-        return NULL;
+    if (gArgs.IsArgSet("-hardwarewallet")) {
+        if (!walletInstance->IsExternalHD()) {
+            InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
+            return nullptr;
+        }
+        // Check the script exists where it's expected
+        try {
+            UniValue params(UniValue::VARR);
+            UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("helloworld", params, 1));
+        } catch (...) {
+            InitError(_("Error finding valid external signing driver in base data directory."));
+            return nullptr;
+        }
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);

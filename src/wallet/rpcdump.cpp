@@ -800,6 +800,11 @@ UniValue dumpwallet(const JSONRPCRequest& request)
         std::string strTime = EncodeDumpTime(it->first);
         std::string strAddr;
         std::string strLabel;
+        // We do not export derived keys from nonhardened derivation
+        if (pwallet->GetVersion() >= FEATURE_HD_PUBDERIV &&
+                pwallet->IsKeyDerived(keyid)) {
+            continue;
+        }
         CKey key;
         if (pwallet->GetKey(keyid, key)) {
             file << strprintf("%s %s ", CBitcoinSecret(key).ToString(), strTime);

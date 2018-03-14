@@ -197,12 +197,12 @@ void DeriveAndBuildKeypath(const CExtKey& parent, CExtKey& out, const unsigned i
 
 void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKey& secret, bool internal)
 {
-    // for now we use a fixed keypath scheme of m/0'/0'/k
+    // for now we use a fixed keypath scheme of m/0'/0'/k or m/0/0/k
     CKey key;                      //master key seed (256bit)
     CExtKey masterKey;             //hd master key
-    CExtKey accountKey;            //key at m/0'
-    CExtKey chainChildKey;         //key at m/0'/0' (external) or m/0'/1' (internal)
-    CExtKey childKey;              //key at m/0'/0'/<n>'
+    CExtKey accountKey;            //key at m/0(')
+    CExtKey chainChildKey;         //key at m/0(')/0(') (external) or m/0(')/1(') (internal)
+    CExtKey childKey;              //key at m/0(')/0(')/<n>(')
 
     // try to get the master key
     if (!GetKey(hdChain.masterKeyID, key))

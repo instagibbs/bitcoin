@@ -700,7 +700,7 @@ UniValue dumpprivkey(const JSONRPCRequest& request)
     }
     if (pwallet->GetVersion() >= FEATURE_HD_PUBDERIV &&
             pwallet->IsKeyDerived(keyid)) {
-        throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to a key (derived)");
+        throw JSONRPCError(RPC_TYPE_ERROR, "Cannot dump unhardened keys");
     }
     CKey vchSecret;
     if (!pwallet->GetKey(keyid, vchSecret)) {

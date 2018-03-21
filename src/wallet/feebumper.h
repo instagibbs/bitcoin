@@ -31,7 +31,7 @@ bool TransactionCanBeBumped(const CWallet* wallet, const uint256& txid);
 //! Create bumpfee transaction.
 Result CreateTransaction(const CWallet* wallet,
                          const uint256& txid,
-                         const CCoinControl& coin_control,
+                         CCoinControl& coin_control,
                          CAmount total_fee,
                          std::vector<std::string>& errors,
                          CAmount& old_fee,

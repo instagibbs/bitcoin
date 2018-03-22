@@ -29,7 +29,7 @@ enum class Result
 bool TransactionCanBeBumped(const CWallet* wallet, const uint256& txid);
 
 //! Create bumpfee transaction.
-Result CreateTransaction(const CWallet* wallet,
+Result CreateTransaction(CWallet* wallet,
                          const uint256& txid,
                          CCoinControl& coin_control,
                          CAmount total_fee,

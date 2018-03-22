@@ -73,7 +73,7 @@ bool TransactionCanBeBumped(const CWallet* wallet, const uint256& txid)
     return res == feebumper::Result::OK;
 }
 
-Result CreateTransaction(const CWallet* wallet, const uint256& txid, CCoinControl& coin_control, CAmount total_fee, std::vector<std::string>& errors,
+Result CreateTransaction(CWallet* wallet, const uint256& txid, CCoinControl& coin_control, CAmount total_fee, std::vector<std::string>& errors,
                          CAmount& old_fee, CAmount& new_fee, CMutableTransaction& mtx)
 {
     LOCK2(cs_main, wallet->cs_wallet);
@@ -125,7 +125,7 @@ Result CreateTransaction(const CWallet* wallet, const uint256& txid, CCoinContro
         // However, nOldFeeRate is a calculated value from the tx fee/size, so
         // add 1 satoshi to the result, because it may have been rounded down.
         if (nNewFeeRate.GetFeePerK() < nOldFeeRate.GetFeePerK() + 1 + walletIncrementalRelayFee.GetFeePerK()) {
-            coin_control.m_feerate = std::optional<CFeeRate(nOldFeeRate.GetFeePerK() + 1 + walletIncrementalRelayFee.GetFeePerK())>;
+            coin_control.m_feerate = CFeeRate(nOldFeeRate.GetFeePerK() + 1 + walletIncrementalRelayFee.GetFeePerK());
         }
     }
 
@@ -137,6 +137,11 @@ Result CreateTransaction(const CWallet* wallet, const uint256& txid, CCoinContro
             change_pos_inout = i;
             ExtractDestination(wtx.tx->vout[i].scriptPubKey, coin_control.destChange);
         }
+        CRecipient recipient;
+        recipient.scriptPubKey = wtx.tx->vout[i].scriptPubKey;
+        recipient.nAmount = wtx.tx->vout[i].nValue;
+        recipient.fSubtractFeeFromAmount = false;
+        recipients.push_back(recipient);
     }
 
     // Capture inputs, make them mandatory
@@ -148,11 +153,12 @@ Result CreateTransaction(const CWallet* wallet, const uint256& txid, CCoinContro
     coin_control.fAllowOtherInputs = false;
 
     CTransactionRef tx;
-    CReserveKey reservekey; //blank, we're using coin_control
+    CReserveKey reservekey(wallet); //blank, we're using coin_control
     CAmount fee_ret = 0;
     std::string fail_reason;
 
     if (!wallet->CreateTransaction(recipients, tx, reservekey, fee_ret, change_pos_inout, fail_reason, coin_control, false /* sign */)) {
+        errors.push_back(fail_reason);
         return Result::MISC_ERROR;
     }
 

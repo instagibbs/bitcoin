@@ -511,6 +511,10 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 return false;
             }
         }
+        else if (strType == "hww")
+        {
+            pwallet->SetHWW(true);
+        }
     } catch (...)
     {
         return false;
@@ -832,6 +836,10 @@ bool CWalletDB::EraseDestData(const std::string &address, const std::string &key
     return EraseIC(std::make_pair(std::string("destdata"), std::make_pair(address, key)));
 }
 
+bool CWalletDB::WriteHWW(const bool hww)
+{
+    return WriteIC(std::string("hww"), hww);
+}
 
 bool CWalletDB::WriteHDChain(const CHDChain& chain)
 {

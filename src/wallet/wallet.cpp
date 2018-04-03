@@ -1561,6 +1561,22 @@ bool CWallet::SetHDMasterKey(const CPubKey& pubkey)
     return true;
 }
 
+bool CWallet::SetHWW(bool mem_only)
+{
+    LOCK(cs_wallet);
+    if (!mem_only && !CWalletDB(*dbw).WriteHWW(true)) {
+        throw std::runtime_error(std::string(__func__) + ": writing hww failed");
+    }
+    is_hww = true;
+    return true;
+}
+
+bool CWallet::IsHWW() const
+{
+    LOCK(cs_wallet);
+    return is_hww;
+}
+
 bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
 {
     LOCK(cs_wallet);
@@ -4398,7 +4414,14 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             if (!walletInstance->SetExternalHD(extPubKey)) {
                 throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
             }
+            // Set the fact that the wallet is a hardware-enabled wallet
+            if (gArgs.IsArgSet("-hardwarewallet")) {
+                if (!walletInstance->SetHWW(false)) {
+                    throw std::runtime_error(std::string(__func__) + ": Storing hww failed");
+                }
+            }
         }
+
         // Top up the keypool
         if (!walletInstance->TopUpKeyPool()) {
             InitError(_("Unable to generate initial keys") += "\n");
@@ -4424,6 +4447,12 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
             return nullptr;
         }
+        // Make sure hww was set previously
+        if (!walletInstance->IsHWW()) {
+            InitError(strprintf(_("Error loading %s: You can't enable hww on already initialized non-hww."), walletFile));
+            return nullptr;
+        }
+
         // Check the script exists where it's expected
         try {
             UniValue params(UniValue::VARR);
@@ -4432,6 +4461,9 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             InitError(_("Error finding valid external signing driver in base data directory."));
             return nullptr;
         }
+    } else if (walletInstance->IsHWW()) {
+        InitError(strprintf(_("Error loading %s: You must provide a -hardwarewallet argument for a hww wallet file."), walletFile));
+        return nullptr;
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);

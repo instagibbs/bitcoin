@@ -1571,6 +1571,11 @@ bool CWallet::SetHWW(const std::string& derivation_path, bool mem_only)
     return true;
 }
 
+std::string CWallet::GetHWWPath() const
+{
+    return m_hww_path;
+}
+
 bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
 {
     LOCK(cs_wallet);
@@ -1746,7 +1751,7 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
         auto it = mapKeyMetadata.find(key_id);
         if (it != mapKeyMetadata.end()) {
             if (!it->second.hdKeypath.empty()) {
-                params.push_back(it->second.hdKeypath);
+                params.push_back(m_hww_path+it->second.hdKeypath.substr(1, it->second.hdKeypath.size()-1));
             } else {
                 fail_reason = _("Keypath not known by wallet");
             }
@@ -1814,6 +1819,7 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
 
     params.push_back(tx.write());
     params.push_back(prevtxs.write());
+    params.push_back(m_hww_path);
 
     const std::string strMethod = "signhwwtransaction";
     UniValue valReply = CallHardwareWallet(JSONRPCRequestObj(strMethod, params, 1));

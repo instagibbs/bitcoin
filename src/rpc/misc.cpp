@@ -253,7 +253,7 @@ UniValue validateaddress(const JSONRPCRequest& request)
                             segwit = detail["embedded"]["iswitness"].get_bool();
                         }
                         UniValue params(UniValue::VARR);
-                        params.push_back(meta->hdKeypath);
+                        params.push_back(pwallet->GetHWWPath()+meta->hdKeypath.substr(1, meta->hdKeypath.size()-1));
                         params.push_back(segwit);
                         params.push_back(native_segwit);
                         UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("validateaddress", params, 1));

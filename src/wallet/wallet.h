@@ -1141,6 +1141,8 @@ public:
 
     bool SetHWW(const std::string& derivation_path, bool mem_only);
 
+    std::string GetHWWPath() const;
+
     /* Set the HD chain model (chain child index counters) */
     bool SetHDChain(const CHDChain& chain, bool memonly);
     const CHDChain& GetHDChain() const { return hdChain; }

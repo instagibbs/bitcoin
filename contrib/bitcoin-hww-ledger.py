@@ -55,10 +55,7 @@ def build_witness_stack(witnesses):
             witness.extend(witnesses[i])
     return witness
 
-# Keypath prepend, based on xpub path
-keypath_start = "44'/0'/0'"
-
-def signhwwtransaction(txtosign, prevtxstospend):
+def signhwwtransaction(txtosign, prevtxstospend, keypath_start):
     tx = json.loads(txtosign)
     prevtxs = json.loads(prevtxstospend)
 
@@ -79,7 +76,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
             keypaths.append("")
             input_pubkeys.append("")
         else:
-            keypaths.append(keypath_start+vin["hdKeypath"][1:])
+            keypaths.append(keypath_start[2:]+vin["hdKeypath"][1:])
             pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
             input_pubkeys.append(pubkey_bytes)
 
@@ -113,7 +110,7 @@ def signhwwtransaction(txtosign, prevtxstospend):
             # Core marks anything not in address book as change... make sure it's 1/k
             if output["hdKeypath"].split('/')[-2] != '1':
                 continue
-            change_path = keypath_start+output["hdKeypath"][1:]
+            change_path = keypath_start[2:]+output["hdKeypath"][1:]
             break
 
     # Build trusted(legacy) and segwit inputs
@@ -266,7 +263,7 @@ def signmessage(keypathjson, messagejson, segwit, native):
     dongle = getDongle(True)
     app = btchip(dongle)
 
-    total_keypath = keypath_start+keypath[1:]
+    total_keypath = keypath[2:]
 
     app.getWalletPublicKey(total_keypath, True, segwit, native)
 
@@ -299,7 +296,7 @@ def validateaddress(keypath, segwit, native):
     dongle = getDongle(True)
     app = btchip(dongle)
 
-    total_keypath = keypath_start+keypath[1:]
+    total_keypath = keypath[2:]
 
     app.getWalletPublicKey(total_keypath, True, segwit, native)
 

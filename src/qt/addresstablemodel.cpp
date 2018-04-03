@@ -386,13 +386,13 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
         }
         wallet->LearnRelatedScripts(newKey, address_type);
         strAddress = EncodeDestination(GetDestinationForKey(newKey, address_type));
-        if (wallet->IsExternalHD() && keypath) {
+        if (wallet->IsHardwareWallet() && keypath) {
             const auto& meta = wallet->mapKeyMetadata;
             CKeyID keyID;
             auto it = meta.find(newKey.GetID());
             if (it != meta.end()) {
                 if (!it->second.hdKeypath.empty()) {
-                    *keypath = it->second.hdKeypath;
+                    *keypath = wallet->GetHWWPath()+it->second.hdKeypath.substr(1, it->second.hdKeypath.size()-1);
                 }
             }
         }

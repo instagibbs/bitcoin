@@ -241,7 +241,7 @@ public:
     static bool VerifyDatabaseFile(const std::string& walletFile, const fs::path& walletDir, std::string& warningStr, std::string& errorStr);
 
     //! write the fact that it's a hww
-    bool WriteHWW(const bool hww);
+    bool WriteHWW(const std::string& derivation_path);
 
     //! write the hdchain model (external chain child index counter)
     bool WriteHDChain(const CHDChain& chain);

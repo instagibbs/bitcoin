@@ -1561,13 +1561,13 @@ bool CWallet::SetHDMasterKey(const CPubKey& pubkey)
     return true;
 }
 
-bool CWallet::SetHWW(bool mem_only)
+bool CWallet::SetHWW(const std::string& derivation_path, bool mem_only)
 {
     LOCK(cs_wallet);
-    if (!mem_only && !CWalletDB(*dbw).WriteHWW(true)) {
+    if (!mem_only && !CWalletDB(*dbw).WriteHWW(derivation_path)) {
         throw std::runtime_error(std::string(__func__) + ": writing hww failed");
     }
-    is_hww = true;
+    hww_path = derivation_path;
     return true;
 }
 
@@ -1612,7 +1612,7 @@ bool CWallet::IsExternalHD() const
 
 bool CWallet::IsHardwareWallet() const
 {
-    return is_hww;
+    return !hww_path.empty();
 }
 
 UniValue CallHardwareWallet(const UniValue valRequest)
@@ -4410,7 +4410,10 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             }
             // Set the fact that the wallet is a hardware-enabled wallet
             if (gArgs.IsArgSet("-hardwarewallet")) {
-                if (!walletInstance->SetHWW(false)) {
+                // We assume BIP44 if none given
+                std::string path = gArgs.GetArg("-derivationpath", "m/44'/0'/0'");
+                // Check if path is sane first
+                if (!walletInstance->SetHWW(path, false)) {
                     throw std::runtime_error(std::string(__func__) + ": Storing hww failed");
                 }
             }

@@ -722,7 +722,8 @@ private:
     /* the HD chain data model (external chain counters) */
     CHDChain hdChain;
 
-    bool is_hww;
+    /* Path to xpub if hww is registered on first run */
+    std::string hww_path;
 
     /* HD derive new child key (on internal or external chain) */
     void DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKey& secret, CPubKey& pubkey, bool internal = false);
@@ -831,7 +832,6 @@ public:
         nRelockTime = 0;
         fAbortRescan = false;
         fScanningWallet = false;
-        is_hww = false;
     }
 
     std::map<uint256, CWalletTx> mapWallet;
@@ -1139,7 +1139,7 @@ public:
 
     bool BackupWallet(const std::string& strDest);
 
-    bool SetHWW(bool mem_only);
+    bool SetHWW(const std::string& derivation_path, bool mem_only);
 
     /* Set the HD chain model (chain child index counters) */
     bool SetHDChain(const CHDChain& chain, bool memonly);

@@ -511,9 +511,11 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 return false;
             }
         }
-        else if (strType == "hww")
+        else if (strType == "hww_path")
         {
-            pwallet->SetHWW(true);
+            std::string path;
+            ssValue >> path;
+            pwallet->SetHWW(path, false);
         }
     } catch (...)
     {
@@ -836,9 +838,9 @@ bool CWalletDB::EraseDestData(const std::string &address, const std::string &key
     return EraseIC(std::make_pair(std::string("destdata"), std::make_pair(address, key)));
 }
 
-bool CWalletDB::WriteHWW(const bool hww)
+bool CWalletDB::WriteHWW(const std::string& derivation_path)
 {
-    return WriteIC(std::string("hww"), hww);
+    return WriteIC(std::string("hww_path"), derivation_path);
 }
 
 bool CWalletDB::WriteHDChain(const CHDChain& chain)

@@ -723,7 +723,7 @@ private:
     CHDChain hdChain;
 
     /* Path to xpub if hww is registered on first run */
-    std::string hww_path;
+    std::string m_hww_path;
 
     /* HD derive new child key (on internal or external chain) */
     void DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKey& secret, CPubKey& pubkey, bool internal = false);

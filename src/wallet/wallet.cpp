@@ -1567,7 +1567,7 @@ bool CWallet::SetHWW(const std::string& derivation_path, bool mem_only)
     if (!mem_only && !CWalletDB(*dbw).WriteHWW(derivation_path)) {
         throw std::runtime_error(std::string(__func__) + ": writing hww failed");
     }
-    hww_path = derivation_path;
+    m_hww_path = derivation_path;
     return true;
 }
 
@@ -1612,7 +1612,7 @@ bool CWallet::IsExternalHD() const
 
 bool CWallet::IsHardwareWallet() const
 {
-    return !hww_path.empty();
+    return !m_hww_path.empty();
 }
 
 UniValue CallHardwareWallet(const UniValue valRequest)

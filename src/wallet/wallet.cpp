@@ -4418,7 +4418,9 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             if (gArgs.IsArgSet("-hardwarewallet")) {
                 // We assume BIP44 if none given
                 std::string path = gArgs.GetArg("-derivationpath", "m/44'/0'/0'");
-                // Check if path is sane first
+                // TODO Check if path is sane first
+                // TODO Move this inside externalhd check only, compute individual keypaths
+                // using this information, no need to concat.
                 if (!walletInstance->SetHWW(path, false)) {
                     throw std::runtime_error(std::string(__func__) + ": Storing hww failed");
                 }

@@ -1140,7 +1140,6 @@ public:
     bool BackupWallet(const std::string& strDest);
 
     bool SetHWW(bool mem_only);
-    bool IsHWW() const;
 
     /* Set the HD chain model (chain child index counters) */
     bool SetHDChain(const CHDChain& chain, bool memonly);

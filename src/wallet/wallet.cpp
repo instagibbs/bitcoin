@@ -1571,12 +1571,6 @@ bool CWallet::SetHWW(bool mem_only)
     return true;
 }
 
-bool CWallet::IsHWW() const
-{
-    LOCK(cs_wallet);
-    return is_hww;
-}
-
 bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
 {
     LOCK(cs_wallet);
@@ -1618,7 +1612,7 @@ bool CWallet::IsExternalHD() const
 
 bool CWallet::IsHardwareWallet() const
 {
-    return !gArgs.GetArg("-hardwarewallet", "").empty();
+    return is_hww;
 }
 
 UniValue CallHardwareWallet(const UniValue valRequest)
@@ -4448,7 +4442,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             return nullptr;
         }
         // Make sure hww was set previously
-        if (!walletInstance->IsHWW()) {
+        if (!walletInstance->IsHardwareWallet()) {
             InitError(strprintf(_("Error loading %s: You can't enable hww on already initialized non-hww."), walletFile));
             return nullptr;
         }
@@ -4461,7 +4455,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             InitError(_("Error finding valid external signing driver in base data directory."));
             return nullptr;
         }
-    } else if (walletInstance->IsHWW()) {
+    } else if (walletInstance->IsHardwareWallet()) {
         InitError(strprintf(_("Error loading %s: You must provide a -hardwarewallet argument for a hww wallet file."), walletFile));
         return nullptr;
     }

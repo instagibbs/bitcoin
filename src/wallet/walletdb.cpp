@@ -515,7 +515,7 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
         {
             std::string path;
             ssValue >> path;
-            pwallet->SetHWW(path, false);
+            pwallet->SetHWW(path, true);
         }
     } catch (...)
     {

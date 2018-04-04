@@ -392,7 +392,7 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
             auto it = meta.find(newKey.GetID());
             if (it != meta.end()) {
                 if (!it->second.hdKeypath.empty()) {
-                    *keypath = wallet->GetHWWPath()+it->second.hdKeypath.substr(1, it->second.hdKeypath.size()-1);
+                    *keypath = it->second.hdKeypath;
                 }
             }
         }

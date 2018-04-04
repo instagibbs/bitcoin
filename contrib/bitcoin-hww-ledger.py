@@ -16,6 +16,75 @@ btchip python library can be found here https://github.com/LedgerHQ/btchip-pytho
 or installed with `pip install btchip-python`
 '''
 
+def sha256(s):
+    return hashlib.new('sha256', s).digest()
+
+def ripemd160(s):
+    return hashlib.new('ripemd160', s).digest()
+
+def hash256(s):
+    return sha256(sha256(s))
+
+def hash160(s):
+    return ripemd160(sha256(s))
+
+b58_digits = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+from binascii import hexlify, unhexlify
+
+# Blatant theft from HWI repo
+def b58encode(b):
+    """Encode bytes to a base58-encoded string"""
+
+    # Convert big-endian bytes to integer
+    n = int('0x0' + hexlify(b).decode('utf8'), 16)
+
+    # Divide that integer into bas58
+    res = []
+    while n > 0:
+        n, r = divmod (n, 58)
+        res.append(b58_digits[r])
+    res = ''.join(res[::-1])
+
+    # Encode leading zeros as base58 zeros
+    import sys
+    czero = b'\x00'
+    if sys.version > '3':
+        # In Python3 indexing a bytes returns numbers, not characters.
+        czero = 0
+    pad = 0
+    for c in b:
+        if c == czero: pad += 1
+        else: break
+    return b58_digits[0] * pad + res
+
+def b58decode(s):
+    """Decode a base58-encoding string, returning bytes"""
+    if not s:
+        return b''
+
+    # Convert the string to an integer
+    n = 0
+    for c in s:
+        n *= 58
+        if c not in b58_digits:
+            raise InvalidBase58Error('Character %r is not a valid base58 character' % c)
+        digit = b58_digits.index(c)
+        n += digit
+
+    # Convert the integer to bytes
+    h = '%x' % n
+    if len(h) % 2:
+        h = '0' + h
+    res = unhexlify(h.encode('utf8'))
+
+    # Add padding back.
+    pad = 0
+    for c in s[:-1]:
+        if c == b58_digits[0]: pad += 1
+        else: break
+    return b'\x00' * pad + res
+
 # TODO: get these upstreamed to btchip-python
 def format_transaction(dongleOutputData, trustedInputsAndInputScripts, version=0x01, lockTime=0, trusted=True, witness=""):
         transaction = bitcoinTransaction()
@@ -55,7 +124,7 @@ def build_witness_stack(witnesses):
             witness.extend(witnesses[i])
     return witness
 
-def signhwwtransaction(txtosign, prevtxstospend, keypath_start):
+def signhwwtransaction(txtosign, prevtxstospend):
     tx = json.loads(txtosign)
     prevtxs = json.loads(prevtxstospend)
 
@@ -76,7 +145,7 @@ def signhwwtransaction(txtosign, prevtxstospend, keypath_start):
             keypaths.append("")
             input_pubkeys.append("")
         else:
-            keypaths.append(keypath_start[2:]+vin["hdKeypath"][1:])
+            keypaths.append(vin["hdKeypath"][2:])
             pubkey_bytes = compress_public_key(app.getWalletPublicKey(keypaths[-1])["publicKey"])
             input_pubkeys.append(pubkey_bytes)
 
@@ -110,7 +179,7 @@ def signhwwtransaction(txtosign, prevtxstospend, keypath_start):
             # Core marks anything not in address book as change... make sure it's 1/k
             if output["hdKeypath"].split('/')[-2] != '1':
                 continue
-            change_path = keypath_start[2:]+output["hdKeypath"][1:]
+            change_path = output["hdKeypath"][2:]
             break
 
     # Build trusted(legacy) and segwit inputs
@@ -302,10 +371,63 @@ def validateaddress(keypath, segwit, native):
 
     return {}
 
+# Stolen from HWI repo:
+def get_pubkey_at_path(path, mainnet):
+    dongle = getDongle(True)
+    app = btchip(dongle)
+
+    path = path[2:]
+    # This call returns raw uncompressed pubkey, chaincode
+    pubkey = app.getWalletPublicKey(path)
+    if path != "":
+        parent_path = ""
+        for ind in path.split("/")[:-1]:
+            parent_path += ind+"/"
+        parent_path = parent_path[:-1]
+
+        # Get parent key fingerprint
+        parent = app.getWalletPublicKey(parent_path)
+        fpr = hash160(compress_public_key(parent["publicKey"]))[:4]
+
+        # Compute child info
+        childstr = path.split("/")[-1]
+        hard = 0
+        if childstr[-1] == "'":
+            childstr = childstr[:-1]
+            hard = 0x80000000
+        child = struct.pack(">I", int(childstr)+hard)
+    # Special case for m
+    else:
+        child = bytearray.fromhex("00000000")
+        fpr = child
+
+    chainCode = pubkey["chainCode"]
+    publicKey = compress_public_key(pubkey["publicKey"])
+
+    depth = len(path.split("/")) if len(path) > 0 else 0
+    depth = struct.pack("B", depth)
+
+    if mainnet:
+        version = bytearray.fromhex("0488B21E")
+    else:
+        version = bytearray.fromhex("043587CF")
+
+    extkey = version+depth+fpr+child+chainCode+publicKey
+    checksum = hash256(extkey)[:4]
+
+    # Write to file as workaround
+    file = open("xpub.txt", 'w')
+    file.write(b58encode(extkey+checksum))
+    file.close()
+
+    return {"xpub":b58encode(extkey+checksum)}
+
+
 dispatcher = Dispatcher({
     "signhwwtransaction": signhwwtransaction,
     "signmessage": signmessage,
-    "validateaddress": validateaddress
+    "validateaddress": validateaddress,
+    "getxpub": get_pubkey_at_path
 })
 
 logging.basicConfig()

@@ -249,12 +249,20 @@ void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKe
         do {
             if (internal) {
                 chainChildKey.Derive(childKey, hdChain.nInternalChainCounter);
-                metadata.hdKeypath = "m/1/" + std::to_string(hdChain.nInternalChainCounter);
+                if (IsHardwareWallet()) {
+                    metadata.hdKeypath = m_hww_path+"/1/" + std::to_string(hdChain.nInternalChainCounter);
+                } else {
+                    metadata.hdKeypath = "m/1/" + std::to_string(hdChain.nInternalChainCounter);
+                }
                 hdChain.nInternalChainCounter++;
             }
             else {
                 chainChildKey.Derive(childKey, hdChain.nExternalChainCounter);
-                metadata.hdKeypath = "m/0/" + std::to_string(hdChain.nExternalChainCounter);
+                if (IsHardwareWallet()) {
+                    metadata.hdKeypath = m_hww_path+"/0/" + std::to_string(hdChain.nExternalChainCounter);
+                } else {
+                    metadata.hdKeypath = "m/0/" + std::to_string(hdChain.nExternalChainCounter);
+                }
                 hdChain.nExternalChainCounter++;
             }
             metadata.hdMasterKeyID = hdChain.masterKeyID;
@@ -1751,7 +1759,7 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
         auto it = mapKeyMetadata.find(key_id);
         if (it != mapKeyMetadata.end()) {
             if (!it->second.hdKeypath.empty()) {
-                params.push_back(m_hww_path+it->second.hdKeypath.substr(1, it->second.hdKeypath.size()-1));
+                params.push_back(it->second.hdKeypath);
             } else {
                 fail_reason = _("Keypath not known by wallet");
             }
@@ -1819,7 +1827,6 @@ bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& s
 
     params.push_back(tx.write());
     params.push_back(prevtxs.write());
-    params.push_back(m_hww_path);
 
     const std::string strMethod = "signhwwtransaction";
     UniValue valReply = CallHardwareWallet(JSONRPCRequestObj(strMethod, params, 1));
@@ -4404,27 +4411,80 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
         walletInstance->SetMinVersion(FEATURE_NO_DEFAULT_KEY);
 
-        // generate a new master key
+        // generate a new master key, or start up hww
         if(externalHd.empty()) {
-            CPubKey masterPubKey = walletInstance->GenerateNewHDMasterKey();
-            if (!walletInstance->SetHDMasterKey(masterPubKey))
-                throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
-        } else {
-            walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
-            if (!walletInstance->SetExternalHD(extPubKey)) {
-                throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
-            }
+
             // Set the fact that the wallet is a hardware-enabled wallet
             if (gArgs.IsArgSet("-hardwarewallet")) {
                 // We assume BIP44 if none given
                 std::string path = gArgs.GetArg("-derivationpath", "m/44'/0'/0'");
-                // TODO Check if path is sane first
-                // TODO Move this inside externalhd check only, compute individual keypaths
-                // using this information, no need to concat.
+                std::string xpub = "";
+                // TODO Check if path is sane first, driver already kinda does
+                try {
+                    UniValue params(UniValue::VARR);
+                    params.push_back(path);
+                    params.push_back(Params().NetworkIDString() == "main");
+                    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("getxpub", params, 1));
+
+                    const UniValue& result = find_value(valReply, "result");
+                    const UniValue& error = find_value(valReply, "error");
+
+                    if (error.isNull()) {
+                        const UniValue& xpub_uni = find_value(result, "xpub");
+
+                        // Workaround to get the message back
+                        std::string line;
+                        std::ifstream myReadFile ("xpub.txt");
+                        if (myReadFile.is_open()) {
+                            if ( !getline(myReadFile,line) || remove( "xpub.txt" ) != 0){
+                                InitError(_("Getting xpub from device failed."));
+                                return nullptr;
+                            }
+                            xpub = line;
+                        } else if (xpub_uni.getValStr().empty()) {
+                            InitError(_("Getting xpub from device failed."));
+                            return nullptr;
+                        } else {
+                            // This isn't working for now FIXME
+                            xpub = xpub_uni.getValStr();
+                        }
+                    } else {
+                        InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct."));
+                        return nullptr;
+                    }
+                } catch (...) {
+                    InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct."));
+                    return nullptr;
+                }
+
+                CBitcoinExtPubKey hww_pubkey(xpub);
+                CExtPubKey ext_hww_pubkey = hww_pubkey.GetKey();
+
+                // Set xpub grabbed from device
+                walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
+                if (!walletInstance->SetExternalHD(ext_hww_pubkey)) {
+                    throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
+                }
+                // Set the path used
                 if (!walletInstance->SetHWW(path, false)) {
                     throw std::runtime_error(std::string(__func__) + ": Storing hww failed");
                 }
+            } else {
+                CPubKey masterPubKey = walletInstance->GenerateNewHDMasterKey();
+                if (!walletInstance->SetHDMasterKey(masterPubKey))
+                    throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
             }
+        } else {
+            if (!gArgs.GetArg("-hardwarewallet", "").empty()) {
+                InitError(_("externalhd and hardwarewallet cannot be both set."));
+                return nullptr;
+            }
+
+            walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
+            if (!walletInstance->SetExternalHD(extPubKey)) {
+                throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
+            }
+
         }
 
         // Top up the keypool
@@ -4457,15 +4517,10 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             InitError(strprintf(_("Error loading %s: You can't enable hww on already initialized non-hww."), walletFile));
             return nullptr;
         }
-
-        // Check the script exists where it's expected
-        try {
-            UniValue params(UniValue::VARR);
-            UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("helloworld", params, 1));
-        } catch (...) {
-            InitError(_("Error finding valid external signing driver in base data directory."));
-            return nullptr;
+        if (gArgs.IsArgSet("-hardwarewallet") && gArgs.GetArg("-derivationpath", "") != walletInstance->GetHWWPath()) {
+            InitError(strprintf(_("Error loading %s: You can't enable a different `-derivationpath` on an already initialized hww. Fix or remove the argument."), walletFile));
         }
+
     } else if (walletInstance->IsHardwareWallet()) {
         InitError(strprintf(_("Error loading %s: You must provide a -hardwarewallet argument for a hww wallet file."), walletFile));
         return nullptr;

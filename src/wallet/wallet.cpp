@@ -177,7 +177,8 @@ CPubKey CWallet::GenerateNewKey(CWalletDB &walletdb, bool internal)
     mapKeyMetadata[pubkey.GetID()] = metadata;
     UpdateTimeFirstKey(nCreationTime);
 
-    if(!IsExternalHD()) {
+    // Hardware wallets think they have the key natively
+    if(!IsExternalHD() || IsHardwareWallet()) {
         if (!AddKeyPubKeyWithDB(walletdb, secret, pubkey)) {
             throw std::runtime_error(std::string(__func__) + ": AddKey failed");
         }
@@ -268,6 +269,7 @@ void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKe
             metadata.hdMasterKeyID = hdChain.masterKeyID;
         } while (HaveWatchOnly(childKey.pubkey.GetID()));
         pubkey = childKey.pubkey;
+        secret = CKey(); // Invalid key
         // update the chain model in the database
         if (!walletdb.WriteHDChain(hdChain))
             throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");

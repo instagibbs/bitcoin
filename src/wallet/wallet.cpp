@@ -4418,8 +4418,13 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             if (gArgs.IsArgSet("-hardwarewallet")) {
                 // We assume BIP44 if none given
                 std::string path = gArgs.GetArg("-derivationpath", "m/44'/0'/0'");
+                // Filter some common derivation path errors
+                if (path.substr(0,2) != "m/" || path.substr(path.size()-1, path.size()) == "/"
+                        || path.find('h') != std::string::npos) {
+                    InitError(_("Derivation path is malformed. Example: m/44'/0'/0'"));
+                    return nullptr;
+                }
                 std::string xpub = "";
-                // TODO Check if path is sane first, driver already kinda does
                 try {
                     UniValue params(UniValue::VARR);
                     params.push_back(path);

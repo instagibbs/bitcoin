@@ -7,50 +7,64 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import *
 import os, stat, sys
 
-if len(sys.argv) < 2:
-    raise Exception("You must enter a tpub for testing.")
-xpub = sys.argv[1]
-
-# Node 0 is externally signing node
+# Node 0 is hww node
 # Node 1 is software signing node
+# Node 2 is hww node with non-standard derivation path
 
 class ExternalHDTest(BitcoinTestFramework):
 
     def set_test_params(self):
         self.setup_clean_chain = True
-        self.num_nodes = 2
-        self.extra_args = [["-externalhd="+xpub], []]
+        self.num_nodes = 3
+        self.extra_args = [[], [], []]
 
     def setup_network(self, split=False):
-        self.add_nodes(2, self.extra_args)
-        self.start_nodes()
-        connect_nodes_bi(self.nodes,0,1)
+        self.add_nodes(3, self.extra_args)
 
     def run_test(self):
 
-        assert_equal(self.nodes[0].getbalance(), 0)
-        self.nodes[0].generate(1)
-        self.sync_all()
-        self.nodes[1].generate(100)
-        self.sync_all()
-
         print("Make sure your device is plugged in and loaded to the btc testnet app...")
 
-        hww_driver_path = self.options.tmpdir+"/node0"
+        hww_driver_path = self.options.tmpdir+"/node0/bitcoin-hww-ledger.py"
         contrib_file = open('contrib/bitcoin-hww-ledger.py', 'r')
-        datadir_file = open(hww_driver_path+"/bitcoin-hww-ledger.py", 'w')
+        datadir_file = open(hww_driver_path, 'w')
         for line in contrib_file:
             datadir_file.write(line)
 
         datadir_file.close()
         contrib_file.close()
 
-        os.chmod(hww_driver_path+"/bitcoin-hww-ledger.py", stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+        os.chmod(hww_driver_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
+
+        self.assert_start_raises_init_error(0, ['-hardwarewallet=dummy.py'], "Error getting xpub from device. Make sure your `-hardwarewallet` path is correct.")
+        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, '-externalhd=tpubDAenfwNu5GyCJWv8oqRAckdKMSUoZjgVF5p8WvQwHQeXjDhAHmGrPa4a4y2Fn7HF2nfCLefJanHV3ny1UY25MRVogizB2zRUdAo7Tr9XAjm'], "externalhd and hardwarewallet cannot be both set.")
+        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=mm/44'/0'/0'"], "Derivation path is malformed. Example: m/44'/0'/0'")
+        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0'/"], "Derivation path is malformed. Example: m/44'/0'/0'")
+        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44h/0h/0h"], "Derivation path is malformed. Example: m/44'/0'/0'")
+
+        # One node will be the default BIP44 path, one some bizarre specified path
+        # Have to start nodes separately to not conflict with each other asking for xpubs
+        self.start_node(0, ['-hardwarewallet='+hww_driver_path, '-walletrbf=1'])
+        self.start_node(1, [])
+        self.start_node(2, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/42/0'/5'"])
+        connect_nodes_bi(self.nodes,0,1)
 
         self.stop_nodes()
 
-        self.start_nodes([['-externalhd='+xpub, '-hardwarewallet='+hww_driver_path+'/bitcoin-hww-ledger.py', '-walletrbf=1'], []])
+
+        self.assert_start_raises_init_error(0, [], "Error loading wallet.dat: You must provide a -hardwarewallet argument for a hww wallet file.")
+        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0"], "Error loading wallet.dat: You can't enable a different `-derivationpath` on an already initialized hww. Fix or remove the argument.")
+
+        self.start_nodes([['-hardwarewallet='+hww_driver_path, '-walletrbf=1'], [], ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/42/0'/5'"]])
         connect_nodes_bi(self.nodes,0,1)
+        connect_nodes_bi(self.nodes,1,2)
+
+
+        assert_equal(self.nodes[0].getbalance(), 0)
+        self.nodes[0].generate(1)
+        self.sync_all()
+        self.nodes[1].generate(100)
+        self.sync_all()
 
         print("Begin hardwarewallet tests...")
 
@@ -60,9 +74,18 @@ class ExternalHDTest(BitcoinTestFramework):
         native_address = self.nodes[0].getnewaddress("", "bech32")
         legacy_address = self.nodes[0].getnewaddress("", "legacy")
 
+        # Full keypaths are stored, BIP44 or otherwise
+        non_std_path_addr = self.nodes[2].getnewaddress()
+        print("Validate non-standard path address: "+non_std_path_addr)
+        assert(self.nodes[2].validateaddress(non_std_path_addr)["hdkeypath"] == "m/42/0'/5'/0/0")
+
         p2sh_change = self.nodes[0].getrawchangeaddress()
         native_change = self.nodes[0].getrawchangeaddress("bech32")
         legacy_change = self.nodes[0].getrawchangeaddress("legacy")
+
+        print("Just validating the keypaths, just approve both")
+        assert(self.nodes[0].validateaddress(p2sh_address)["hdkeypath"] == "m/44'/0'/0'/0/1")
+        assert(self.nodes[0].validateaddress(p2sh_change)["hdkeypath"] == "m/44'/0'/0'/1/0")
 
         # Have user validate each one
         print("Validating user addresses:")
@@ -149,7 +172,7 @@ class ExternalHDTest(BitcoinTestFramework):
 
         print("Wallet sending checks out.")
 
-        assert_raises_rpc_error(-4, "External HD wallets are not allowed to import addresses or keys.", self.nodes[0].importaddress, privkey_address)
+        assert_raises_rpc_error(-4, "Hardware wallets are not allowed to import addresses or keys.", self.nodes[0].importaddress, privkey_address)
 
         #privkey has 17 btc
         self.nodes[0].importprivkey(privkey)

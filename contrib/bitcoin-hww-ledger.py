@@ -10,8 +10,6 @@ import base64
 import hashlib
 
 '''
-xpub can be derived using https://www.ledgerwallet.com/api/demo.html or any other standard tool
-
 btchip python library can be found here https://github.com/LedgerHQ/btchip-python
 or installed with `pip install btchip-python`
 '''

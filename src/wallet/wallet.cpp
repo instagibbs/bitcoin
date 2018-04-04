@@ -4517,8 +4517,9 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             InitError(strprintf(_("Error loading %s: You can't enable hww on already initialized non-hww."), walletFile));
             return nullptr;
         }
-        if (gArgs.IsArgSet("-hardwarewallet") && gArgs.GetArg("-derivationpath", "") != walletInstance->GetHWWPath()) {
+        if (gArgs.IsArgSet("-hardwarewallet") && gArgs.GetArg("-derivationpath", "m/44'/0'/0'") != walletInstance->GetHWWPath()) {
             InitError(strprintf(_("Error loading %s: You can't enable a different `-derivationpath` on an already initialized hww. Fix or remove the argument."), walletFile));
+            return nullptr;
         }
 
     } else if (walletInstance->IsHardwareWallet()) {

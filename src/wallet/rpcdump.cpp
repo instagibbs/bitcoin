@@ -278,10 +278,6 @@ UniValue importaddress(const JSONRPCRequest& request)
             + HelpExampleRpc("importaddress", "\"myscript\", \"testing\", false")
         );
 
-    if (pwallet->IsHardwareWallet()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Hardware wallets are not allowed to import addresses or keys.");
-    }
-
     std::string strLabel = "";
     if (!request.params[1].isNull())
         strLabel = request.params[1].get_str();
@@ -454,10 +450,6 @@ UniValue importpubkey(const JSONRPCRequest& request)
             + HelpExampleRpc("importpubkey", "\"mypubkey\", \"testing\", false")
         );
 
-    if (pwallet->IsHardwareWallet()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Hardware wallets are not allowed to import addresses or keys.");
-    }
-
     std::string strLabel = "";
     if (!request.params[1].isNull())
         strLabel = request.params[1].get_str();
@@ -522,10 +514,6 @@ UniValue importwallet(const JSONRPCRequest& request)
             "\nImport using the json rpc call\n"
             + HelpExampleRpc("importwallet", "\"test\"")
         );
-
-    if (pwallet->IsHardwareWallet()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Hardware wallets are not allowed to import addresses or keys.");
-    }
 
     if (fPruneMode)
         throw JSONRPCError(RPC_WALLET_ERROR, "Importing wallets is disabled in pruned mode");
@@ -1178,10 +1166,6 @@ UniValue importmulti(const JSONRPCRequest& mainRequest)
 
             "\nResponse is an array with the same size as the input that has the execution result :\n"
             "  [{ \"success\": true } , { \"success\": false, \"error\": { \"code\": -1, \"message\": \"Internal Server Error\"} }, ... ]\n");
-
-    if (pwallet->IsHardwareWallet()) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Hardware wallets are not allowed to import addresses or keys.");
-    }
 
     // clang-format on
 

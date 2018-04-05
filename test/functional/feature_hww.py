@@ -172,9 +172,10 @@ class ExternalHDTest(BitcoinTestFramework):
 
         print("Wallet sending checks out.")
 
-        assert_raises_rpc_error(-4, "Hardware wallets are not allowed to import addresses or keys.", self.nodes[0].importaddress, privkey_address)
-
         #privkey has 17 btc
+        self.nodes[0].importaddress(privkey_address)
+        assert_equal(self.nodes[0].getbalance("*", 0, True) - self.nodes[0].getbalance(), 17)
+
         self.nodes[0].importprivkey(privkey)
         node0_bal += 17
         assert_equal(self.nodes[0].getbalance(), node0_bal)

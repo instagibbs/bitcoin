@@ -36,7 +36,7 @@ class ExternalHDTest(BitcoinTestFramework):
 
         os.chmod(hww_driver_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
 
-        self.assert_start_raises_init_error(0, ['-hardwarewallet=dummy.py'], "Error getting xpub from device. Make sure your `-hardwarewallet` path is correct.")
+        self.assert_start_raises_init_error(0, ['-hardwarewallet=dummy.py'], "Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked.")
         self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, '-externalhd=tpubDAenfwNu5GyCJWv8oqRAckdKMSUoZjgVF5p8WvQwHQeXjDhAHmGrPa4a4y2Fn7HF2nfCLefJanHV3ny1UY25MRVogizB2zRUdAo7Tr9XAjm'], "externalhd and hardwarewallet cannot be both set.")
         self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=mm/44'/0'/0'"], "Derivation path is malformed. Example: m/44'/0'/0'")
         self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0'/"], "Derivation path is malformed. Example: m/44'/0'/0'")

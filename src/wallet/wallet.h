@@ -899,9 +899,12 @@ public:
     CPubKey GenerateNewKey(CWalletDB& walletdb, bool internal = false);
     //! Adds a key to the store, and saves it to disk.
     bool AddKeyPubKey(const CKey& key, const CPubKey &pubkey) override;
+    bool AddPubKey(const CPubKey &pubkey) override;
     bool AddKeyPubKeyWithDB(CWalletDB &walletdb,const CKey& key, const CPubKey &pubkey);
+    bool AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey);
     //! Adds a key to the store, without saving it to disk (used by LoadWallet)
     bool LoadKey(const CKey& key, const CPubKey &pubkey) { return CCryptoKeyStore::AddKeyPubKey(key, pubkey); }
+    bool LoadHWWKey(const CPubKey &pubkey) { return CBasicKeyStore::AddPubKey(pubkey); }
     //! Load metadata (used by LoadWallet)
     bool LoadKeyMetadata(const CKeyID& keyID, const CKeyMetadata &metadata);
     bool LoadScriptMetadata(const CScriptID& script_id, const CKeyMetadata &metadata);

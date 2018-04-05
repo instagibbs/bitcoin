@@ -178,7 +178,11 @@ CPubKey CWallet::GenerateNewKey(CWalletDB &walletdb, bool internal)
     UpdateTimeFirstKey(nCreationTime);
 
     // Hardware wallets think they have the key natively
-    if(!IsExternalHD() || IsHardwareWallet()) {
+    if (IsHardwareWallet()) {
+        if (!AddPubKeyWithDB(walletdb, pubkey)) {
+            throw std::runtime_error(std::string(__func__) + ": AddPubKey failed");
+        }
+    } else if(!IsExternalHD()) {
         if (!AddKeyPubKeyWithDB(walletdb, secret, pubkey)) {
             throw std::runtime_error(std::string(__func__) + ": AddKey failed");
         }
@@ -269,7 +273,6 @@ void CWallet::DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKe
             metadata.hdMasterKeyID = hdChain.masterKeyID;
         } while (HaveWatchOnly(childKey.pubkey.GetID()));
         pubkey = childKey.pubkey;
-        secret = CKey(); // Invalid key
         // update the chain model in the database
         if (!walletdb.WriteHDChain(hdChain))
             throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
@@ -308,17 +311,45 @@ bool CWallet::AddKeyPubKeyWithDB(CWalletDB &walletdb, const CKey& secret, const 
     }
 
     if (!IsCrypted()) {
-        return walletdb.WriteKey(pubkey,
-                                                 secret.GetPrivKey(),
-                                                 mapKeyMetadata[pubkey.GetID()]);
+        return walletdb.WriteKey(pubkey, secret.GetPrivKey(),
+                mapKeyMetadata[pubkey.GetID()]);
     }
     return true;
+}
+
+bool CWallet::AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey)
+{
+    AssertLockHeld(cs_wallet); // mapKeyMetadata
+
+    if (!CBasicKeyStore::AddPubKey(pubkey)) {
+        return false;
+    }
+
+    // check if we need to remove from watch-only
+    CScript script;
+    script = GetScriptForDestination(pubkey.GetID());
+    if (HaveWatchOnly(script)) {
+        RemoveWatchOnly(script);
+    }
+    script = GetScriptForRawPubKey(pubkey);
+    if (HaveWatchOnly(script)) {
+        RemoveWatchOnly(script);
+    }
+
+    // We write to db because we're not handling privkeys
+    return walletdb.WriteHWWKey(pubkey, mapKeyMetadata[pubkey.GetID()]);
 }
 
 bool CWallet::AddKeyPubKey(const CKey& secret, const CPubKey &pubkey)
 {
     CWalletDB walletdb(*dbw);
     return CWallet::AddKeyPubKeyWithDB(walletdb, secret, pubkey);
+}
+
+bool CWallet::AddPubKey(const CPubKey &pubkey)
+{
+    CWalletDB walletdb(*dbw);
+    return CWallet::AddPubKeyWithDB(walletdb, pubkey);
 }
 
 bool CWallet::AddCryptedKey(const CPubKey &vchPubKey,
@@ -3791,10 +3822,10 @@ void CWallet::ReserveKeyFromKeyPool(int64_t& nIndex, CKeyPool& keypool, bool fRe
         if (!walletdb.ReadPool(nIndex, keypool)) {
             throw std::runtime_error(std::string(__func__) + ": read failed");
         }
-        if (!IsExternalHD() && !HaveKey(keypool.vchPubKey.GetID())) {
+        if ((!IsExternalHD() || IsHardwareWallet()) && !HaveKey(keypool.vchPubKey.GetID())) {
             throw std::runtime_error(std::string(__func__) + ": unknown key in key pool");
         }
-        if (IsExternalHD()) {
+        if (IsExternalHD() && !IsHardwareWallet()) {
             if (!HaveWatchOnly(keypool.vchPubKey.GetID())) {
                 throw std::runtime_error(std::string(__func__) + ": unknown key in key pool");
             }
@@ -4446,11 +4477,11 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
                             xpub = xpub_uni.getValStr();
                         }
                     } else {
-                        InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct."));
+                        InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and device plugged in and unlocked."));
                         return nullptr;
                     }
                 } catch (...) {
-                    InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct."));
+                    InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked."));
                     return nullptr;
                 }
 

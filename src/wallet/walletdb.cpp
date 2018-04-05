@@ -77,6 +77,16 @@ bool CWalletDB::WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey, c
     return WriteIC(std::make_pair(std::string("key"), vchPubKey), std::make_pair(vchPrivKey, Hash(vchKey.begin(), vchKey.end())), false);
 }
 
+bool CWalletDB::WriteHWWKey(const CPubKey& vchPubKey, const CKeyMetadata& keyMeta)
+{
+    if (!WriteIC(std::make_pair(std::string("keymeta"), vchPubKey), keyMeta, false)) {
+        return false;
+    }
+
+    return WriteIC(std::make_pair(std::string("hwwkey"), vchPubKey), keyMeta);
+}
+
+
 bool CWalletDB::WriteCryptedKey(const CPubKey& vchPubKey,
                                 const std::vector<unsigned char>& vchCryptedSecret,
                                 const CKeyMetadata &keyMeta)
@@ -428,6 +438,22 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 return false;
             }
             wss.fIsEncrypted = true;
+        }
+        else if (strType == "hwwKey")
+        {
+            CPubKey vchPubKey;
+            ssKey >> vchPubKey;
+            if (!vchPubKey.IsValid())
+            {
+                strErr = "Error reading wallet database: CPubKey corrupt";
+                return false;
+            }
+            CKey key; // Invalid key to load into memory only
+            if (!pwallet->LoadKey(key, vchPubKey))
+            {
+                strErr = "Error reading wallet database: LoadKey failed";
+                return false;
+            }
         }
         else if (strType == "keymeta")
         {

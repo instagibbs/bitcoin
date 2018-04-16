@@ -718,6 +718,9 @@ private:
     /* the HD chain data model (external chain counters) */
     CHDChain hdChain;
 
+    /* Path to xpub if hww is registered on first run */
+    std::string m_hww_path;
+
     /* HD derive new child key (on internal or external chain) */
     void DeriveNewChildKey(CWalletDB &walletdb, CKeyMetadata& metadata, CKey& secret, bool internal = false);
 
@@ -1131,12 +1134,20 @@ public:
 
     bool BackupWallet(const std::string& strDest);
 
+    bool SetHWW(const std::string& derivation_path, bool mem_only);
+
+    std::string GetHWWPath() const;
+
     /* Set the HD chain model (chain child index counters) */
     bool SetHDChain(const CHDChain& chain, bool memonly);
     const CHDChain& GetHDChain() const { return hdChain; }
 
     /* Returns true if HD is enabled */
     bool IsHDEnabled() const;
+    /* Returns true if HD is enabled and is watch only */
+    bool IsExternalHD() const;
+    /* Returns true if this wallet is for a hardware wallet */
+    bool IsHardwareWallet() const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();
@@ -1146,6 +1157,7 @@ public:
        caller must ensure the current wallet version is correct before calling
        this function). */
     bool SetHDMasterKey(const CPubKey& key);
+    bool SetExternalHD(const CExtPubKey& extPubKey);
 
     /**
      * Blocks until the wallet state is up-to-date to /at least/ the current

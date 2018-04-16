@@ -634,20 +634,31 @@ UniValue signmessage(const JSONRPCRequest& request)
         throw JSONRPCError(RPC_TYPE_ERROR, "Address does not refer to key");
     }
 
-    CKey key;
-    if (!pwallet->GetKey(*keyID, key)) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Private key not available");
+    if (pwallet->IsHardwareWallet()) {
+        std::string fail_reason;
+        std::string signature;
+        if (!pwallet->SignHWWMessage(strMessage, dest, signature, fail_reason)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Hardware signing failed: "+fail_reason);
+        }
+        return signature;
+    } else {
+        CHashWriter ss(SER_GETHASH, 0);
+        ss << strMessageMagic;
+        ss << strMessage;
+
+
+        CKey key;
+        if (!pwallet->GetKey(*keyID, key)) {
+            throw JSONRPCError(RPC_WALLET_ERROR, "Private key not available");
+        }
+
+        std::vector<unsigned char> vchSig;
+        if (!key.SignCompact(ss.GetHash(), vchSig)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Sign failed");
+        }
+        return EncodeBase64(vchSig.data(), vchSig.size());
     }
 
-    CHashWriter ss(SER_GETHASH, 0);
-    ss << strMessageMagic;
-    ss << strMessage;
-
-    std::vector<unsigned char> vchSig;
-    if (!key.SignCompact(ss.GetHash(), vchSig))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Sign failed");
-
-    return EncodeBase64(vchSig.data(), vchSig.size());
 }
 
 UniValue getreceivedbyaddress(const JSONRPCRequest& request)
@@ -2769,6 +2780,7 @@ UniValue getwalletinfo(const JSONRPCRequest& request)
             "  \"unlocked_until\": ttt,           (numeric) the timestamp in seconds since epoch (midnight Jan 1 1970 GMT) that the wallet is unlocked for transfers, or 0 if the wallet is locked\n"
             "  \"paytxfee\": x.xxxx,              (numeric) the transaction fee configuration, set in " + CURRENCY_UNIT + "/kB\n"
             "  \"hdmasterkeyid\": \"<hash160>\"     (string, optional) the Hash160 of the HD master pubkey (only present when HD is enabled)\n"
+            "  \"externalhdkey\": \"<hdpubkey>\"  (string) the extended pubkey used for key derivation in external HD mode\n"
             "}\n"
             "\nExamples:\n"
             + HelpExampleCli("getwalletinfo", "")
@@ -2800,6 +2812,10 @@ UniValue getwalletinfo(const JSONRPCRequest& request)
     }
     if (pwallet->IsCrypted()) {
         obj.push_back(Pair("unlocked_until", pwallet->nRelockTime));
+    }
+    if (pwallet->IsExternalHD()) {
+        CBitcoinExtPubKey watchOnly(pwallet->GetHDChain().externalHD);
+        obj.push_back(Pair("externalhdkey", watchOnly.ToString()));
     }
     obj.push_back(Pair("paytxfee",      ValueFromAmount(payTxFee.GetFeePerK())));
     if (!masterKeyID.IsNull())
@@ -3390,6 +3406,98 @@ UniValue bumpfee(const JSONRPCRequest& request)
     return result;
 }
 
+extern void TxInErrorToJSON(const CTxIn& txin, UniValue& vErrorsRet, const std::string& strMessage);
+
+UniValue signhwwtransaction(const JSONRPCRequest& request)
+{
+    CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
+
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
+        return NullUniValue;
+    }
+
+    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2) {
+        throw std::runtime_error(
+            "signhwwtransaction \"hexstring\" [prevtxs] \n"
+            "\nSign inputs for raw transaction (serialized, hex-encoded).\n"
+            "The second argument is an array of previous transactions that\n"
+            "this transaction depends on but may not yet be in the block chain.\n"
+            "\nArguments:\n"
+            "1. \"hexstring\"     (string, required) The transaction hex string\n"
+            "2. \"prevtxs\"       (string, required) An json array of previous dependent transactions in hex\n"
+            "    [                (json array of strings)"
+            "    ]\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"hex\" : \"value\",           (string) The hex-encoded raw transaction with signature(s)\n"
+            "  \"complete\" : true|false,   (boolean) If the transaction has a complete set of signatures\n"
+            "  \"errors\" : [                 (json array of objects) Script verification errors (if there are any)\n"
+            "    {\n"
+            "      \"txid\" : \"hash\",           (string) The hash of the referenced, previous transaction\n"
+            "      \"vout\" : n,                (numeric) The index of the output to spent and used as input\n"
+            "      \"scriptSig\" : \"hex\",       (string) The hex-encoded signature script\n"
+            "      \"sequence\" : n,            (numeric) Script sequence number\n"
+            "      \"error\" : \"text\"           (string) Verification or signing error related to the input\n"
+            "    }\n"
+            "    ,...\n"
+            "  ]\n"
+            "}\n"
+
+            "\nExamples:\n"
+            + HelpExampleCli("signhwwtransaction", "\"myhex\", \"[prevtxs]\"")
+            + HelpExampleRpc("signhwwtransaction", "\"myhex\", \"[prevtxs]\"")
+        );
+    }
+
+    CMutableTransaction mtx;
+    if (!DecodeHexTx(mtx, request.params[0].get_str(), true)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
+    }
+
+    std::vector<CMutableTransaction> prev_transactions;
+    UniValue prevTxs = request.params[1].get_array();
+    for (unsigned int idx = 0; idx < prevTxs.size(); idx++) {\
+        const std::string prevtx = prevTxs[idx].get_str();
+        CMutableTransaction temp_mtx;
+        if (!DecodeHexTx(temp_mtx, prevtx, true)) {
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "prevtx decode failed");
+        }
+        prev_transactions.push_back(temp_mtx);
+    }
+
+    std::string fail_reason;
+    if (!pwallet->SignHWWTransaction(mtx, fail_reason, mtx, &prev_transactions)) {
+        throw JSONRPCError(RPC_WALLET_ERROR, "Unable to sign transaction.");
+    }
+
+	// Script verification errors
+    UniValue vErrors(UniValue::VARR);
+
+    // Validate the output of signing and give back appropriate errors
+    for (unsigned int i = 0; i < mtx.vin.size(); i++) {
+        CTxIn& txin = mtx.vin[i];
+        const CScript& prevPubKey = prev_transactions[i].vout[txin.prevout.n].scriptPubKey;
+        const CAmount& amount = prev_transactions[i].vout[txin.prevout.n].nValue;
+
+        const CTransaction txNew(mtx);
+        ScriptError serror = SCRIPT_ERR_OK;
+        if (!VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txNew, i, amount), &serror)) {
+            TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
+        }
+    }
+
+    bool fComplete = vErrors.empty();
+
+    UniValue result(UniValue::VOBJ);
+    result.push_back(Pair("hex", EncodeHexTx(mtx)));
+    result.push_back(Pair("complete", fComplete));
+    if (!vErrors.empty()) {
+        result.push_back(Pair("errors", vErrors));
+    }
+
+    return result;
+}
+
 UniValue generate(const JSONRPCRequest& request)
 {
     CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
@@ -3581,6 +3689,7 @@ static const CRPCCommand commands[] =
     { "wallet",             "setaccount",               &setaccount,               {"address","account"} },
     { "wallet",             "settxfee",                 &settxfee,                 {"amount"} },
     { "wallet",             "signmessage",              &signmessage,              {"address","message"} },
+    { "wallet",             "signhwwtransaction",       &signhwwtransaction,       {"hexstring", "prevtxs"} },
     { "wallet",             "walletlock",               &walletlock,               {} },
     { "wallet",             "walletpassphrasechange",   &walletpassphrasechange,   {"oldpassphrase","newpassphrase"} },
     { "wallet",             "walletpassphrase",         &walletpassphrase,         {"passphrase","timeout"} },

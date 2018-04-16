@@ -21,6 +21,7 @@ class CKeyStore : public SigningProvider
 public:
     //! Add a key to the store.
     virtual bool AddKeyPubKey(const CKey &key, const CPubKey &pubkey) =0;
+    virtual bool AddPubKey(const CPubKey &pubkey) =0;
 
     //! Check whether a key corresponding to a given address is present in the store.
     virtual bool HaveKey(const CKeyID &address) const =0;
@@ -45,12 +46,14 @@ protected:
     mutable CCriticalSection cs_KeyStore;
 
     using KeyMap = std::map<CKeyID, CKey>;
+    using PubKeyMap = std::map<CKeyID, CPubKey>;
     using WatchKeyMap = std::map<CKeyID, CPubKey>;
     using ScriptMap = std::map<CScriptID, CScript>;
     using WatchOnlySet = std::set<CScript>;
 
     KeyMap mapKeys GUARDED_BY(cs_KeyStore);
     WatchKeyMap mapWatchKeys GUARDED_BY(cs_KeyStore);
+    PubKeyMap m_external_pubkeys GUARDED_BY(cs_KeyStore);
     ScriptMap mapScripts GUARDED_BY(cs_KeyStore);
     WatchOnlySet setWatchOnly GUARDED_BY(cs_KeyStore);
 
@@ -59,6 +62,7 @@ protected:
 public:
     bool AddKeyPubKey(const CKey& key, const CPubKey &pubkey) override;
     bool AddKey(const CKey &key) { return AddKeyPubKey(key, key.GetPubKey()); }
+    bool AddPubKey(const CPubKey &pubkey) override;
     bool GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) const override;
     bool HaveKey(const CKeyID &address) const override;
     std::set<CKeyID> GetKeys() const override;

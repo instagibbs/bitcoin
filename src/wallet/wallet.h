@@ -33,6 +33,8 @@
 #include <utility>
 #include <vector>
 
+#include <univalue.h>
+
 bool AddWallet(const std::shared_ptr<CWallet>& wallet);
 bool RemoveWallet(const std::shared_ptr<CWallet>& wallet);
 bool HasWallets();
@@ -1231,6 +1233,10 @@ public:
     };
 
 };
+
+/* Sends a JSON-RPC message to the hardware wallet plugin */
+UniValue CallHardwareWallet(const UniValue valRequest);
+
 
 /** A key allocated from the key pool. */
 class CReserveKey final : public CReserveScript

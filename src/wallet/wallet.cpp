@@ -10,6 +10,7 @@
 #include <wallet/coincontrol.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <core_io.h>
 #include <fs.h>
 #include <key.h>
 #include <key_io.h>
@@ -25,6 +26,7 @@
 #include <shutdown.h>
 #include <timedata.h>
 #include <txmempool.h>
+#include <rpc/protocol.h>
 #include <utilmoneystr.h>
 #include <wallet/fees.h>
 #include <wallet/walletutil.h>
@@ -34,8 +36,13 @@
 #include <future>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/process.hpp>
+#include <iostream>
+#include <fstream>
+
 
 static const size_t OUTPUT_GROUP_MAX_ENTRIES = 10;
+
 
 static CCriticalSection cs_wallets;
 static std::vector<std::shared_ptr<CWallet>> vpwallets GUARDED_BY(cs_wallets);
@@ -1578,6 +1585,31 @@ bool CWallet::IsExternalHD() const
 bool CWallet::IsHardwareWallet() const
 {
     return !m_hww_path.empty();
+}
+
+UniValue CallHardwareWallet(const UniValue valRequest)
+{
+    std::string strCommand = gArgs.GetArg("-hardwarewallet", "");
+    std::string strRequest = valRequest.write() + "\n";
+
+    std::future<std::string> strReply;
+
+    boost::asio::io_service ios;
+    boost::process::async_pipe pipe(ios);
+    boost::process::child child(strCommand, boost::process::std_out > strReply, boost::process::std_in < pipe, ios);
+
+    boost::asio::async_write(pipe, boost::process::buffer(strRequest), [&pipe](const boost::system::error_code ec, size_t bytes_transferred) {
+        pipe.close();
+    });
+
+    ios.run();
+
+    UniValue valReply;
+    if (!valReply.read(strReply.get())) {
+        return NullUniValue;
+    }
+
+    return valReply;
 }
 
 void CWallet::SetWalletFlag(uint64_t flags)

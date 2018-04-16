@@ -272,10 +272,39 @@ bool CWallet::AddKeyPubKeyWithDB(WalletBatch &batch, const CKey& secret, const C
     return true;
 }
 
+bool CWallet::AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey)
+{
+    AssertLockHeld(cs_wallet); // mapKeyMetadata
+
+    if (!CBasicKeyStore::AddPubKey(pubkey)) {
+        return false;
+    }
+
+    // check if we need to remove from watch-only
+    CScript script;
+    script = GetScriptForDestination(pubkey.GetID());
+    if (HaveWatchOnly(script)) {
+        RemoveWatchOnly(script);
+    }
+    script = GetScriptForRawPubKey(pubkey);
+    if (HaveWatchOnly(script)) {
+        RemoveWatchOnly(script);
+    }
+
+    // We write to db because we're not handling privkeys
+    return walletdb.WriteHWWKey(pubkey, mapKeyMetadata[pubkey.GetID()]);
+}
+
 bool CWallet::AddKeyPubKey(const CKey& secret, const CPubKey &pubkey)
 {
     WalletBatch batch(*database);
     return CWallet::AddKeyPubKeyWithDB(batch, secret, pubkey);
+}
+
+bool CWallet::AddPubKey(const CPubKey &pubkey)
+{
+    CWalletDB walletdb(*dbw);
+    return CWallet::AddPubKeyWithDB(walletdb, pubkey);
 }
 
 bool CWallet::AddCryptedKey(const CPubKey &vchPubKey,

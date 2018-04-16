@@ -3368,22 +3368,44 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
 
         if (sign)
         {
+
+            // Sign using hww
+            if (IsHardwareWallet()) {
+                if (!SignHWWTransaction(txNew, strFailReason, txNew)) {
+                    strFailReason = _("Hardware wallet signing failed. Make sure the dongle is connected and bitcoin app loaded.");
+                    return false;
+                }
+            }
+
+
+            // Sign using software wallet
             int nIn = 0;
             for (const auto& coin : selected_coins)
             {
                 const CScript& scriptPubKey = coin.txout.scriptPubKey;
                 SignatureData sigdata;
 
-                if (!ProduceSignature(*this, MutableTransactionSignatureCreator(&txNew, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
-                {
-                    strFailReason = _("Signing transaction failed");
-                    return false;
-                } else {
+                if (ProduceSignature(*this, MutableTransactionSignatureCreator(&txNew, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata)) {
                     UpdateInput(txNew.vin.at(nIn), sigdata);
+                }
+                nIn++;
+            }
+            CTransaction txFinalConst(txNew);
+            // See if signing completed
+            nIn = 0;
+            for (const auto& coin : setCoins)
+            {
+                const CScript& scriptPubKey = coin.txout.scriptPubKey;
+
+                ScriptError serror = SCRIPT_ERR_OK;
+                if (!VerifyScript(txNew.vin[nIn].scriptSig, scriptPubKey, &txNew.vin[nIn].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txFinalConst, nIn, coin.txout.nValue), &serror)) {
+                    strFailReason = _("Transaction signing failed.");
+                    return false;
                 }
 
                 nIn++;
             }
+
         }
 
         // Return the constructed transaction data.

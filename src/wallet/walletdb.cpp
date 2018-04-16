@@ -71,6 +71,16 @@ bool WalletBatch::WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey,
     return WriteIC(std::make_pair(std::string("key"), vchPubKey), std::make_pair(vchPrivKey, Hash(vchKey.begin(), vchKey.end())), false);
 }
 
+bool WalletBatch::WriteHWWKey(const CPubKey& vchPubKey, const CKeyMetadata& keyMeta)
+{
+    if (!WriteIC(std::make_pair(std::string("keymeta"), vchPubKey), keyMeta, false)) {
+        return false;
+    }
+
+    return WriteIC(std::make_pair(std::string("hwwkey"), vchPubKey), keyMeta);
+}
+
+
 bool WalletBatch::WriteCryptedKey(const CPubKey& vchPubKey,
                                 const std::vector<unsigned char>& vchCryptedSecret,
                                 const CKeyMetadata &keyMeta)
@@ -232,6 +242,7 @@ public:
     unsigned int nCKeys;
     unsigned int nWatchKeys;
     unsigned int nKeyMeta;
+    unsigned int num_hww_pubkeys;
     unsigned int m_unknown_records;
     bool fIsEncrypted;
     bool fAnyUnordered;
@@ -239,7 +250,7 @@ public:
     std::vector<uint256> vWalletUpgrade;
 
     CWalletScanState() {
-        nKeys = nCKeys = nWatchKeys = nKeyMeta = m_unknown_records = 0;
+        nKeys = nCKeys = nWatchKeys = nKeyMeta = m_unknown_records = num_hww_pubkeys = 0;
         fIsEncrypted = false;
         fAnyUnordered = false;
         nFileVersion = 0;
@@ -429,6 +440,22 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             }
             wss.fIsEncrypted = true;
         }
+        else if (strType == "hwwkey")
+        {
+            CPubKey vchPubKey;
+            ssKey >> vchPubKey;
+            if (!vchPubKey.IsValid())
+            {
+                strErr = "Error reading wallet database: CPubKey corrupt";
+                return false;
+            }
+            wss.num_hww_pubkeys++;
+            if (!pwallet->LoadHWWKey(vchPubKey))
+            {
+                strErr = "Error reading wallet database: LoadKey failed";
+                return false;
+            }
+        }
         else if (strType == "keymeta")
         {
             CPubKey vchPubKey;
@@ -512,6 +539,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             }
         } else if (strType != "bestblock" && strType != "bestblock_nomerkle"){
             wss.m_unknown_records++;
+        }
+        else if (strType == "hww_path")
+        {
+            std::string path;
+            ssValue >> path;
+            pwallet->SetHWW(path, true);
         }
     } catch (...)
     {
@@ -603,8 +636,8 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 
     LogPrintf("nFileVersion = %d\n", wss.nFileVersion);
 
-    LogPrintf("Keys: %u plaintext, %u encrypted, %u w/ metadata, %u total. Unknown wallet records: %u\n",
-           wss.nKeys, wss.nCKeys, wss.nKeyMeta, wss.nKeys + wss.nCKeys, wss.m_unknown_records);
+    LogPrintf("Keys: %u plaintext, %u encrypted, %u w/ metadata, %s hww, %u total. Unknown wallet records: %u\n",
+           wss.nKeys, wss.nCKeys, wss.nKeyMeta, wss.num_hww_pubkeys, wss.nKeys + wss.nCKeys + wss.num_hww_pubkeys, wss.m_unknown_records);
 
     // nTimeFirstKey is only reliable if all keys have metadata
     if ((wss.nKeys + wss.nCKeys + wss.nWatchKeys) != wss.nKeyMeta)
@@ -834,6 +867,10 @@ bool WalletBatch::EraseDestData(const std::string &address, const std::string &k
     return EraseIC(std::make_pair(std::string("destdata"), std::make_pair(address, key)));
 }
 
+bool WalletBatch::WriteHWW(const std::string& derivation_path)
+{
+    return WriteIC(std::string("hww_path"), derivation_path);
+}
 
 bool WalletBatch::WriteHDChain(const CHDChain& chain)
 {

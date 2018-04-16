@@ -1494,6 +1494,39 @@ bool CWallet::SetHDMasterKey(const CPubKey& pubkey)
     return true;
 }
 
+bool CWallet::SetHWW(const std::string& derivation_path, bool mem_only)
+{
+    if (!mem_only && !WalletBatch(*database).WriteHWW(derivation_path)) {
+        throw std::runtime_error(std::string(__func__) + ": writing hww failed");
+    }
+    m_hww_path = derivation_path;
+    return true;
+}
+
+std::string CWallet::GetHWWPath() const
+{
+    return m_hww_path;
+}
+
+bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
+{
+    LOCK(cs_wallet);
+
+    // ensure this wallet.dat can only be opened by clients supporting HD
+    SetMinVersion(FEATURE_EXTERNAL_HD);
+
+    // store the keyid (hash160) together with
+    // the child index counter in the database
+    // as a hdchain object
+    CHDChain newHdChain;
+    newHdChain.masterKeyID = extPubKey.pubkey.GetID();
+    newHdChain.isExternalHD = true;
+    newHdChain.externalHD = extPubKey;
+    SetHDChain(newHdChain, false);
+
+    return true;
+}
+
 bool CWallet::SetHDChain(const CHDChain& chain, bool memonly)
 {
     LOCK(cs_wallet);
@@ -1507,6 +1540,16 @@ bool CWallet::SetHDChain(const CHDChain& chain, bool memonly)
 bool CWallet::IsHDEnabled() const
 {
     return !hdChain.masterKeyID.IsNull();
+}
+
+bool CWallet::IsExternalHD() const
+{
+    return IsHDEnabled() && hdChain.isExternalHD;
+}
+
+bool CWallet::IsHardwareWallet() const
+{
+    return !m_hww_path.empty();
 }
 
 UniValue CallHardwareWallet(const UniValue valRequest)

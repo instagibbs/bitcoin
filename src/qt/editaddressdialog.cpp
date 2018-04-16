@@ -64,6 +64,7 @@ void EditAddressDialog::loadRow(int row)
 
 bool EditAddressDialog::saveCurrentRow()
 {
+    std::string keypath("");
     if(!model)
         return false;
 
@@ -74,7 +75,7 @@ bool EditAddressDialog::saveCurrentRow()
                 AddressTableModel::Send,
                 ui->labelEdit->text(),
                 ui->addressEdit->text(),
-                model->GetDefaultAddressType());
+                model->GetDefaultAddressType(), &ketpath);
         break;
     case EditReceivingAddress:
     case EditSendingAddress:

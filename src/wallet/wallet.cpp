@@ -4081,6 +4081,26 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         walletInstance->SetMaxVersion(nMaxVersion);
     }
 
+
+    std::string externalHd = gArgs.GetArg("-externalhd", "");
+    CExtPubKey extPubKey;
+    if (!externalHd.empty()) {
+        CBitcoinExtPubKey bitcoinExtPubKey(externalHd);
+        extPubKey = bitcoinExtPubKey.GetKey();
+        if (!extPubKey.pubkey.IsFullyValid()) {
+            InitError(_("Invalid ExtPubKey format"));
+            return NULL;
+        }
+
+        if (!fFirstRun) {
+            if (!walletInstance->IsExternalHD() ||
+                walletInstance->GetHDChain().masterKeyID != extPubKey.pubkey.GetID()) {
+                InitError(_("Cannot specify new external hd on an already existing wallet"));
+                return NULL;
+            }
+        }
+    }
+
     if (fFirstRun)
     {
         // ensure this wallet.dat can only be opened by clients supporting HD with chain split and expects no default key
@@ -4090,10 +4110,86 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
         }
         walletInstance->SetMinVersion(FEATURE_NO_DEFAULT_KEY);
 
-        // generate a new master key
-        CPubKey masterPubKey = walletInstance->GenerateNewHDMasterKey();
-        if (!walletInstance->SetHDMasterKey(masterPubKey))
-            throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
+        // generate a new master key, or start up hww
+        if(externalHd.empty()) {
+
+            // Set the fact that the wallet is a hardware-enabled wallet
+            if (gArgs.IsArgSet("-hardwarewallet")) {
+                // We assume BIP44 if none given
+                std::string path = gArgs.GetArg("-derivationpath", "m/44'/0'/0'");
+                // Filter some common derivation path errors
+                if (path.substr(0,2) != "m/" || path.substr(path.size()-1, path.size()) == "/"
+                        || path.find('h') != std::string::npos) {
+                    InitError(_("Derivation path is malformed. Example: m/44'/0'/0'"));
+                    return nullptr;
+                }
+                std::string xpub = "";
+                try {
+                    UniValue params(UniValue::VARR);
+                    params.push_back(path);
+                    params.push_back(Params().NetworkIDString() == "main");
+                    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("getxpub", params, 1));
+
+                    const UniValue& result = find_value(valReply, "result");
+                    const UniValue& error = find_value(valReply, "error");
+
+                    if (error.isNull()) {
+                        const UniValue& xpub_uni = find_value(result, "xpub");
+
+                        // Workaround to get the message back
+                        std::string line;
+                        std::ifstream myReadFile ("xpub.txt");
+                        if (myReadFile.is_open()) {
+                            if ( !getline(myReadFile,line) || remove( "xpub.txt" ) != 0){
+                                InitError(_("Getting xpub from device failed."));
+                                return nullptr;
+                            }
+                            xpub = line;
+                        } else if (xpub_uni.getValStr().empty()) {
+                            InitError(_("Getting xpub from device failed."));
+                            return nullptr;
+                        } else {
+                            // This isn't working for now FIXME
+                            xpub = xpub_uni.getValStr();
+                        }
+                    } else {
+                        InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and device plugged in and unlocked."));
+                        return nullptr;
+                    }
+                } catch (...) {
+                    InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked."));
+                    return nullptr;
+                }
+
+                CBitcoinExtPubKey hww_pubkey(xpub);
+                CExtPubKey ext_hww_pubkey = hww_pubkey.GetKey();
+
+                // Set xpub grabbed from device
+                walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
+                if (!walletInstance->SetExternalHD(ext_hww_pubkey)) {
+                    throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
+                }
+                // Set the path used
+                if (!walletInstance->SetHWW(path, false)) {
+                    throw std::runtime_error(std::string(__func__) + ": Storing hww failed");
+                }
+            } else {
+                CPubKey masterPubKey = walletInstance->GenerateNewHDMasterKey();
+                if (!walletInstance->SetHDMasterKey(masterPubKey))
+                    throw std::runtime_error(std::string(__func__) + ": Storing master key failed");
+            }
+        } else {
+            if (!gArgs.GetArg("-hardwarewallet", "").empty()) {
+                InitError(_("externalhd and hardwarewallet cannot be both set."));
+                return nullptr;
+            }
+
+            walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
+            if (!walletInstance->SetExternalHD(extPubKey)) {
+                throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
+            }
+
+        }
 
         // Top up the keypool
         if (!walletInstance->TopUpKeyPool()) {
@@ -4113,6 +4209,26 @@ CWallet* CWallet::CreateWalletFromFile(const std::string walletFile)
             InitError(strprintf(_("Error loading %s: You can't enable HD on an already existing non-HD wallet"), walletFile));
             return nullptr;
         }
+    }
+
+    if (gArgs.IsArgSet("-hardwarewallet")) {
+        if (!walletInstance->IsExternalHD()) {
+            InitError(_("Cannot specify hardwarewallet on a non-externalhd wallet"));
+            return nullptr;
+        }
+        // Make sure hww was set previously
+        if (!walletInstance->IsHardwareWallet()) {
+            InitError(strprintf(_("Error loading %s: You can't enable hww on already initialized non-hww."), walletFile));
+            return nullptr;
+        }
+        if (gArgs.IsArgSet("-hardwarewallet") && gArgs.GetArg("-derivationpath", "m/44'/0'/0'") != walletInstance->GetHWWPath()) {
+            InitError(strprintf(_("Error loading %s: You can't enable a different `-derivationpath` on an already initialized hww. Fix or remove the argument."), walletFile));
+            return nullptr;
+        }
+
+    } else if (walletInstance->IsHardwareWallet()) {
+        InitError(strprintf(_("Error loading %s: You must provide a -hardwarewallet argument for a hww wallet file."), walletFile));
+        return nullptr;
     }
 
     LogPrintf(" wallet      %15dms\n", GetTimeMillis() - nStart);

@@ -244,7 +244,32 @@ UniValue validateaddress(const JSONRPCRequest& request)
                 if (!meta->hdKeypath.empty()) {
                     ret.push_back(Pair("hdkeypath", meta->hdKeypath));
                     ret.push_back(Pair("hdmasterkeyid", meta->hdMasterKeyID.GetHex()));
+                    if (pwallet->IsHardwareWallet()) {
+                        bool segwit = false;
+                        bool native_segwit = false;
+                        if (!detail["iswitness"].isNull() && detail["iswitness"].get_bool()) {
+                            native_segwit = true;
+                        } else if (!detail["embedded"].isNull() && !detail["embedded"]["iswitness"].isNull()) {
+                            segwit = detail["embedded"]["iswitness"].get_bool();
+                        }
+                        UniValue params(UniValue::VARR);
+                        params.push_back(meta->hdKeypath);
+                        params.push_back(segwit);
+                        params.push_back(native_segwit);
+                        std::string signature;
+                        std::string fail_reason;
+                        if (pwallet->IsHardwareWallet()) {
+                            UniValue is_valid_hww(pwallet->SignHWWMessage("x", dest, signature, fail_reason));
+                            ret.pushKV("hardware_wallet_signature_valid", is_valid_hww);
+                            ret.pushKV("hardware_wallet_signature_error", fail_reason);
+                        }
+                    }
                 }
+            }
+
+            if (pwallet->IsExternalHD()) {
+                CBitcoinExtPubKey externalHD(pwallet->GetHDChain().externalHD);
+                ret.push_back(Pair("externalhdkey", externalHD.ToString()));
             }
         }
 #endif

@@ -59,6 +59,7 @@ public:
 private Q_SLOTS:
     void on_btnCopyURI_clicked();
     void on_btnCopyAddress_clicked();
+    void on_btnShowAddr_clicked();
 
     void update();
 

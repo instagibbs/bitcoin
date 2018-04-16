@@ -42,6 +42,8 @@ public:
     explicit SendCoinsRecipient() : amount(0), fSubtractFeeFromAmount(false), nVersion(SendCoinsRecipient::CURRENT_VERSION) { }
     explicit SendCoinsRecipient(const QString &addr, const QString &_label, const CAmount& _amount, const QString &_message):
         address(addr), label(_label), amount(_amount), message(_message), fSubtractFeeFromAmount(false), nVersion(SendCoinsRecipient::CURRENT_VERSION) {}
+    explicit SendCoinsRecipient(const QString &addr, const QString &_label, const CAmount& _amount, const QString &_message, const int &_nVersion, const QString &_keypath):
+        address(addr), label(_label), amount(_amount), message(_message), fSubtractFeeFromAmount(false), nVersion(_nVersion), keypath(_keypath) {}
 
     // If from an unauthenticated payment request, this is used for storing
     // the addresses, e.g. address-A<br />address-B<br />address-C.
@@ -54,6 +56,8 @@ public:
     // If from a payment request, this is used for storing the memo
     QString message;
 
+    QString keypath;
+
     // If from a payment request, paymentRequest.IsInitialized() will be true
     PaymentRequestPlus paymentRequest;
     // Empty if no authentication or invalid signature/cert/etc.
@@ -62,6 +66,7 @@ public:
     bool fSubtractFeeFromAmount; // memory only
 
     static const int CURRENT_VERSION = 1;
+    static const int EXTERNAL_VERSION = 2;
     int nVersion;
 
     ADD_SERIALIZE_METHODS;
@@ -72,6 +77,7 @@ public:
         std::string sLabel = label.toStdString();
         std::string sMessage = message.toStdString();
         std::string sPaymentRequest;
+        std::string sKeypath = keypath.toStdString();
         if (!ser_action.ForRead() && paymentRequest.IsInitialized())
             paymentRequest.SerializeToString(&sPaymentRequest);
         std::string sAuthenticatedMerchant = authenticatedMerchant.toStdString();
@@ -83,12 +89,18 @@ public:
         READWRITE(sMessage);
         READWRITE(sPaymentRequest);
         READWRITE(sAuthenticatedMerchant);
+        if (this->nVersion == SendCoinsRecipient::EXTERNAL_VERSION) {
+            READWRITE(sKeypath);
+        }
 
         if (ser_action.ForRead())
         {
             address = QString::fromStdString(sAddress);
             label = QString::fromStdString(sLabel);
             message = QString::fromStdString(sMessage);
+            if (this->nVersion == SendCoinsRecipient::EXTERNAL_VERSION) {
+                keypath = QString::fromStdString(sKeypath);
+            }
             if (!sPaymentRequest.empty())
                 paymentRequest.parse(QByteArray::fromRawData(sPaymentRequest.data(), sPaymentRequest.size()));
             authenticatedMerchant = QString::fromStdString(sAuthenticatedMerchant);
@@ -168,6 +180,10 @@ public:
     bool changePassphrase(const SecureString &oldPass, const SecureString &newPass);
     // Wallet backup
     bool backupWallet(const QString &filename);
+
+    bool IsHardwareWallet() const;
+
+    bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason);
 
     // RAI object for unlocking wallet, returned by requestUnlock()
     class UnlockContext

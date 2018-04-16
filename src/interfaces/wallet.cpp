@@ -151,6 +151,18 @@ public:
     {
         return m_wallet.DelAddressBook(dest);
     }
+    bool IsHardwareWallet()
+    {
+        return m_wallet.IsHardwareWallet();
+    }
+    std::map<CKeyID, CKeyMetadata>& getMapKeyMetadata() override
+    {
+        return m_wallet.mapKeyMetadata;
+    }
+    bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason) override
+    {
+        m_wallet.SignHWWMessage(message, dest, signature, fail_reason);
+    }
     bool getAddress(const CTxDestination& dest,
         std::string* name,
         isminetype* is_mine,

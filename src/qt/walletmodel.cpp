@@ -572,3 +572,13 @@ bool WalletModel::isMultiwallet()
 {
     return m_node.getWallets().size() > 1;
 }
+
+bool WalletModel::IsHardwareWallet() const
+{
+    return m_wallet->IsHardwareWallet();
+}
+
+bool WalletModel::SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason)
+{
+    return m_wallet->SignHWWMessage(message, dest, signature, fail_reason);
+}

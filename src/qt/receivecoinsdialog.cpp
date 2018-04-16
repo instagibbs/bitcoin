@@ -143,6 +143,7 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
 
     QString address;
     QString label = ui->reqLabel->text();
+    std::string keypath;
     /* Generate new receiving address */
     OutputType address_type;
     if (ui->useBech32->isChecked()) {
@@ -153,9 +154,14 @@ void ReceiveCoinsDialog::on_receiveButton_clicked()
             address_type = OutputType::P2SH_SEGWIT;
         }
     }
-    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "", address_type);
+    address = model->getAddressTableModel()->addRow(AddressTableModel::Receive, label, "", address_type, &keypath);
     SendCoinsRecipient info(address, label,
         ui->reqAmount->value(), ui->reqMessage->text());
+    // non-empty keypath implies IsExternalHD
+    if (!keypath.empty()) {
+        info = SendCoinsRecipient(address, label,
+            ui->reqAmount->value(), ui->reqMessage->text(), 2 /* EXTERNAL_VERSION */, QString::fromStdString(keypath));
+    }
     ReceiveRequestDialog *dialog = new ReceiveRequestDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setModel(model);

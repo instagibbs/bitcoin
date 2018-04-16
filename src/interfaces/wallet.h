@@ -11,6 +11,7 @@
 #include <script/standard.h>           // For CTxDestination
 #include <support/allocators/secure.h> // For SecureString
 #include <ui_interface.h>              // For ChangeType
+#include <wallet/walletdb.h>                  // for CKeyMetadata
 
 #include <functional>
 #include <map>
@@ -165,6 +166,12 @@ public:
         CMutableTransaction&& mtx,
         std::vector<std::string>& errors,
         uint256& bumped_txid) = 0;
+
+    virtual std::map<CKeyID, CKeyMetadata>& getMapKeyMetadata() = 0;
+
+    virtual bool IsHardwareWallet() = 0;
+
+    virtual bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason) = 0;
 
     //! Get a transaction.
     virtual CTransactionRef getTx(const uint256& txid) = 0;

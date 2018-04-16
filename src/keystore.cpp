@@ -41,7 +41,12 @@ bool CBasicKeyStore::GetPubKey(const CKeyID &address, CPubKey &vchPubKeyOut) con
     CKey key;
     if (!GetKey(address, key)) {
         LOCK(cs_KeyStore);
-        WatchKeyMap::const_iterator it = mapWatchKeys.find(address);
+        PubKeyMap::const_iterator it = m_external_pubkeys.find(address);
+        if (it != m_external_pubkeys.end()) {
+            vchPubKeyOut = it->second;
+            return true;
+        }
+        it = mapWatchKeys.find(address);
         if (it != mapWatchKeys.end()) {
             vchPubKeyOut = it->second;
             return true;
@@ -60,10 +65,18 @@ bool CBasicKeyStore::AddKeyPubKey(const CKey& key, const CPubKey &pubkey)
     return true;
 }
 
+bool CBasicKeyStore::AddPubKey(const CPubKey &pubkey)
+{
+    LOCK(cs_KeyStore);
+    m_external_pubkeys[pubkey.GetID()] = pubkey;
+    ImplicitlyLearnRelatedKeyScripts(pubkey);
+    return true;
+}
+
 bool CBasicKeyStore::HaveKey(const CKeyID &address) const
 {
     LOCK(cs_KeyStore);
-    return mapKeys.count(address) > 0;
+    return mapKeys.count(address) > 0 || m_external_pubkeys.count(address) > 0;
 }
 
 std::set<CKeyID> CBasicKeyStore::GetKeys() const

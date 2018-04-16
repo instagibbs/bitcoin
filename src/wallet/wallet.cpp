@@ -1641,6 +1641,235 @@ UniValue CallHardwareWallet(const UniValue valRequest)
     return valReply;
 }
 
+bool CWallet::TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs) const
+{
+    entry.pushKV("txid", tx.GetHash().GetHex());
+    entry.pushKV("hash", tx.GetWitnessHash().GetHex());
+    entry.pushKV("version", tx.nVersion);
+    entry.pushKV("size", (int)::GetSerializeSize(tx, SER_NETWORK, PROTOCOL_VERSION));
+    entry.pushKV("vsize", (GetTransactionWeight(tx) + WITNESS_SCALE_FACTOR - 1) / WITNESS_SCALE_FACTOR);
+    entry.pushKV("locktime", (int64_t)tx.nLockTime);
+
+    UniValue vin(UniValue::VARR);
+    for (const CTxIn& txin : tx.vin) {
+        UniValue in(UniValue::VOBJ);
+
+        in.pushKV("txid", txin.prevout.hash.GetHex());
+        in.pushKV("vout", (int64_t)txin.prevout.n);
+        in.pushKV("sequence", (int64_t)txin.nSequence);
+
+        UniValue o(UniValue::VOBJ);
+        o.pushKV("asm", ScriptToAsmStr(txin.scriptSig, true));
+        o.pushKV("hex", HexStr(txin.scriptSig.begin(), txin.scriptSig.end()));
+        in.pushKV("scriptSig", o);
+
+        if (!txin.scriptWitness.IsNull()) {
+            UniValue txinwitness(UniValue::VARR);
+            for (const auto& item : txin.scriptWitness.stack) {
+                txinwitness.push_back(HexStr(item.begin(), item.end()));
+            }
+            in.pushKV("txinwitness", txinwitness);
+        }
+
+        const CWalletTx *wtx = GetWalletTx(txin.prevout.hash);
+
+        if (wtx != NULL) {
+            const CTxOut& prevout = wtx->tx->vout[txin.prevout.n];
+
+            CTxDestination address;
+            if (ExtractDestination(prevout.scriptPubKey, address)) {
+                CKeyID key_id = GetKeyForDestination(*this, address);
+                if (!key_id.IsNull()) {
+                    auto it = mapKeyMetadata.find(key_id);
+                    if (it != mapKeyMetadata.end()) {
+                        in.pushKV("hdKeypath", it->second.hdKeypath);
+                    }
+                }
+            }
+            UniValue prevtx(UniValue::VOBJ);
+            TransactionToHWWUniv(*wtx->tx, prevtx);
+            // Return whatever prev transactions you can
+            if (prevtxs) {
+                prevtxs->push_back(prevtx);
+            }
+        } else {
+            if (prevtxs) {
+                prevtxs->push_back(NullUniValue);
+            }
+        }
+
+        vin.push_back(in);
+    }
+    entry.pushKV("vin", vin);
+
+    UniValue vout(UniValue::VARR);
+    for (unsigned int i = 0; i < tx.vout.size(); i++) {
+        const CTxOut& txout = tx.vout[i];
+        UniValue out(UniValue::VOBJ);
+
+        out.pushKV("value", txout.nValue);
+        out.pushKV("n", (int64_t)i);
+
+        UniValue o(UniValue::VOBJ);
+        ScriptPubKeyToUniv(txout.scriptPubKey, o, true);
+        out.pushKV("scriptPubKey", o);
+
+        if (IsChange(txout)) {
+            CTxDestination address;
+            if (ExtractDestination(txout.scriptPubKey, address)) {
+                CKeyID key_id = GetKeyForDestination(*this, address);
+                if (!key_id.IsNull()) {
+                    auto it = mapKeyMetadata.find(key_id);
+                    if (it != mapKeyMetadata.end()) {
+                        out.pushKV("hdKeypath", it->second.hdKeypath);
+                    }
+                }
+            }
+        }
+
+        vout.push_back(out);
+    }
+    entry.pushKV("vout", vout);
+
+    entry.pushKV("hex", EncodeHexTx(tx)); // the hex-encoded transaction. used the name "hex" to be consistent with the verbose output of "getrawtransaction".
+
+    return true;
+}
+
+bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason)
+{
+    assert(IsHardwareWallet());
+    UniValue params(UniValue::VARR);
+    signature = "";
+
+    CKeyID key_id = GetKeyForDestination(*this, dest);
+    if (!key_id.IsNull()) {
+        auto it = mapKeyMetadata.find(key_id);
+        if (it != mapKeyMetadata.end()) {
+            if (!it->second.hdKeypath.empty()) {
+                params.push_back(it->second.hdKeypath);
+            } else {
+                fail_reason = _("Keypath not known by wallet");
+            }
+        }
+    } else {
+        fail_reason = _("Private key not known to this externalhd wallet");
+        return false;
+    }
+
+    params.push_back(message);
+    params.push_back(boost::get<CScriptID>(&dest) ? true : false);
+    params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
+
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& signature_uni = find_value(result, "signature");
+
+        // Workaround to get the message back
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                fail_reason = _("Signing message to file failed");
+                return false;
+            }
+            signature = line;
+        } else if (signature_uni.getValStr().empty()) {
+            fail_reason = _("Signing message failed");
+            return false;
+        } else {
+            // This isn't working for now FIXME
+            signature = signature_uni.getValStr();
+        }
+    }
+
+    // Validate signature
+    bool fInvalid = false;
+    std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
+
+    if (fInvalid) {
+        fail_reason = _("Signature not in valid Base64 encoding.");
+        return false;
+    }
+
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << strMessageMagic;
+    ss << message;
+
+    CPubKey pubkey;
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || (pubkey.GetID() != key_id)) {
+        fail_reason = _("Invalid signature.");
+        return false;
+    }
+
+    return true;
+}
+
+bool CWallet::SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet, const std::vector<CMutableTransaction>* prev_txns) const
+{
+    UniValue params(UniValue::VARR);
+
+    UniValue tx(UniValue::VOBJ);
+    UniValue prevtxs(UniValue::VARR);
+
+    if (!prev_txns && !TransactionToHWWUniv(transaction, tx, &prevtxs)) {
+        strFailReason = "Could not decode main transaction for signing";
+        return false;
+    } else if (prev_txns && TransactionToHWWUniv(transaction, tx, nullptr)) {
+        for (unsigned int i = 0; i < prev_txns->size(); i++) {
+            UniValue prev_tx(UniValue::VOBJ);
+            if (!TransactionToHWWUniv((*prev_txns)[i], prev_tx, nullptr)) {
+                strFailReason = "Could not decode prevtxs";
+                return false;
+            }
+            prevtxs.push_back(prev_tx);
+        }
+    }
+
+    params.push_back(tx.write());
+    params.push_back(prevtxs.write());
+
+    const std::string strMethod = "signhwwtransaction";
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj(strMethod, params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& hex = find_value(result, "hex");
+
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                strFailReason = _("Signing transaction to file failed");
+                return false;
+            }
+            if (!DecodeHexTx(txRet, line)) {
+                strFailReason = _("Malformed signed transaction failed");
+                return false;
+            } else {
+                return true;
+            }
+        }
+
+        if (!DecodeHexTx(txRet, hex.getValStr())) {
+            strFailReason = _("Signing transaction failed");
+
+            return false;
+        } else {
+            return true;
+        }
+    } else {
+        strFailReason = find_value(error, "message").getValStr();
+        return false;
+    }
+}
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;

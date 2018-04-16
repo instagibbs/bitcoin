@@ -18,6 +18,7 @@
 #include <wallet/crypter.h>
 #include <wallet/walletdb.h>
 #include <wallet/rpcwallet.h>
+#include "base58.h"
 
 #include <algorithm>
 #include <atomic>
@@ -80,6 +81,7 @@ class CScript;
 class CScheduler;
 class CTxMemPool;
 class CBlockPolicyEstimator;
+class CChainParams;
 class CWalletTx;
 struct FeeCalculation;
 enum class FeeEstimateMode;
@@ -1043,6 +1045,8 @@ public:
     CAmount GetChange(const CTransaction& tx) const;
     void SetBestChain(const CBlockLocator& loc) override;
 
+    bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason);
+
     DBErrors LoadWallet(bool& fFirstRunRet);
     DBErrors ZapWalletTx(std::vector<CWalletTx>& vWtx);
     DBErrors ZapSelectTx(std::vector<uint256>& vHashIn, std::vector<uint256>& vHashOut);
@@ -1150,6 +1154,10 @@ public:
     bool IsExternalHD() const;
     /* Returns true if this wallet is for a hardware wallet */
     bool IsHardwareWallet() const;
+    /* Converts transaction to hardware wallet plugin UniValue */
+    bool TransactionToHWWUniv(const CTransaction& tx, UniValue& entry, UniValue *prevtxs = NULL) const;
+    /* Produces a signed transaction using the hardware wallet */
+    bool SignHWWTransaction(const CTransaction& transaction, std::string& strFailReason, CMutableTransaction& txRet, const std::vector<CMutableTransaction>* prev_txns = nullptr) const;
 
     /* Generates a new HD master key (will not be activated) */
     CPubKey GenerateNewHDMasterKey();

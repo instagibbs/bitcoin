@@ -25,6 +25,7 @@ public:
 
     //! Add a key to the store.
     virtual bool AddKeyPubKey(const CKey &key, const CPubKey &pubkey) =0;
+    virtual bool AddPubKey(const CPubKey &pubkey) =0;
     virtual bool AddKey(const CKey &key);
 
     //! Check whether a key corresponding to a given address is present in the store.
@@ -47,7 +48,7 @@ public:
 };
 
 typedef std::map<CKeyID, CKey> KeyMap;
-typedef std::map<CKeyID, CPubKey> WatchKeyMap;
+typedef std::map<CKeyID, CPubKey> PubKeyMap;
 typedef std::map<CScriptID, CScript > ScriptMap;
 typedef std::set<CScript> WatchOnlySet;
 
@@ -56,7 +57,8 @@ class CBasicKeyStore : public CKeyStore
 {
 protected:
     KeyMap mapKeys;
-    WatchKeyMap mapWatchKeys;
+    PubKeyMap m_external_pubkeys;
+    PubKeyMap mapWatchKeys;
     ScriptMap mapScripts;
     WatchOnlySet setWatchOnly;
 
@@ -64,6 +66,7 @@ protected:
 
 public:
     bool AddKeyPubKey(const CKey& key, const CPubKey &pubkey) override;
+    bool AddPubKey(const CPubKey &pubkey) override;
     bool GetPubKey(const CKeyID &address, CPubKey& vchPubKeyOut) const override;
     bool HaveKey(const CKeyID &address) const override;
     std::set<CKeyID> GetKeys() const override;

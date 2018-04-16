@@ -29,6 +29,8 @@
 #include <utility>
 #include <vector>
 
+#include <univalue.h>
+
 typedef CWallet* CWalletRef;
 extern std::vector<CWalletRef> vpwallets;
 
@@ -1187,6 +1189,10 @@ public:
      */
     CTxDestination AddAndGetDestinationForScript(const CScript& script, OutputType);
 };
+
+/* Sends a JSON-RPC message to the hardware wallet plugin */
+UniValue CallHardwareWallet(const UniValue valRequest);
+
 
 /** A key allocated from the key pool. */
 class CReserveKey final : public CReserveScript

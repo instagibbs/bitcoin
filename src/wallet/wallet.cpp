@@ -11,6 +11,7 @@
 #include <wallet/coincontrol.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <core_io.h>
 #include <fs.h>
 #include <wallet/init.h>
 #include <key.h>
@@ -27,6 +28,7 @@
 #include <timedata.h>
 #include <txmempool.h>
 #include <util.h>
+#include <rpc/protocol.h>
 #include <utilmoneystr.h>
 #include <wallet/fees.h>
 
@@ -34,7 +36,11 @@
 #include <future>
 
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/process.hpp>
 #include <boost/thread.hpp>
+
+#include <iostream>
+#include <fstream>
 
 std::vector<CWalletRef> vpwallets;
 /** Transaction fee set by the user */
@@ -1568,6 +1574,31 @@ bool CWallet::IsExternalHD() const
 bool CWallet::IsHardwareWallet() const
 {
     return !m_hww_path.empty();
+}
+
+UniValue CallHardwareWallet(const UniValue valRequest)
+{
+    std::string strCommand = gArgs.GetArg("-hardwarewallet", "");
+    std::string strRequest = valRequest.write() + "\n";
+
+    std::future<std::string> strReply;
+
+    boost::asio::io_service ios;
+    boost::process::async_pipe pipe(ios);
+    boost::process::child child(strCommand, boost::process::std_out > strReply, boost::process::std_in < pipe, ios);
+
+    boost::asio::async_write(pipe, boost::process::buffer(strRequest), [&pipe](const boost::system::error_code ec, size_t bytes_transferred) {
+        pipe.close();
+    });
+
+    ios.run();
+
+    UniValue valReply;
+    if (!valReply.read(strReply.get())) {
+        return NullUniValue;
+    }
+
+    return valReply;
 }
 
 int64_t CWalletTx::GetTxTime() const

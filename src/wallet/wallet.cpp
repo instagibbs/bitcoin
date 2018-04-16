@@ -1431,7 +1431,13 @@ bool CWallet::IsChange(const CTxOut& txout) const
                 auto it = mapKeyMetadata.find(key_id);
                 if (it != mapKeyMetadata.end()) {
                     // Check for path
-                    if (it->second.hdKeypath.find("m/0'/1'/") != std::string::npos) {
+                    std::string path_to_check = "m/0'/1'/";
+                    if (IsHardwareWallet()) {
+                        path_to_check = m_hww_path+"/1/";
+                    } else if (IsExternalHD()) {
+                        path_to_check = "m/1/";
+                    }
+                    if (it->second.hdKeypath.find(path_to_check) != std::string::npos) {
                         return true;
                     }
                 }

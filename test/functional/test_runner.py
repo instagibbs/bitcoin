@@ -128,6 +128,7 @@ BASE_SCRIPTS= [
     'wallet_resendwallettransactions.py',
     'feature_minchainwork.py',
     'p2p_fingerprint.py',
+    'feature_externalhd.py',
     'feature_uacomment.py',
     'p2p_unrequested_blocks.py',
     'feature_logging.py',

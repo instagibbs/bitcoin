@@ -732,7 +732,7 @@ private:
     std::string m_hww_path;
 
     /* HD derive new child key (on internal or external chain) */
-    void DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& metadata, CKey& secret, bool internal = false) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    void DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& metadata, CKey& secret, CPubKey& pubkey, bool internal = false)  EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
 
     std::set<int64_t> setInternalKeyPool;
     std::set<int64_t> setExternalKeyPool;

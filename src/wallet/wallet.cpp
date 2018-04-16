@@ -189,16 +189,18 @@ CPubKey CWallet::GenerateNewKey(WalletBatch &batch, bool internal)
     bool fCompressed = CanSupportFeature(FEATURE_COMPRPUBKEY); // default to compressed public keys if we want 0.6.0 wallets
 
     CKey secret;
-
+    CPubKey pubkey;
     // Create new metadata
     int64_t nCreationTime = GetTime();
     CKeyMetadata metadata(nCreationTime);
 
     // use HD key derivation if HD was enabled during wallet creation
     if (IsHDEnabled()) {
-        DeriveNewChildKey(batch, metadata, secret, (CanSupportFeature(FEATURE_HD_SPLIT) ? internal : false));
+        DeriveNewChildKey(batch, metadata, secret, pubkey, (CanSupportFeature(FEATURE_HD_SPLIT) ? internal : false));
     } else {
         secret.MakeNewKey(fCompressed);
+        pubkey = secret.GetPubKey();
+        assert(secret.VerifyPubKey(pubkey));
     }
 
     // Compressed public keys were introduced in version 0.6.0
@@ -206,62 +208,98 @@ CPubKey CWallet::GenerateNewKey(WalletBatch &batch, bool internal)
         SetMinVersion(FEATURE_COMPRPUBKEY);
     }
 
-    CPubKey pubkey = secret.GetPubKey();
-    assert(secret.VerifyPubKey(pubkey));
-
     mapKeyMetadata[pubkey.GetID()] = metadata;
     UpdateTimeFirstKey(nCreationTime);
 
-    if (!AddKeyPubKeyWithDB(batch, secret, pubkey)) {
+    if (!secret.IsValid()) {
+        if (!AddPubKeyWithDB(batch, pubkey)) {
+            throw std::runtime_error(std::string(__func__) + ": AddPubKey failed");
+        }
+    } else if (!AddKeyPubKeyWithDB(batch, secret, pubkey)) {
         throw std::runtime_error(std::string(__func__) + ": AddKey failed");
     }
     return pubkey;
 }
 
-void CWallet::DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& metadata, CKey& secret, bool internal)
+void CWallet::DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& metadata, CKey& secret, CPubKey& pubkey, bool internal)
 {
-    // for now we use a fixed keypath scheme of m/0'/0'/k
     CKey seed;                     //seed (256bit)
-    CExtKey masterKey;             //hd master key
-    CExtKey accountKey;            //key at m/0'
-    CExtKey chainChildKey;         //key at m/0'/0' (external) or m/0'/1' (internal)
-    CExtKey childKey;              //key at m/0'/0'/<n>'
+    // try to get the master key
+    if (GetKey(hdChain.seed_id, seed)) {
+        // for now we use a fixed keypath scheme of m/0'/0'/k
+        CExtKey masterKey;             //hd master key
+        CExtKey accountKey;            //key at m/0'
+        CExtKey chainChildKey;         //key at m/0'/0' (external) or m/0'/1' (internal)
+        CExtKey childKey;              //key at m/0'/0'/<n>'
 
-    // try to get the seed
-    if (!GetKey(hdChain.seed_id, seed))
-        throw std::runtime_error(std::string(__func__) + ": seed not found");
+        masterKey.SetSeed(seed.begin(), seed.size());
+        // derive m/0'
+        // use hardened derivation (child keys >= 0x80000000 are hardened after bip32)
+        masterKey.Derive(accountKey, BIP32_HARDENED_KEY_LIMIT);
 
-    masterKey.SetSeed(seed.begin(), seed.size());
+        // derive m/0'/0' (external chain) OR m/0'/1' (internal chain)
+        assert(internal ? CanSupportFeature(FEATURE_HD_SPLIT) : true);
+        accountKey.Derive(chainChildKey, BIP32_HARDENED_KEY_LIMIT + (internal ? 1 : 0));
 
-    // derive m/0'
-    // use hardened derivation (child keys >= 0x80000000 are hardened after bip32)
-    masterKey.Derive(accountKey, BIP32_HARDENED_KEY_LIMIT);
-
-    // derive m/0'/0' (external chain) OR m/0'/1' (internal chain)
-    assert(internal ? CanSupportFeature(FEATURE_HD_SPLIT) : true);
-    accountKey.Derive(chainChildKey, BIP32_HARDENED_KEY_LIMIT+(internal ? 1 : 0));
-
-    // derive child key at next index, skip keys already known to the wallet
-    do {
-        // always derive hardened keys
-        // childIndex | BIP32_HARDENED_KEY_LIMIT = derive childIndex in hardened child-index-range
-        // example: 1 | BIP32_HARDENED_KEY_LIMIT == 0x80000001 == 2147483649
-        if (internal) {
-            chainChildKey.Derive(childKey, hdChain.nInternalChainCounter | BIP32_HARDENED_KEY_LIMIT);
-            metadata.hdKeypath = "m/0'/1'/" + std::to_string(hdChain.nInternalChainCounter) + "'";
-            hdChain.nInternalChainCounter++;
+        // derive child key at next index, skip keys already known to the wallet
+        do {
+            // always derive hardened keys
+            // childIndex | BIP32_HARDENED_KEY_LIMIT = derive childIndex in hardened child-index-range
+            // example: 1 | BIP32_HARDENED_KEY_LIMIT == 0x80000001 == 2147483649
+            if (internal) {
+                chainChildKey.Derive(childKey, hdChain.nInternalChainCounter | BIP32_HARDENED_KEY_LIMIT);
+                metadata.hdKeypath = "m/0'/1'/" + std::to_string(hdChain.nInternalChainCounter) + "'";
+                hdChain.nInternalChainCounter++;
+            } else {
+                chainChildKey.Derive(childKey, hdChain.nExternalChainCounter | BIP32_HARDENED_KEY_LIMIT);
+                metadata.hdKeypath = "m/0'/0'/" + std::to_string(hdChain.nExternalChainCounter) + "'";
+                hdChain.nExternalChainCounter++;
+            }
+        } while (HaveKey(childKey.key.GetPubKey().GetID()));
+        secret = childKey.key;
+        pubkey = childKey.key.GetPubKey();
+        metadata.hd_seed_id = hdChain.seed_id;
+        // update the chain model in the database
+        if (!batch.WriteHDChain(hdChain)) {
+            throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
         }
-        else {
-            chainChildKey.Derive(childKey, hdChain.nExternalChainCounter | BIP32_HARDENED_KEY_LIMIT);
-            metadata.hdKeypath = "m/0'/0'/" + std::to_string(hdChain.nExternalChainCounter) + "'";
-            hdChain.nExternalChainCounter++;
+    } else if (IsExternalHD()) {
+        CExtPubKey& masterKey = hdChain.externalHD;             //hd master key
+        CExtPubKey chainChildKey;         //key at m/0 (external) or m/1 (internal)
+        CExtPubKey childKey;              //key at m/0/<n>
+
+        // derive m/x
+        masterKey.Derive(chainChildKey, internal ? 1 : 0);
+
+        // derive child key at next index, skip keys already known to the wallet
+        do {
+            if (internal) {
+                chainChildKey.Derive(childKey, hdChain.nInternalChainCounter);
+                if (IsHardwareWallet()) {
+                    metadata.hdKeypath = m_hww_path+"/1/" + std::to_string(hdChain.nInternalChainCounter);
+                } else {
+                    metadata.hdKeypath = "m/1/" + std::to_string(hdChain.nInternalChainCounter);
+                }
+                hdChain.nInternalChainCounter++;
+            } else {
+                chainChildKey.Derive(childKey, hdChain.nExternalChainCounter);
+                if (IsHardwareWallet()) {
+                    metadata.hdKeypath = m_hww_path+"/0/" + std::to_string(hdChain.nExternalChainCounter);
+                } else {
+                    metadata.hdKeypath = "m/0/" + std::to_string(hdChain.nExternalChainCounter);
+                }
+                hdChain.nExternalChainCounter++;
+            }
+            metadata.hd_seed_id = hdChain.seed_id;
+        } while (HaveKey(childKey.pubkey.GetID()));
+        pubkey = childKey.pubkey;
+        // update the chain model in the database
+        if (!batch.WriteHDChain(hdChain)) {
+            throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
         }
-    } while (HaveKey(childKey.key.GetPubKey().GetID()));
-    secret = childKey.key;
-    metadata.hd_seed_id = hdChain.seed_id;
-    // update the chain model in the database
-    if (!batch.WriteHDChain(hdChain))
-        throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
+    } else {
+        throw std::runtime_error(std::string(__func__) + ": Master key not found");
+    }
 }
 
 bool CWallet::AddKeyPubKeyWithDB(WalletBatch &batch, const CKey& secret, const CPubKey &pubkey)

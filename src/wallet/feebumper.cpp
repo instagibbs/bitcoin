@@ -233,7 +233,19 @@ Result CreateTransaction(const CWallet* wallet, const uint256& txid, const CCoin
 
 bool SignTransaction(CWallet* wallet, CMutableTransaction& mtx) {
     LOCK2(cs_main, wallet->cs_wallet);
-    return wallet->SignTransaction(mtx);
+    // Bumping can only be done in the case of the wallet knowing all input
+    // transactions, and all keys either on HWW xor inside wallet db
+    if (wallet->IsHardwareWallet()) {
+        const CTransaction txn = mtx;
+        std::string fail_reason;
+        if (!wallet->SignHWWTransaction(txn, fail_reason, mtx)) {
+            return false;
+        }
+        return true;
+    } else {
+        return wallet->SignTransaction(mtx);
+    }
+
 }
 
 Result CommitTransaction(CWallet* wallet, const uint256& txid, CMutableTransaction&& mtx, std::vector<std::string>& errors, uint256& bumped_txid)

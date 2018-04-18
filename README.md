@@ -83,7 +83,8 @@ Translators should also subscribe to the [mailing list](https://groups.google.co
 
 ### Running Hardware Wallet
 
-
 Setting `externalhd=<xpub>` on first run of the wallet creates a wallet of those funds at that account level. Typically this will be an xpub for a BIP44 wallet. The funds will not be spendable from within the wallet.
 
 Setting `hardwarewallet=<file in datadir>` on the first run extracts the extended pubkey at `derivationpath=<path>`(BIP44 default: m/44'/0'/0'), generates the relevant keys, and calls out to the hardware wallet driver for various functionality. Currently the only driver available is for Ledger Nano S, and a copy is stored in `/contrib` folder. Users can simply copy it to whatever desired location you set. When this option is set, users can also use the signmessage functionality, in `-cli` and `-qt`, as well as show the address on device, through `validateaddress` on `-cli` or the `Show address` button on payment request window.
+
+A sample bitcoind configuration file is included in the `/contrib` directory named `ledger.conf`, with BIP49(p2sh segwit) options selected by default. Simply copy the appropriate lines to your configuration file to use them.

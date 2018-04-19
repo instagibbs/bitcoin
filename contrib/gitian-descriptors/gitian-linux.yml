@@ -178,6 +178,8 @@ script: |
 
     make install DESTDIR=${INSTALLPATH}
     cd installed
+    cp ../../contrib/bitcoin-hww-ledger.py ${DISTNAME}/bitcoin-hww-ledger.py
+    cp ../../contrib/ledger.conf ${DISTNAME}/ledger.conf
     find . -name "lib*.la" -delete
     find . -name "lib*.a" -delete
     rm -rf ${DISTNAME}/lib/pkgconfig

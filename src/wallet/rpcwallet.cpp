@@ -30,6 +30,7 @@
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 #include <wallet/walletutil.h>
+#include <wallet/fees.h>
 
 #include <init.h>  // For StartShutdown
 
@@ -3607,11 +3608,46 @@ UniValue bumpfee(const JSONRPCRequest& request)
     EnsureWalletIsUnlocked(pwallet);
 
 
+    // TODO stick this back into transaction creation!!!
+    // and just re-use change key. Privacy is busted regardless
+    // later we can do new keys with proper interface
+    auto it = pwallet->mapWallet.find(hash);
+    if (it == pwallet->mapWallet.end()) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid or non-wallet transaction id");
+    }
+
+    // Select all inputs previously spent as mandatory coins
+    coin_control.fAllowOtherInputs = true;
+    for (auto& input : it->second.tx->vin) {
+        coin_control.Select(input.prevout);
+    }
+
+    // Cannot replace a transaction with its own outputs
+    for (size_t i = 0; i <  it->second.tx->vout.size(); i++) {
+        coin_control.Exclude(COutPoint(it->second.tx->GetHash(), i));
+    }
+
+    int64_t txSize = GetVirtualTransactionSize(*(it->second.tx));
+    CAmount old_fee = it->second.GetDebit(ISMINE_SPENDABLE) - it->second.tx->GetValueOut();
+    CFeeRate nOldFeeRate(old_fee, txSize);
+
+    CFeeRate walletIncrementalRelayFee = CFeeRate(WALLET_INCREMENTAL_RELAY_FEE);
+    if (::incrementalRelayFee > walletIncrementalRelayFee) {
+        walletIncrementalRelayFee = ::incrementalRelayFee;
+    }
+
+    CFeeRate new_feerate(GetMinimumFeeRate(*pwallet, coin_control, mempool, ::feeEstimator, nullptr /* FeeCalculation */));
+    if (new_feerate.GetFeePerK() < nOldFeeRate.GetFeePerK() + 1 + walletIncrementalRelayFee.GetFeePerK()) {
+    	new_feerate = CFeeRate(nOldFeeRate.GetFeePerK() + 1 + walletIncrementalRelayFee.GetFeePerK());
+	}
+
+    coin_control.m_feerate = new_feerate;
+
     std::vector<std::string> errors;
-    CAmount old_fee;
     CAmount new_fee;
     CMutableTransaction mtx;
-    feebumper::Result res = feebumper::CreateTransaction(pwallet, hash, coin_control, totalFee, errors, old_fee, new_fee, mtx);
+    CReserveKey reservekey(pwallet);
+    feebumper::Result res = feebumper::CreateTransaction(pwallet, it->second, coin_control, totalFee, errors, old_fee, new_fee, mtx, reservekey);
     if (res != feebumper::Result::OK) {
         switch(res) {
             case feebumper::Result::INVALID_ADDRESS_OR_KEY:
@@ -3638,7 +3674,7 @@ UniValue bumpfee(const JSONRPCRequest& request)
     }
     // commit the bumped transaction
     uint256 txid;
-    if (feebumper::CommitTransaction(pwallet, hash, std::move(mtx), errors, txid) != feebumper::Result::OK) {
+    if (feebumper::CommitTransaction(pwallet, hash, std::move(mtx), errors, txid, reservekey) != feebumper::Result::OK) {
         throw JSONRPCError(RPC_WALLET_ERROR, errors[0]);
     }
     UniValue result(UniValue::VOBJ);

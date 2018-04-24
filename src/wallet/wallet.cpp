@@ -2351,6 +2351,10 @@ void CWallet::AvailableCoins(std::vector<COutput> &vCoins, bool fOnlySafe, const
             if (IsSpent(wtxid, i))
                 continue;
 
+            if (coinControl && coinControl->HasExcluded() && coinControl->IsExcluded(COutPoint(pcoin->tx->GetHash(), i))) {
+                continue;
+            }
+
             isminetype mine = IsMine(pcoin->tx->vout[i]);
 
             if (mine == ISMINE_NO) {

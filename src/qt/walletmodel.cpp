@@ -490,8 +490,10 @@ bool WalletModel::bumpFee(uint256 hash)
     std::vector<std::string> errors;
     CAmount old_fee;
     CAmount new_fee;
+    // TODO figure out CReserveKey interaction with interface
+    CReserveKey reservekey;
     CMutableTransaction mtx;
-    if (!m_wallet->createBumpTransaction(hash, coin_control, 0 /* totalFee */, errors, old_fee, new_fee, mtx)) {
+    if (!m_wallet->createBumpTransaction(hash, coin_control, 0 /* totalFee */, errors, old_fee, new_fee, mtx, reservekey)) {
         QMessageBox::critical(0, tr("Fee bump error"), tr("Increasing transaction fee failed") + "<br />(" +
             (errors.size() ? QString::fromStdString(errors[0]) : "") +")");
          return false;
@@ -536,7 +538,7 @@ bool WalletModel::bumpFee(uint256 hash)
     }
     // commit the bumped transaction
     uint256 txid;
-    if(!m_wallet->commitBumpTransaction(hash, std::move(mtx), errors, txid)) {
+    if(!m_wallet->commitBumpTransaction(hash, std::move(mtx), errors, txid, reservekey)) {
         QMessageBox::critical(0, tr("Fee bump error"), tr("Could not commit transaction") + "<br />(" +
             QString::fromStdString(errors[0])+")");
          return false;

@@ -24,6 +24,7 @@
 #include <wallet/feebumper.h>
 #include <wallet/fees.h>
 #include <wallet/wallet.h>
+#include <wallet/coincontrol.h>
 
 namespace interfaces {
 namespace {
@@ -237,23 +238,38 @@ public:
         return feebumper::TransactionCanBeBumped(&m_wallet, txid);
     }
     bool createBumpTransaction(const uint256& txid,
-        const CCoinControl& coin_control,
+        CCoinControl& coin_control,
         CAmount total_fee,
         std::vector<std::string>& errors,
         CAmount& old_fee,
         CAmount& new_fee,
-        CMutableTransaction& mtx) override
+        CMutableTransaction& mtx,
+        CReserveKey& reservekey) override
     {
-        return feebumper::CreateTransaction(&m_wallet, txid, coin_control, total_fee, errors, old_fee, new_fee, mtx) ==
+        //CCoinControl coin_control2;
+		// TODO stick this back into transaction creation?
+		auto it = m_wallet.mapWallet.find(txid);
+		if (it == m_wallet.mapWallet.end()) {
+            errors.push_back("Invalid or non-wallet transaction id");
+            return false;
+		}
+		// Select all inputs previously spent as mandatory coins
+		coin_control.fAllowOtherInputs = true;
+		for (auto& input : mtx.vin) {
+			coin_control.Select(input.prevout);
+		}
+
+        return feebumper::CreateTransaction(&m_wallet, it->second, coin_control, total_fee, errors, old_fee, new_fee, mtx, reservekey) ==
                feebumper::Result::OK;
     }
     bool signBumpTransaction(CMutableTransaction& mtx) override { return feebumper::SignTransaction(&m_wallet, mtx); }
     bool commitBumpTransaction(const uint256& txid,
         CMutableTransaction&& mtx,
         std::vector<std::string>& errors,
-        uint256& bumped_txid) override
+        uint256& bumped_txid,
+        CReserveKey& reservekey) override
     {
-        return feebumper::CommitTransaction(&m_wallet, txid, std::move(mtx), errors, bumped_txid) ==
+        return feebumper::CommitTransaction(&m_wallet, txid, std::move(mtx), errors, bumped_txid, reservekey) ==
                feebumper::Result::OK;
     }
     CTransactionRef getTx(const uint256& txid) override

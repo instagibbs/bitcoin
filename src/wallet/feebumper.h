@@ -11,6 +11,7 @@ class CWallet;
 class CWalletTx;
 class uint256;
 class CCoinControl;
+class CReserveKey;
 enum class FeeEstimateMode;
 
 namespace feebumper {
@@ -29,14 +30,15 @@ enum class Result
 bool TransactionCanBeBumped(const CWallet* wallet, const uint256& txid);
 
 //! Create bumpfee transaction.
-Result CreateTransaction(const CWallet* wallet,
-                         const uint256& txid,
+Result CreateTransaction(CWallet* wallet,
+                         const CWalletTx& tx_to_bump,
                          const CCoinControl& coin_control,
                          CAmount total_fee,
                          std::vector<std::string>& errors,
                          CAmount& old_fee,
                          CAmount& new_fee,
-                         CMutableTransaction& mtx);
+                         CMutableTransaction& mtx,
+                         CReserveKey& reservekey);
 
 //! Sign the new transaction,
 //! @return false if the tx couldn't be found or if it was
@@ -51,7 +53,8 @@ Result CommitTransaction(CWallet* wallet,
                          const uint256& txid,
                          CMutableTransaction&& mtx,
                          std::vector<std::string>& errors,
-                         uint256& bumped_txid);
+                         uint256& bumped_txid,
+                         CReserveKey& reservekey);
 
 } // namespace feebumper
 

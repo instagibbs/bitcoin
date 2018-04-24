@@ -52,6 +52,7 @@ public:
         m_confirm_target.reset();
         m_signal_bip125_rbf.reset();
         m_fee_mode = FeeEstimateMode::UNSET;
+        m_excluded_coins.clear();
     }
 
     bool HasSelected() const
@@ -84,8 +85,39 @@ public:
         vOutpoints.assign(setSelected.begin(), setSelected.end());
     }
 
+    bool HasExcluded() const
+    {
+        return (m_excluded_coins.size() > 0);
+    }
+
+    bool IsExcluded(const COutPoint& output) const
+    {
+        return (m_excluded_coins.count(output) > 0);
+    }
+
+    void Exclude(const COutPoint& output)
+    {
+        m_excluded_coins.insert(output);
+    }
+
+    void Unexclude(const COutPoint& output)
+    {
+        m_excluded_coins.erase(output);
+    }
+
+    void ListExcluded(std::vector<COutPoint>& outputs) const
+    {
+        outputs.assign(m_excluded_coins.begin(), m_excluded_coins.end());
+    }
+
+    void UnexcludeAll()
+    {
+        m_excluded_coins.clear();
+    }
+
 private:
     std::set<COutPoint> setSelected;
+    std::set<COutPoint> m_excluded_coins;
 };
 
 #endif // BITCOIN_WALLET_COINCONTROL_H

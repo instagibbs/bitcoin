@@ -99,6 +99,26 @@ Result CreateTransaction(CWallet* wallet, const CWalletTx& tx_to_bump, const CCo
 
     // TODO blacklist outputs in this transaction from being sourced in AvailableCoins:
     // coin_control.m_excluded_coins
+    //
+    // TODO Have CreateTransaction take into account that it needs to be BIP125 compatible
+    // aka fees of new transaction MUST be relay_fee*nbytes + old_fee
+    // Easiest implementation is to use WALLET_INCREMENTAL_RELAY_FEE (5 sat/byte default)
+    // for new tx bytes selected
+    // and target the old_fee total during coin selection, reserving this for fee explicitly
+    // *But*, new conf target may "dominate" this, depending on how many inputs it picks.
+    // Maybe just make new transaction using the conf target
+    // During coin selection, we know how much fees we're going to end up with.
+    // If we hit target amount but fees insufficient, keep going, dumping required amount to fees.
+    // This only really works with SRD, is that ok?
+    // In some cases, you'll hit your destination amount, and have change that can be re-balanced
+    // to hit total fee target. If dumping the whole amount isn't enough, you have to select more.
+    //
+    // For CPFP, mandatory spend the output(and only the output? coin selection can deal with that)
+    // but must be unspent. (new_tx_feerate - old_tx_feerate)*old_nbytes = total extra destination
+    // amount, otherwise target feerate in new tx construction. Dump the total extra to additional
+    // fee
+    //
+    // With both CPFP and RBF at disposal, make whatever bump you can, compare total cost, take min.
 
     if (!wallet->CreateTransaction(recipients, new_tx, reservekey, total_fee, change_pos, fail_reason, coin_control, false)) {
         errors.push_back(fail_reason);

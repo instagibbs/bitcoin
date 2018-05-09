@@ -64,8 +64,19 @@ static bool MatchMultisig(const CScript& script, unsigned int& required, std::ve
     CScript::const_iterator it = script.begin();
     if (script.size() < 1 || script.back() != OP_CHECKMULTISIG) return false;
 
-    if (!script.GetOp(it, opcode, data) || (opcode != OP_0 && (opcode < OP_1 || opcode > OP_16))) return false;
-    required = CScript::DecodeOP_N(opcode);
+    if (!script.GetOp(it, opcode, data)) return false;
+    if  (opcode == OP_0 || (opcode >= OP_1 && opcode <= OP_16)) {
+        required = CScript::DecodeOP_N(opcode);
+        // Single byte push for 17-20, don't enforce minimal push
+    } else if (opcode == 0x01) {
+        if (CScriptNum(vch1, false).getint() >= 17 && CScriptNum(vch1, false).getint() <= 20) {
+            required = CScriptNum(vch1, false).getint();
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
     while (script.GetOp(it, opcode, data) && CPubKey::ValidSize(data)) {
         pubkeys.emplace_back(std::move(data));
     }

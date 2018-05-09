@@ -69,8 +69,8 @@ static bool MatchMultisig(const CScript& script, unsigned int& required, std::ve
         required = CScript::DecodeOP_N(opcode);
         // Single byte push for 17-20, don't enforce minimal push
     } else if (opcode == 0x01) {
-        if (CScriptNum(vch1, false).getint() >= 17 && CScriptNum(vch1, false).getint() <= 20) {
-            required = CScriptNum(vch1, false).getint();
+        if (CScriptNum(data, false).getint() >= 17 && CScriptNum(data, false).getint() <= 20) {
+            required = CScriptNum(data, false).getint();
         } else {
             return false;
         }
@@ -80,8 +80,19 @@ static bool MatchMultisig(const CScript& script, unsigned int& required, std::ve
     while (script.GetOp(it, opcode, data) && CPubKey::ValidSize(data)) {
         pubkeys.emplace_back(std::move(data));
     }
-    if (opcode != OP_0 && (opcode < OP_1 || opcode > OP_16)) return false;
-    unsigned int keys = CScript::DecodeOP_N(opcode);
+    unsigned int keys;
+    if  (opcode == OP_0 || (opcode >= OP_1 && opcode <= OP_16)) {
+        keys = CScript::DecodeOP_N(opcode);
+        // Single byte push for 17-20, don't enforce minimal push
+    } else if (opcode == 0x01) {
+        if (CScriptNum(data, false).getint() >= 17 && CScriptNum(data, false).getint() <= 20) {
+            keys = CScriptNum(data, false).getint();
+        } else {
+            return false;
+        }
+    } else {
+        return false;
+    }
     if (pubkeys.size() != keys || required == 0 || keys < required) return false;
     if (it + 1 != script.end()) return false;
     return true;

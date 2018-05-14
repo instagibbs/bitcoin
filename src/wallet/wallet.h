@@ -32,6 +32,8 @@
 #include <utility>
 #include <vector>
 
+#include <univalue.h>
+
 bool AddWallet(CWallet* wallet);
 bool RemoveWallet(CWallet* wallet);
 bool HasWallets();

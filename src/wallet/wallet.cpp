@@ -1506,6 +1506,31 @@ bool CWallet::IsHDEnabled() const
     return !hdChain.masterKeyID.IsNull();
 }
 
+UniValue CallHardwareWallet(const UniValue valRequest)
+{
+    std::string strCommand = gArgs.GetArg("-hardwarewallet", "");
+    std::string strRequest = valRequest.write() + "\n";
+
+    std::future<std::string> strReply;
+
+    boost::asio::io_service ios;
+    boost::process::async_pipe pipe(ios);
+    boost::process::child child(strCommand, boost::process::std_out > strReply, boost::process::std_in < pipe, ios);
+
+    boost::asio::async_write(pipe, boost::process::buffer(strRequest), [&pipe](const boost::system::error_code ec, size_t bytes_transferred) {
+        pipe.close();
+    });
+
+    ios.run();
+
+    UniValue valReply;
+    if (!valReply.read(strReply.get())) {
+        return NullUniValue;
+    }
+
+    return valReply;
+}
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;

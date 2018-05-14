@@ -1156,6 +1156,9 @@ public:
     bool OutputEligibleForSpending(const COutput& output, const CoinEligibilityFilter& eligibility_filter) const;
 };
 
+/* Sends a JSON-RPC message to the hardware wallet plugin */
+UniValue CallHardwareWallet(const UniValue valRequest);
+
 /** A key allocated from the key pool. */
 class CReserveKey final : public CReserveScript
 {

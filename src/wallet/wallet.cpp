@@ -4257,8 +4257,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string& name, const fs::path& 
     std::string externalHd = gArgs.GetArg("-externalhd", "");
     CExtPubKey extPubKey;
     if (!externalHd.empty()) {
-        CBitcoinExtPubKey bitcoinExtPubKey(externalHd);
-        extPubKey = bitcoinExtPubKey.GetKey();
+        extPubKey = DecodeExtPubKey(externalHd);
         if (!extPubKey.pubkey.IsFullyValid()) {
             InitError(_("Invalid ExtPubKey format"));
             return NULL;
@@ -4333,8 +4332,7 @@ CWallet* CWallet::CreateWalletFromFile(const std::string& name, const fs::path& 
                     return nullptr;
                 }
 
-                CBitcoinExtPubKey hww_pubkey(xpub);
-                CExtPubKey ext_hww_pubkey = hww_pubkey.GetKey();
+                CExtPubKey ext_hww_pubkey(DecodeExtPubKey(xpub));
 
                 // Set xpub grabbed from device
                 walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);

@@ -1,5 +1,9 @@
 # Ledger interaction script
 
+from jsonrpc import JSONRPCResponseManager, Dispatcher
+import logging
+import json
+
 from hwi import HardwareWalletClient
 from btchip.btchip import *
 from btchip.btchipUtils import *
@@ -207,3 +211,11 @@ class LedgerClient(HardwareWalletClient):
 
 # Avoid circular imports
 from hwi import HardwareWalletClient
+
+dispatcher = Dispatcher({
+})
+
+logging.basicConfig()
+request = sys.stdin.read()
+response = JSONRPCResponseManager.handle(request, dispatcher)
+print(response.json)

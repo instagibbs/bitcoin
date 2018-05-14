@@ -213,6 +213,7 @@ class LedgerClient(HardwareWalletClient):
 from hwi import HardwareWalletClient
 
 dispatcher = Dispatcher({
+    "signmessage": signmessage,
 })
 
 logging.basicConfig()

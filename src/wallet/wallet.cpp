@@ -1534,6 +1534,78 @@ UniValue CallHardwareWallet(const UniValue valRequest)
     return valReply;
 }
 
+bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason)
+{
+    UniValue params(UniValue::VARR);
+    signature = "";
+
+    CKeyID key_id = GetKeyForDestination(*this, dest);
+    if (!key_id.IsNull()) {
+        auto it = mapKeyMetadata.find(key_id);
+        if (it != mapKeyMetadata.end()) {
+            if (!it->second.hdKeypath.empty()) {
+                params.push_back(it->second.hdKeypath);
+            } else {
+                fail_reason = _("Keypath not known by wallet");
+            }
+        }
+    } else {
+        fail_reason = _("Private key not known to this externalhd wallet");
+        return false;
+    }
+
+    params.push_back(message);
+    params.push_back(boost::get<CScriptID>(&dest) ? true : false);
+    params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
+
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj("signmessage", params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& signature_uni = find_value(result, "signature");
+
+        // Workaround to get the message back
+        std::string line;
+        std::ifstream myReadFile ("writeout.txt");
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+                fail_reason = _("Signing message to file failed");
+                return false;
+            }
+            signature = line;
+        } else if (signature_uni.getValStr().empty()) {
+            fail_reason = _("Signing message failed");
+            return false;
+        } else {
+            // This isn't working for now FIXME
+            signature = signature_uni.getValStr();
+        }
+    }
+
+    // Validate signature
+    bool fInvalid = false;
+    std::vector<unsigned char> vchSig = DecodeBase64(signature.c_str(), &fInvalid);
+
+    if (fInvalid) {
+        fail_reason = _("Signature not in valid Base64 encoding.");
+        return false;
+    }
+
+    CHashWriter ss(SER_GETHASH, 0);
+    ss << strMessageMagic;
+    ss << message;
+
+    CPubKey pubkey;
+    if (!pubkey.RecoverCompact(ss.GetHash(), vchSig) || (pubkey.GetID() != key_id)) {
+        fail_reason = _("Invalid signature.");
+        return false;
+    }
+
+    return true;
+}
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;

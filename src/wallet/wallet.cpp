@@ -1607,6 +1607,68 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
     return true;
 }
 
+bool CWallet::SignHWWPSBT(PartiallySignedTransaction& psbt, std::string& strFailReason) const
+{
+    UniValue params(UniValue::VARR);
+
+    // Serialize the PSBT
+    CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
+    ssTx << psbt;
+    params.push_back(HexStr(ssTx.begin(), ssTx.end()));
+
+    const std::string strMethod = "signtransaction";
+    UniValue valReply = CallHardwareWallet(JSONRPCRequestObj(strMethod, params, 1));
+
+    const UniValue& result = find_value(valReply, "result");
+    const UniValue& error = find_value(valReply, "error");
+
+    if (error.isNull()) {
+        const UniValue& hex = find_value(result, "hex");
+
+        std::string line;
+        std::ifstream myReadFile ("signpsbt.txt");
+        PartiallySignedTransaction signed_psbt;
+        if (myReadFile.is_open()) {
+            if ( !getline(myReadFile,line) || remove( "signpsbt.txt" ) != 0){
+                strFailReason = _("Signing transaction to file failed");
+                return false;
+            }
+            std::vector<unsigned char> txData(ParseHex(line));
+            CDataStream ssData(txData, SER_NETWORK, PROTOCOL_VERSION);
+            try {
+                ssData >> signed_psbt;
+                if (!ssData.empty()) {
+                    strFailReason = "TX decode failed, extra data after PSBT";
+                    return false;
+                }
+            } catch (...) {
+                strFailReason = "PSBT returned from hww is malformed";
+                return false;
+            }
+            psbt = signed_psbt;
+            return true;
+        }
+        std::vector<unsigned char> txData(ParseHex(hex.getValStr()));
+        CDataStream ssData(txData, SER_NETWORK, PROTOCOL_VERSION);
+        try {
+            ssData >> signed_psbt;
+            if (!ssData.empty()) {
+                strFailReason = "TX decode failed, extra data after PSBT";
+                return false;
+            }
+        } catch (...) {
+                strFailReason = "PSBT returned from hww is malformed";
+                return false;
+        }
+        psbt = signed_psbt;
+        return true;
+    } else {
+        strFailReason = find_value(error, "message").getValStr();
+        return false;
+    }
+}
+
+
 int64_t CWalletTx::GetTxTime() const
 {
     int64_t n = nTimeSmart;

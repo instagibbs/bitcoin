@@ -1019,6 +1019,8 @@ public:
 
     bool SignHWWMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason);
 
+    bool SignHWWPSBT(PartiallySignedTransaction& psbt, std::string& strFailReason) const;
+
     DBErrors LoadWallet(bool& fFirstRunRet);
     DBErrors ZapWalletTx(std::vector<CWalletTx>& vWtx);
     DBErrors ZapSelectTx(std::vector<uint256>& vHashIn, std::vector<uint256>& vHashOut);

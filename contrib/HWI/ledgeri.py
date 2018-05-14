@@ -220,6 +220,7 @@ from hwi import HardwareWalletClient
 dispatcher = Dispatcher({
     "signmessage": sign_message,
     "getxpub": get_pubkey_at_path,
+    "signtransaction": sign_tx,
 })
 
 logging.basicConfig()

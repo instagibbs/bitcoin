@@ -178,10 +178,10 @@ class LedgerClient(HardwareWalletClient):
 
     # Must return a base64 encoded string with the signed message
     # The message can be any string
-    def sign_message(self, message, keypath):
+    def sign_message(self, message, keypath, segwit, native):
         keypath = keypath[2:]
         # First display on screen what address you're signing for
-        self.app.getWalletPublicKey(keypath, True)
+        self.app.getWalletPublicKey(keypath, True, segwit, native)
         self.app.signMessagePrepare(keypath, message)
         signature = self.app.signMessageSign()
 
@@ -213,7 +213,7 @@ class LedgerClient(HardwareWalletClient):
 from hwi import HardwareWalletClient
 
 dispatcher = Dispatcher({
-    "signmessage": signmessage,
+    "signmessage": sign_message,
 })
 
 logging.basicConfig()

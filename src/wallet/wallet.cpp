@@ -1539,6 +1539,8 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
     UniValue params(UniValue::VARR);
     signature = "";
 
+    params.push_back(message);
+
     CKeyID key_id = GetKeyForDestination(*this, dest);
     if (!key_id.IsNull()) {
         auto it = mapKeyMetadata.find(key_id);
@@ -1554,7 +1556,6 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
         return false;
     }
 
-    params.push_back(message);
     params.push_back(boost::get<CScriptID>(&dest) ? true : false);
     params.push_back(boost::get<WitnessV0KeyHash>(&dest) ? true : false);
 

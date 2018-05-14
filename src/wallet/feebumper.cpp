@@ -218,7 +218,10 @@ bool SignTransaction(CWallet* wallet, CMutableTransaction& mtx) {
     if (wallet->IsHardwareWallet()) {
         const CTransaction txn = mtx;
         std::string fail_reason;
-        if (!wallet->SignHWWTransaction(txn, fail_reason, mtx)) {
+        PartiallySignedTransaction psbt;
+        psbt.SetNull();
+        fill_psbt(wallet, psbt, &txn, true);
+        if (!wallet->SignHWWPSBT(psbt, fail_reason)) {
             return false;
         }
         return true;

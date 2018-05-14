@@ -4824,3 +4824,239 @@ CTxDestination CWallet::AddAndGetDestinationForScript(const CScript& script, Out
     default: assert(false);
     }
 }
+
+bool parse_hd_keypath(std::string keypath_str, std::vector<uint32_t>& keypath)
+{
+    std::stringstream ss(keypath_str);
+    std::string item;
+    bool first = true;
+    while (std::getline(ss, item, '/')) {
+        if (item.compare("m") == 0) {
+            if (first) {
+                first = false;
+                continue;
+            } else {
+                return false;
+            }
+        }
+        // Finds whether it is hardened
+        uint32_t path = 0;
+        size_t pos = item.find("'");
+        if (pos != std::string::npos) {
+            // The hardened tick can only be in the last index of the string
+            if (pos != item.size() - 1) {
+                return false;
+            }
+            path |= 0x80000000;
+            item = item.substr(0, item.size() - 1); // Drop the last character which is the hardened tick
+        }
+
+        // Ensure this is only numbers
+        for (auto& c : item) {
+            if (!std::isdigit(c)) {
+                return false;
+            }
+        }
+        uint32_t number;
+        ParseUInt32(item, &number);
+        path |= number;
+
+        keypath.push_back(path);
+        first = false;
+    }
+    return true;
+}
+
+void add_keypath_to_map(const CWallet* pwallet, const CKeyID& keyID, std::map<CPubKey, std::vector<uint32_t>>& hd_keypaths)
+{
+    CPubKey vchPubKey;
+    pwallet->GetPubKey(keyID, vchPubKey);
+    CKeyMetadata meta;
+    auto it = pwallet->mapKeyMetadata.find(keyID);
+    if (it != pwallet->mapKeyMetadata.end()) {
+        meta = it->second;
+    }
+    if (!meta.hdKeypath.empty()) {
+        std::vector<uint32_t> keypath;
+        if (!parse_hd_keypath(meta.hdKeypath, keypath)) {
+            throw JSONRPCError(RPC_INTERNAL_ERROR, "Internal keypath is broken");
+        }
+        // Get the proper master key id
+        CKey key;
+        pwallet->GetKey(meta.hdMasterKeyID, key);
+        CExtKey masterKey;
+        masterKey.SetMaster(key.begin(), key.size());
+        // Add to map
+        keypath.insert(keypath.begin(), masterKey.key.GetPubKey().GetID().GetUint32(0));
+        hd_keypaths.emplace(vchPubKey, keypath);
+    }
+}
+
+void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const CTransaction* txConst, bool include_output_info)
+{
+    // Get all of the previous transactions
+    bool psbtx_blank = psbtx.IsNull();
+    for (unsigned int i = 0; i < txConst->vin.size(); ++i) {
+        CTxIn txin = txConst->vin[i];
+        PartiallySignedInput input;
+        if (!psbtx_blank) {
+            input = psbtx.inputs.at(i);
+        }
+
+        // If this input is not empty, skip it
+        if (!psbtx_blank && (!input.IsNull() || txin.scriptSig.empty() || txin.scriptWitness.IsNull())) {
+            continue;
+        }
+
+        uint256 txhash = txin.prevout.hash;
+
+        // If we don't know about this input, skip it and let someone else deal with it
+        if (!pwallet->mapWallet.count(txhash)) {
+            if (psbtx_blank) {
+                psbtx.inputs.push_back(input);
+            }
+            continue;
+        }
+        const CWalletTx& wtx = pwallet->mapWallet.at(txhash);
+        const CTransaction& ctx = *wtx.tx;
+
+        // Get scriptpubkey and check for redeemScript or witnessscript
+        CTxOut prevout = ctx.vout[txin.prevout.n];
+        txnouttype type;
+        std::vector<std::vector<unsigned char>> solns;
+        Solver(prevout.scriptPubKey, type, solns);
+        // Get script hashes
+        if (type == TX_SCRIPTHASH) {
+            // get the hash and find it in the wallet.
+            CScript redeem_script;
+            uint160 hash(solns[0]);
+            pwallet->GetCScript(CScriptID(hash), redeem_script);
+
+            // put redeem_script in map
+            psbtx.redeem_scripts.emplace(hash, redeem_script);
+
+            // Now check whether the redeem_script is a witness script
+            solns.clear();
+            Solver(redeem_script, type, solns);
+        }
+        // Get witness scripts
+        bool witness = false;
+        if (type == TX_WITNESS_V0_SCRIPTHASH) {
+            witness = true;
+            // Get the hash from the solver return
+            uint160 hash;
+            CRIPEMD160().Write(&solns[0][0], solns[0].size()).Finalize(hash.begin());
+
+            // Lookup hash from wallet
+            CScript witness_script;
+            pwallet->GetCScript(CScriptID(hash), witness_script);
+
+            // Put witness script in map
+            uint256 hash256(solns[0]);
+            psbtx.witness_scripts.emplace(hash256, witness_script);
+
+            // Decode the witness script
+            solns.clear();
+            Solver(witness_script, type, solns);
+        }
+        // Get public keys if hd is enabled
+        if (pwallet->IsHDEnabled()) {
+            if (type == TX_PUBKEYHASH || type == TX_WITNESS_V0_KEYHASH) {
+                uint160 hash(solns[0]);
+                CKeyID keyID(hash);
+                add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+            } else if (type == TX_PUBKEY) {
+                CPubKey vchPubKey(solns[0]);
+                CKeyID keyID = vchPubKey.GetID();
+                add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+            } else if (type == TX_MULTISIG) {
+                for (auto& soln : solns) {
+                    CPubKey vchPubKey(soln);
+                    CKeyID keyID = vchPubKey.GetID();
+                    add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                }
+            }
+        }
+
+        // Put the witness utxo for witness outputs
+        if (witness || type == TX_WITNESS_V0_KEYHASH || type == TX_WITNESS_V0_SCRIPTHASH || type == TX_WITNESS_UNKNOWN) {
+            // Put the witness CTxOut in the input
+            input.witness_utxo = prevout;
+        }
+        // Not witness, put non witness utxo
+        else {
+            input.non_witness_utxo = wtx.tx;
+        }
+
+        if (psbtx_blank) {
+            // Add to inputs
+            psbtx.inputs.push_back(input);
+        }
+    }
+
+    // Fill in the bip32 keypaths and redeemscripts for the outputs so that hardware wallets can identify change
+    if (include_output_info) {
+        for (const CTxOut& out : txConst->vout) {
+            // Get scriptpubkey and check for redeemScript or witnessscript
+            txnouttype type;
+            std::vector<std::vector<unsigned char>> solns;
+            Solver(out.scriptPubKey, type, solns);
+            // Get script hashes
+            if (type == TX_SCRIPTHASH) {
+                // get the hash and find it in the wallet.
+                CScript redeem_script;
+                uint160 hash(solns[0]);
+                if (!pwallet->GetCScript(CScriptID(hash), redeem_script)) {
+                    // We don't have this script, skip it
+                    continue;
+                }
+
+                // put redeem_script in map
+                psbtx.redeem_scripts.emplace(hash, redeem_script);
+
+                // Now check whether the redeem_script is a witness script
+                solns.clear();
+                Solver(redeem_script, type, solns);
+            }
+            // Get witness scripts
+            if (type == TX_WITNESS_V0_SCRIPTHASH) {
+                // Get the hash from the solver return
+                uint160 hash;
+                CRIPEMD160().Write(&solns[0][0], solns[0].size()).Finalize(hash.begin());
+
+                // Lookup hash from wallet
+                CScript witness_script;
+                if (!pwallet->GetCScript(CScriptID(hash), witness_script)) {
+                    // We don't have this script, skip it
+                    continue;
+                }
+
+                // Put witness script in map
+                uint256 hash256(solns[0]);
+                psbtx.witness_scripts.emplace(hash256, witness_script);
+
+                // Decode the witness script
+                solns.clear();
+                Solver(witness_script, type, solns);
+            }
+            // Get public keys if hd is enabled
+            if (pwallet->IsHDEnabled()) {
+                if (type == TX_PUBKEYHASH || type == TX_WITNESS_V0_KEYHASH) {
+                    uint160 hash(solns[0]);
+                    CKeyID keyID(hash);
+                    add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                } else if (type == TX_PUBKEY) {
+                    CPubKey vchPubKey(solns[0]);
+                    CKeyID keyID = vchPubKey.GetID();
+                    add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                } else if (type == TX_MULTISIG) {
+                    for (auto& soln : solns) {
+                        CPubKey vchPubKey(soln);
+                        CKeyID keyID = vchPubKey.GetID();
+                        add_keypath_to_map(pwallet, keyID, psbtx.hd_keypaths);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -2973,8 +2973,7 @@ UniValue getwalletinfo(const JSONRPCRequest& request)
     }
     obj.pushKV("paytxfee", ValueFromAmount(pwallet->m_pay_tx_fee.GetFeePerK()));
     if (pwallet->IsExternalHD()) {
-        CBitcoinExtPubKey watchOnly(pwallet->GetHDChain().externalHD);
-        obj.push_back(Pair("externalhdkey", watchOnly.ToString()));
+        obj.push_back(Pair("externalhdkey", EncodeExtPubKey(pwallet->GetHDChain().externalHD)));
     }
     if (!masterKeyID.IsNull())
         obj.pushKV("hdmasterkeyid", masterKeyID.GetHex());
@@ -3632,98 +3631,6 @@ UniValue bumpfee(const JSONRPCRequest& request)
     return result;
 }
 
-extern void TxInErrorToJSON(const CTxIn& txin, UniValue& vErrorsRet, const std::string& strMessage);
-
-UniValue signhwwtransaction(const JSONRPCRequest& request)
-{
-    CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
-
-    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
-        return NullUniValue;
-    }
-
-    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2) {
-        throw std::runtime_error(
-            "signhwwtransaction \"hexstring\" [prevtxs] \n"
-            "\nSign inputs for raw transaction (serialized, hex-encoded).\n"
-            "The second argument is an array of previous transactions that\n"
-            "this transaction depends on but may not yet be in the block chain.\n"
-            "\nArguments:\n"
-            "1. \"hexstring\"     (string, required) The transaction hex string\n"
-            "2. \"prevtxs\"       (string, required) An json array of previous dependent transactions in hex\n"
-            "    [                (json array of strings)"
-            "    ]\n"
-            "\nResult:\n"
-            "{\n"
-            "  \"hex\" : \"value\",           (string) The hex-encoded raw transaction with signature(s)\n"
-            "  \"complete\" : true|false,   (boolean) If the transaction has a complete set of signatures\n"
-            "  \"errors\" : [                 (json array of objects) Script verification errors (if there are any)\n"
-            "    {\n"
-            "      \"txid\" : \"hash\",           (string) The hash of the referenced, previous transaction\n"
-            "      \"vout\" : n,                (numeric) The index of the output to spent and used as input\n"
-            "      \"scriptSig\" : \"hex\",       (string) The hex-encoded signature script\n"
-            "      \"sequence\" : n,            (numeric) Script sequence number\n"
-            "      \"error\" : \"text\"           (string) Verification or signing error related to the input\n"
-            "    }\n"
-            "    ,...\n"
-            "  ]\n"
-            "}\n"
-
-            "\nExamples:\n"
-            + HelpExampleCli("signhwwtransaction", "\"myhex\", \"[prevtxs]\"")
-            + HelpExampleRpc("signhwwtransaction", "\"myhex\", \"[prevtxs]\"")
-        );
-    }
-
-    CMutableTransaction mtx;
-    if (!DecodeHexTx(mtx, request.params[0].get_str(), true)) {
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "TX decode failed");
-    }
-
-    std::vector<CMutableTransaction> prev_transactions;
-    UniValue prevTxs = request.params[1].get_array();
-    for (unsigned int idx = 0; idx < prevTxs.size(); idx++) {\
-        const std::string prevtx = prevTxs[idx].get_str();
-        CMutableTransaction temp_mtx;
-        if (!DecodeHexTx(temp_mtx, prevtx, true)) {
-            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "prevtx decode failed");
-        }
-        prev_transactions.push_back(temp_mtx);
-    }
-
-    std::string fail_reason;
-    if (!pwallet->SignHWWTransaction(mtx, fail_reason, mtx, &prev_transactions)) {
-        throw JSONRPCError(RPC_WALLET_ERROR, "Unable to sign transaction.");
-    }
-
-	// Script verification errors
-    UniValue vErrors(UniValue::VARR);
-
-    // Validate the output of signing and give back appropriate errors
-    for (unsigned int i = 0; i < mtx.vin.size(); i++) {
-        CTxIn& txin = mtx.vin[i];
-        const CScript& prevPubKey = prev_transactions[i].vout[txin.prevout.n].scriptPubKey;
-        const CAmount& amount = prev_transactions[i].vout[txin.prevout.n].nValue;
-
-        const CTransaction txNew(mtx);
-        ScriptError serror = SCRIPT_ERR_OK;
-        if (!VerifyScript(txin.scriptSig, prevPubKey, &txin.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txNew, i, amount), &serror)) {
-            TxInErrorToJSON(txin, vErrors, ScriptErrorString(serror));
-        }
-    }
-
-    bool fComplete = vErrors.empty();
-
-    UniValue result(UniValue::VOBJ);
-    result.push_back(Pair("hex", EncodeHexTx(mtx)));
-    result.push_back(Pair("complete", fComplete));
-    if (!vErrors.empty()) {
-        result.push_back(Pair("errors", vErrors));
-    }
-
-    return result;
-}
-
 UniValue generate(const JSONRPCRequest& request)
 {
     CWallet * const pwallet = GetWalletForJSONRPCRequest(request);
@@ -4074,7 +3981,30 @@ UniValue getaddressinfo(const JSONRPCRequest& request)
         if (!meta->hdKeypath.empty()) {
             ret.pushKV("hdkeypath", meta->hdKeypath);
             ret.pushKV("hdmasterkeyid", meta->hdMasterKeyID.GetHex());
+            if (pwallet->IsHardwareWallet()) {
+                bool segwit = false;
+                bool native_segwit = false;
+                if (!detail["iswitness"].isNull() && detail["iswitness"].get_bool()) {
+                    native_segwit = true;
+                } else if (!detail["embedded"].isNull() && !detail["embedded"]["iswitness"].isNull()) {
+                    segwit = detail["embedded"]["iswitness"].get_bool();
+                }
+                UniValue params(UniValue::VARR);
+                params.push_back(meta->hdKeypath);
+                params.push_back(segwit);
+                params.push_back(native_segwit);
+                std::string signature;
+                std::string fail_reason;
+                if (pwallet->IsHardwareWallet()) {
+                    UniValue is_valid_hww(pwallet->SignHWWMessage("x", dest, signature, fail_reason));
+                    ret.pushKV("hardware_wallet_signature_valid", is_valid_hww);
+                    ret.pushKV("hardware_wallet_signature_error", fail_reason);
+                }
+            }
         }
+    }
+    if (pwallet->IsExternalHD()) {
+        ret.push_back(Pair("externalhdkey", EncodeExtPubKey(pwallet->GetHDChain().externalHD)));
     }
 
     // Currently only one label can be associated with an address, return an array

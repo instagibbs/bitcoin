@@ -861,18 +861,6 @@ UniValue SignTransaction(CMutableTransaction& mtx, const UniValue& prevTxsUnival
     // Script verification errors
     UniValue vErrors(UniValue::VARR);
 
-#ifdef ENABLE_WALLET
-    // Sign as much as possible with hww
-    if (pwallet && pwallet->IsHardwareWallet()) {
-        std::string strFailReason;
-        CMutableTransaction txRet;
-        // Success means decodes message
-        if (pwallet->SignHWWTransaction(mtx, strFailReason, txRet)) {
-            mtx = txRet;
-        }
-    }
-#endif
-
     // Use CTransaction for the constant parts of the
     // transaction to avoid rehashing.
     const CTransaction txConst(mtx);

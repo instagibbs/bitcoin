@@ -145,7 +145,6 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "logging", 1, "exclude" },
     { "disconnectnode", 1, "nodeid" },
     { "addwitnessaddress", 1, "p2sh" },
-    { "signhwwtransaction", 1, "prevtxs"},
     // Echo with conversion (For testing only)
     { "echojson", 0, "arg0" },
     { "echojson", 1, "arg1" },

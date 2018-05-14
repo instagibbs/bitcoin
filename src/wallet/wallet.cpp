@@ -2970,6 +2970,8 @@ OutputType CWallet::TransactionChangeType(OutputType change_type, const std::vec
     return m_default_address_type;
 }
 
+extern void fill_psbt(const CWallet* pwallet, PartiallySignedTransaction& psbtx, const CTransaction* txConst, bool include_output_info);
+
 bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransactionRef& tx, CReserveKey& reservekey, CAmount& nFeeRet,
                                 int& nChangePosInOut, std::string& strFailReason, const CCoinControl& coin_control, bool sign)
 {
@@ -3302,12 +3304,18 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
         if (sign)
         {
 
-            // Sign using hww
+            // Sign using hww using PSBT
             if (IsHardwareWallet()) {
-                if (!SignHWWTransaction(txNew, strFailReason, txNew)) {
+                PartiallySignedTransaction psbt;
+                psbt.SetNull();
+                CTransaction txn_copy(txNew);
+                fill_psbt(this, psbt, &txn_copy, true);
+                if (!SignHWWPSBT(psbt, strFailReason)) {
                     strFailReason = _("Hardware wallet signing failed. Make sure the dongle is connected and bitcoin app loaded.");
                     return false;
                 }
+                // Stitch back together CTransaction from psbt
+                txNew = psbt.tx;//
             }
 
             CTransaction txNewConst(txNew);
@@ -3319,7 +3327,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
                 const CScript& scriptPubKey = coin.txout.scriptPubKey;
                 SignatureData sigdata;
 
-                if (ProduceSignature(*this, TransactionSignatureCreator(&txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata))
+                if (ProduceSignature(*this, TransactionSignatureCreator(&txNewConst, nIn, coin.txout.nValue, SIGHASH_ALL), scriptPubKey, sigdata)) {
                     UpdateTransaction(txNew, nIn, sigdata);
                 }
                 nIn++;

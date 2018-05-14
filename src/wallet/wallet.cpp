@@ -272,7 +272,7 @@ bool CWallet::AddKeyPubKeyWithDB(WalletBatch &batch, const CKey& secret, const C
     return true;
 }
 
-bool CWallet::AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey)
+bool CWallet::AddPubKeyWithDB(WalletBatch &database, const CPubKey &pubkey)
 {
     AssertLockHeld(cs_wallet); // mapKeyMetadata
 
@@ -292,7 +292,7 @@ bool CWallet::AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey)
     }
 
     // We write to db because we're not handling privkeys
-    return walletdb.WriteHWWKey(pubkey, mapKeyMetadata[pubkey.GetID()]);
+    return database.WriteHWWKey(pubkey, mapKeyMetadata[pubkey.GetID()]);
 }
 
 bool CWallet::AddKeyPubKey(const CKey& secret, const CPubKey &pubkey)
@@ -303,7 +303,7 @@ bool CWallet::AddKeyPubKey(const CKey& secret, const CPubKey &pubkey)
 
 bool CWallet::AddPubKey(const CPubKey &pubkey)
 {
-    CWalletDB walletdb(*dbw);
+    WalletBatch walletdb(*database);
     return CWallet::AddPubKeyWithDB(walletdb, pubkey);
 }
 

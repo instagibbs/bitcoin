@@ -863,7 +863,7 @@ public:
     bool AddKeyPubKey(const CKey& key, const CPubKey &pubkey) override;
     bool AddKeyPubKeyWithDB(WalletBatch &batch,const CKey& key, const CPubKey &pubkey);
     bool AddPubKey(const CPubKey &pubkey) override;
-    bool AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey);
+    bool AddPubKeyWithDB(WalletBatch &database, const CPubKey &pubkey);
     //! Adds a key to the store, without saving it to disk (used by LoadWallet)
     bool LoadKey(const CKey& key, const CPubKey &pubkey) { return CCryptoKeyStore::AddKeyPubKey(key, pubkey); }
     bool LoadHWWKey(const CPubKey &pubkey) { return CBasicKeyStore::AddPubKey(pubkey); }

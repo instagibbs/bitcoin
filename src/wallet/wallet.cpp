@@ -32,7 +32,10 @@
 #include <assert.h>
 #include <future>
 
+// HWW includes
 #include <boost/algorithm/string/replace.hpp>
+#include <boost/process.hpp>
+#include <rpc/protocol.h>
 
 static CCriticalSection cs_wallets;
 static std::vector<CWallet*> vpwallets GUARDED_BY(cs_wallets);

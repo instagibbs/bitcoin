@@ -193,7 +193,7 @@ CPubKey CWallet::GenerateNewKey(WalletBatch &batch, bool internal)
     return pubkey;
 }
 
-void CWallet::DeriveNewChildKey(CWalletBatch &batch, CKeyMetadata& metadata, CKey& secret, CPubKey& pubkey, bool internal)
+void CWallet::DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& metadata, CKey& secret, CPubKey& pubkey, bool internal)
 {
     CKey key;                      //master key seed (256bit)
     // try to get the master key
@@ -233,7 +233,7 @@ void CWallet::DeriveNewChildKey(CWalletBatch &batch, CKeyMetadata& metadata, CKe
         pubkey = childKey.key.GetPubKey();
         metadata.hdMasterKeyID = hdChain.masterKeyID;
         // update the chain model in the database
-    if (!batch.WriteHDChain(hdChain))
+        if (!batch.WriteHDChain(hdChain)) {
             throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
         }
     } else if (IsExternalHD()) {
@@ -267,7 +267,7 @@ void CWallet::DeriveNewChildKey(CWalletBatch &batch, CKeyMetadata& metadata, CKe
         } while (HaveKey(childKey.pubkey.GetID()));
         pubkey = childKey.pubkey;
         // update the chain model in the database
-        if (!walletdb.WriteHDChain(hdChain)) {
+        if (!batch.WriteHDChain(hdChain)) {
             throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
         }
     } else {

@@ -1569,9 +1569,9 @@ bool CWallet::SignHWWMessage(const std::string& message, const CTxDestination& d
 
         // Workaround to get the message back
         std::string line;
-        std::ifstream myReadFile ("writeout.txt");
+        std::ifstream myReadFile ("signmessage.txt");
         if (myReadFile.is_open()) {
-            if ( !getline(myReadFile,line) || remove( "writeout.txt" ) != 0){
+            if ( !getline(myReadFile,line) || remove( "signmessage.txt" ) != 0){
                 fail_reason = _("Signing message to file failed");
                 return false;
             }

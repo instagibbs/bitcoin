@@ -199,6 +199,11 @@ class LedgerClient(HardwareWalletClient):
 
         sig = chr(27 + 4 + (signature[0] & 0x01)) + r + s
 
+        #Write to file as workaround
+        file = open("signmessage.txt", 'w')
+        file.write(base64.b64encode(sig))
+        file.close()
+
         return json.dumps({"signature":base64.b64encode(sig)})
 
     # Setup a new device

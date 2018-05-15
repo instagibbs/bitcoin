@@ -85,6 +85,15 @@ public:
     //! Get private key.
     virtual bool getPrivKey(const CKeyID& address, CKey& key) = 0;
 
+    //! Get keypath.
+    virtual std::string getKeyPath(const CKeyID& address) = 0;
+
+    //! Sign message using hww.
+    virtual bool signMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason) = 0;
+
+    //! Get whether this wallet is a hww
+    virtual bool isHardwareWallet() = 0;
+
     //! Return whether wallet has private key.
     virtual bool isSpendable(const CTxDestination& dest) = 0;
 

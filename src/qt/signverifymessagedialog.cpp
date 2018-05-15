@@ -139,10 +139,10 @@ void SignVerifyMessageDialog::on_signMessageButton_SM_clicked()
         return;
     }
 
-    if (model->IsHardwareWallet()) {
+    if (model->wallet().isHardwareWallet()) {
         std::string signature;
         std::string fail_reason;
-        if (!model->SignHWWMessage(ui->messageIn_SM->document()->toPlainText().toStdString(), destination, signature, fail_reason)) {
+        if (!model->wallet().signMessage(ui->messageIn_SM->document()->toPlainText().toStdString(), destination, signature, fail_reason)) {
             ui->addressIn_SM->setValid(false);
             ui->statusLabel_SM->setStyleSheet("QLabel { color: red; }");
             ui->statusLabel_SM->setText(tr("External signing failed: ") + QString::fromStdString(fail_reason) + tr("Please check the device is plugged in, and the address is correct and try again."));

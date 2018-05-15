@@ -10,6 +10,8 @@
 #include <qt/guiutil.h>
 #include <qt/optionsmodel.h>
 
+#include "key_io.h"
+
 #include <util.h>
 #include <QClipboard>
 #include <QDrag>

@@ -381,15 +381,8 @@ QString AddressTableModel::addRow(const QString &type, const QString &label, con
         }
         walletModel->wallet().learnRelatedScripts(newKey, address_type);
         strAddress = EncodeDestination(GetDestinationForKey(newKey, address_type));
-        if (wallet->IsHardwareWallet() && keypath) {
-            const auto& meta = wallet->mapKeyMetadata;
-            CKeyID keyID;
-            auto it = meta.find(newKey.GetID());
-            if (it != meta.end()) {
-                if (!it->second.hdKeypath.empty()) {
-                    *keypath = it->second.hdKeypath;
-                }
-            }
+        if (walletModel->wallet().isHardwareWallet() && keypath) {
+            *keypath = walletModel->wallet().getKeyPath(newKey.GetID());
         }
     }
     else

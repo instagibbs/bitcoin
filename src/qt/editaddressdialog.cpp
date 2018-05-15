@@ -75,7 +75,7 @@ bool EditAddressDialog::saveCurrentRow()
                 AddressTableModel::Send,
                 ui->labelEdit->text(),
                 ui->addressEdit->text(),
-                model->GetDefaultAddressType(), &ketpath);
+                model->GetDefaultAddressType(), &keypath);
         break;
     case EditReceivingAddress:
     case EditSendingAddress:

@@ -142,6 +142,20 @@ public:
     }
     bool getPubKey(const CKeyID& address, CPubKey& pub_key) override { return m_wallet.GetPubKey(address, pub_key); }
     bool getPrivKey(const CKeyID& address, CKey& key) override { return m_wallet.GetKey(address, key); }
+    std::string getKeyPath(const CKeyID& address) override {
+        const auto& meta = m_wallet.mapKeyMetadata;
+        CKeyID keyID;
+        auto it = meta.find(address);
+        if (it != meta.end()) {
+            if (!it->second.hdKeypath.empty()) {
+                return it->second.hdKeypath;
+            }
+        }
+    }
+    bool signMessage(const std::string& message, const CTxDestination& dest, std::string& signature, std::string& fail_reason) override {
+        return m_wallet.SignHWWMessage(message, dest, signature, fail_reason);
+    }
+    bool isHardwareWallet() override { return m_wallet.IsHardwareWallet(); }
     bool isSpendable(const CTxDestination& dest) override { return IsMine(m_wallet, dest) & ISMINE_SPENDABLE; }
     bool haveWatchOnly() override { return m_wallet.HaveWatchOnly(); };
     bool setAddressBook(const CTxDestination& dest, const std::string& name, const std::string& purpose) override

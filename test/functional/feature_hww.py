@@ -25,8 +25,8 @@ class ExternalHDTest(BitcoinTestFramework):
 
         print("Make sure your device is plugged in and loaded to the btc testnet app...")
 
-        hww_driver_path = self.options.tmpdir+"/node0/bitcoin-hww-ledger.py"
-        contrib_file = open('contrib/bitcoin-hww-ledger.py', 'r')
+        hww_driver_path = self.options.tmpdir+"/node0/ledgeri.py"
+        contrib_file = open('contrib/HWI/ledgeri.py', 'r')
         datadir_file = open(hww_driver_path, 'w')
         for line in contrib_file:
             datadir_file.write(line)
@@ -36,11 +36,11 @@ class ExternalHDTest(BitcoinTestFramework):
 
         os.chmod(hww_driver_path, stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO)
 
-        self.assert_start_raises_init_error(0, ['-hardwarewallet=dummy.py'], "Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked.")
-        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, '-externalhd=tpubDAenfwNu5GyCJWv8oqRAckdKMSUoZjgVF5p8WvQwHQeXjDhAHmGrPa4a4y2Fn7HF2nfCLefJanHV3ny1UY25MRVogizB2zRUdAo7Tr9XAjm'], "externalhd and hardwarewallet cannot be both set.")
-        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=mm/44'/0'/0'"], "Derivation path is malformed. Example: m/44'/0'/0'")
-        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0'/"], "Derivation path is malformed. Example: m/44'/0'/0'")
-        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44h/0h/0h"], "Derivation path is malformed. Example: m/44'/0'/0'")
+        self.nodes[0].assert_start_raises_init_error(['-hardwarewallet=dummy.py'], "Error: Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked.")
+        self.nodes[0].assert_start_raises_init_error(['-hardwarewallet='+hww_driver_path, '-externalhd=tpubDAenfwNu5GyCJWv8oqRAckdKMSUoZjgVF5p8WvQwHQeXjDhAHmGrPa4a4y2Fn7HF2nfCLefJanHV3ny1UY25MRVogizB2zRUdAo7Tr9XAjm'], "Error: externalhd and hardwarewallet cannot be both set.")
+        self.nodes[0].assert_start_raises_init_error(['-hardwarewallet='+hww_driver_path, "-derivationpath=mm/44'/0'/0'"], "Error: Derivation path is malformed. Example: m/44'/0'/0'")
+        self.nodes[0].assert_start_raises_init_error(['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0'/"], "Error: Derivation path is malformed. Example: m/44'/0'/0'")
+        self.nodes[0].assert_start_raises_init_error(['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44h/0h/0h"], "Error: Derivation path is malformed. Example: m/44'/0'/0'")
 
         # One node will be the default BIP44 path, one some bizarre specified path
         # Have to start nodes separately to not conflict with each other asking for xpubs
@@ -52,8 +52,8 @@ class ExternalHDTest(BitcoinTestFramework):
         self.stop_nodes()
 
 
-        self.assert_start_raises_init_error(0, [], "Error loading wallet.dat: You must provide a -hardwarewallet argument for a hww wallet file.")
-        self.assert_start_raises_init_error(0, ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0"], "Error loading wallet.dat: You can't enable a different `-derivationpath` on an already initialized hww. Fix or remove the argument.")
+        self.nodes[0].assert_start_raises_init_error([], "Error loading wallet.dat: You must provide a -hardwarewallet argument for a hww wallet file.")
+        self.nodes[0].assert_start_raises_init_error(['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0"], "Error loading wallet.dat: You can't enable a different `-derivationpath` on an already initialized hww. Fix or remove the argument.")
 
         self.start_nodes([['-hardwarewallet='+hww_driver_path, '-walletrbf=1'], [], ['-hardwarewallet='+hww_driver_path, "-derivationpath=m/42/0'/5'"]])
         connect_nodes_bi(self.nodes,0,1)
@@ -77,18 +77,18 @@ class ExternalHDTest(BitcoinTestFramework):
         # Full keypaths are stored, BIP44 or otherwise
         non_std_path_addr = self.nodes[2].getnewaddress()
         print("Validate non-standard path address: "+non_std_path_addr)
-        assert(self.nodes[2].validateaddress(non_std_path_addr)["hdkeypath"] == "m/42/0'/5'/0/0")
+        assert(self.nodes[2].getaddressinfo(non_std_path_addr)["hdkeypath"] == "m/42/0'/5'/0/0")
 
         p2sh_change = self.nodes[0].getrawchangeaddress()
         native_change = self.nodes[0].getrawchangeaddress("bech32")
         legacy_change = self.nodes[0].getrawchangeaddress("legacy")
 
         print("Just validating the keypaths and signatures, just approve both")
-        validated = self.nodes[0].validateaddress(p2sh_address)
+        validated = self.nodes[0].getaddressinfo(p2sh_address)
         assert(validated["hdkeypath"] == "m/44'/0'/0'/0/1")
         assert(validated["hardware_wallet_signature_valid"])
         assert_equal(validated["hardware_wallet_signature_error"], "")
-        validated = self.nodes[0].validateaddress(p2sh_change)
+        validated = self.nodes[0].getaddressinfo(p2sh_change)
         assert(validated["hdkeypath"] == "m/44'/0'/0'/1/0")
         assert(validated["hardware_wallet_signature_valid"])
         assert_equal(validated["hardware_wallet_signature_error"], "")
@@ -96,21 +96,21 @@ class ExternalHDTest(BitcoinTestFramework):
         # Have user validate each one
         print("Validating user addresses:")
         print("P2SH: "+p2sh_address)
-        self.nodes[0].validateaddress(p2sh_address)
+        self.nodes[0].getaddressinfo(p2sh_address)
         print("Native segwit: "+native_address)
-        self.nodes[0].validateaddress(native_address)
+        self.nodes[0].getaddressinfo(native_address)
         print("Legacy: "+legacy_address)
-        self.nodes[0].validateaddress(legacy_address)
+        self.nodes[0].getaddressinfo(legacy_address)
 
         # Have user validate change too
 
         print("Validating user change addresses:")
         print("P2SH: "+p2sh_change)
-        self.nodes[0].validateaddress(p2sh_change)
+        self.nodes[0].getaddressinfo(p2sh_change)
         print("Native segwit: "+native_change)
-        self.nodes[0].validateaddress(native_change)
+        self.nodes[0].getaddressinfo(native_change)
         print("Legacy: "+legacy_change)
-        self.nodes[0].validateaddress(legacy_change)
+        self.nodes[0].getaddressinfo(legacy_change)
 
         # Sign a message and verify it
 

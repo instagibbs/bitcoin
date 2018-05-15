@@ -58,11 +58,11 @@ class ExternalHDTest(BitcoinTestFramework):
 
         # check for graceful failure due to any invalid external hd parameters
         self.nodes[0].assert_start_raises_init_error(['-externalhd=eopipwd'],
-        'Invalid ExtPubKey format')
+                'Error: Invalid ExtPubKey format')
         self.nodes[0].assert_start_raises_init_error(['-externalhd=tprv8ZgxMBicQKsPetaLcEpdoJFv6tai1kEQZFizVYzPqe3NkngpHGBnZRP8hUVrrxgaXgckrr2V38HKMTzPMGG5cJq6RymQ1Bn8v9ACJgh9RvG'],
-        'Invalid ExtPubKey format')
+                'Error: Invalid ExtPubKey format')
         self.nodes[0].assert_start_raises_init_error(['-externalhd=xpubD6NzVbkrYhZ4YTNYPw3XmSoBRZWmfn8mRerv3SEaC8UFiz5geKgCJH42cp9KUzRcfQNSuCQgdM1grUH7FgWYahWKDST3E9NYJMBwMKooTaY'],
-        'Invalid ExtPubKey format')
+                'Error: Invalid ExtPubKey format')
 
         # should restart fine if external hd is the same as current wallet
         self.start_nodes([['-externalhd=tpubD6NzVbkrYhZ4YMc8VtVEChv2fv6eB5RK8ZKmn52hFuqmbGwauf1NjuzzscFzikw7sa41mdE46d9w274Gw29WuFkeVw2VESXxgcMwBQ6NNSf'],[]])
@@ -70,7 +70,7 @@ class ExternalHDTest(BitcoinTestFramework):
         self.stop_nodes()
         # should not restart if external hd is different from the current one
         self.nodes[0].assert_start_raises_init_error(['-externalhd=tpubD6NzVbkrYhZ4YTNYPw3XmSoBRZWmfn8mRerv3SEaC8UFiz5geKgCJH42cp9KUzRcfQNSuCQgdM1grUH7FgWYahWKDST3E9NYJMBwMKooTaY'],
-        'Cannot specify new external hd on an already existing wallet')
+                'Error: Cannot specify new external hd on an already existing wallet')
 
         # check the hdkeypath has persisted
         self.start_nodes([[],[]])
@@ -89,7 +89,7 @@ class ExternalHDTest(BitcoinTestFramework):
         unspent = self.nodes[0].listunspent()
         assert_equal(len(unspent), 2)
         connect_nodes(self.nodes[1], 0)
-        sync_chain([self.nodes[0], self.nodes[1]])
+        self.sync_all()
 
 if __name__ == '__main__':
     ExternalHDTest().main()

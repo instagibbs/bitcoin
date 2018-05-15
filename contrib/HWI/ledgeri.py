@@ -201,7 +201,7 @@ class LedgerClient(HardwareWalletClient):
         keypath = keypath[2:]
         # First display on screen what address you're signing for
         self.app.getWalletPublicKey(keypath, True, segwit, native)
-        self.app.signMessagePrepare(keypath, message)
+        self.app.signMessagePrepare(keypath, message.encode('utf-8'))
         signature = self.app.signMessageSign()
 
         # Make signature into standard bitcoin format
@@ -213,17 +213,15 @@ class LedgerClient(HardwareWalletClient):
             r = r[1:]
         if sLength == 33:
             s = s[1:]
-        r = str(r)
-        s = str(s)
 
-        sig = chr(27 + 4 + (signature[0] & 0x01)) + r + s
+        sig = str(chr(27 + 4 + (signature[0] & 0x01))).encode('utf-8') + r + s
 
         #Write to file as workaround
         file = open("signmessage.txt", 'w')
-        file.write(base64.b64encode(sig))
+        file.write(base64.b64encode(sig).decode('utf-8') + "\n")
         file.close()
 
-        return json.dumps({"signature":base64.b64encode(sig)})
+        return json.dumps({"signature":base64.b64encode(sig).decode('utf-8')})
 
     # Setup a new device
     def setup_device(self):

@@ -1,3 +1,5 @@
+#!/usr/bin/python3
+
 # Ledger interaction script
 
 from jsonrpc import JSONRPCResponseManager, Dispatcher

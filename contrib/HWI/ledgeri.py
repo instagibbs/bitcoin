@@ -1,5 +1,8 @@
 #!/usr/bin/python3
 
+import sys
+sys.path.insert(0, '/home/instagibbs/elements-dev/bitcoin/contrib/HWI')
+
 # Ledger interaction script
 
 from jsonrpc import JSONRPCResponseManager, Dispatcher
@@ -29,7 +32,7 @@ class LedgerClient(HardwareWalletClient):
 
     # Must return a dict with the xpub
     # Retrieves the public key at the specified BIP 32 derivation path
-    def get_pubkey_at_path(self, path):
+    def get_pubkey_at_path(self, path, mainnet):
         path = path[2:]
         # This call returns raw uncompressed pubkey, chaincode
         pubkey = self.app.getWalletPublicKey(path)
@@ -61,9 +64,18 @@ class LedgerClient(HardwareWalletClient):
         depth = len(path.split("/")) if len(path) > 0 else 0
         depth = struct.pack("B", depth)
 
-        version = bytearray.fromhex("0488B21E")
+        if mainnet:
+            version = bytearray.fromhex("0488B21E")
+        else:
+            version = bytearray.fromhex("043587CF")
+
         extkey = version+depth+fpr+child+chainCode+publicKey
         checksum = hash256(extkey)[:4]
+
+        #Write to file as workaround
+        file = open("xpub.txt", 'w')
+        file.write(base58.encode(extkey+checksum))
+        file.close()
 
         return json.dumps({"xpub":base58.encode(extkey+checksum)})
 
@@ -175,6 +187,11 @@ class LedgerClient(HardwareWalletClient):
                 self.app.startUntrustedTransaction(False, 0, [segwit_inputs[i]], script_codes[i], c_tx.nVersion)
                 tx.inputs[i].partial_sigs[signature_attempt[1]] = self.app.untrustedHashSign(signature_attempt[0], "", c_tx.nLockTime, 0x01)
 
+        #Write to file as workaround
+        file = open("signpsbt.txt", 'w')
+        file.write(base64.b64encode(sig))
+        file.close()
+
         # Send PSBT back
         return tx.serialize()
 
@@ -219,10 +236,11 @@ class LedgerClient(HardwareWalletClient):
 # Avoid circular imports
 from hwi import HardwareWalletClient
 
+client = LedgerClient(None)
 dispatcher = Dispatcher({
-    "signmessage": sign_message,
-    "getxpub": get_pubkey_at_path,
-    "signtransaction": sign_tx,
+    "signmessage": client.sign_message,
+    "getxpub": client.get_pubkey_at_path,
+    "signtransaction": client.sign_tx,
 })
 
 logging.basicConfig()

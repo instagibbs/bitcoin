@@ -82,7 +82,9 @@ class LedgerClient(HardwareWalletClient):
     # Must return a hex string with the signed transaction
     # The tx must be in the combined unsigned transaction format
     # Current only supports segwit signing
-    def sign_tx(self, tx):
+    def sign_tx(self, tx_hex):
+        tx = PSBT()
+        tx.deserialize(tx_hex)
         c_tx = CTransaction(tx.tx)
         tx_bytes = c_tx.serialize_with_witness()
 
@@ -189,7 +191,7 @@ class LedgerClient(HardwareWalletClient):
 
         #Write to file as workaround
         file = open("signpsbt.txt", 'w')
-        file.write(base64.b64encode(sig))
+        file.write(tx.serialize())
         file.close()
 
         # Send PSBT back

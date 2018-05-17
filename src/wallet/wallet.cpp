@@ -4902,14 +4902,22 @@ void add_keypath_to_map(const CWallet* pwallet, const CKeyID& keyID, std::map<CP
         if (!parse_hd_keypath(meta.hdKeypath, keypath)) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "Internal keypath is broken");
         }
-        // Get the proper master key id
-        CKey key;
-        pwallet->GetKey(meta.hdMasterKeyID, key);
-        CExtKey masterKey;
-        masterKey.SetMaster(key.begin(), key.size());
-        // Add to map
-        keypath.insert(keypath.begin(), masterKey.key.GetPubKey().GetID().GetUint32(0));
-        hd_keypaths.emplace(vchPubKey, keypath);
+
+        if (pwallet->IsExternalHD()) {
+            // Add to map
+            keypath.insert(keypath.begin(), pwallet->GetHDChain().externalHD.pubkey.GetID().GetUint32(0));
+            hd_keypaths.emplace(vchPubKey, keypath);
+
+        } else {
+            // Get the proper master key id
+            CKey key;
+            pwallet->GetKey(meta.hdMasterKeyID, key);
+            CExtKey masterKey;
+            masterKey.SetMaster(key.begin(), key.size());
+            // Add to map
+            keypath.insert(keypath.begin(), masterKey.key.GetPubKey().GetID().GetUint32(0));
+            hd_keypaths.emplace(vchPubKey, keypath);
+        }
     }
 }
 

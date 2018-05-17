@@ -295,12 +295,12 @@ class CTxOut(object):
         return r
 
     def is_p2sh(self):
-        return len(self.scriptPubKey) == 23 and self.scriptPubKey[0] == b"\xa9" and self.scriptPubKey[1] == b"\x14" and self.scriptPubKey[22] == "\x87"
+        return len(self.scriptPubKey) == 23 and self.scriptPubKey[0:1] == b"\xa9" and self.scriptPubKey[1:2] == b"\x14" and self.scriptPubKey[22:23] == b"\x87"
 
     def is_p2pkh(self):
-        return len(self.scriptPubKey) == 25 and self.scriptPubKey[0] == b"\x76" and self.scriptPubKey[1] == b"\xa9" and self.scriptPubKey[2] == b"\x14" and self.scriptPubKey[23] == b"\x88" and self.scriptPubKey[24] == b"\xac"
+        return len(self.scriptPubKey) == 25 and self.scriptPubKey[0:1] == b"\x76" and self.scriptPubKey[1:2] == b"\xa9" and self.scriptPubKey[2:3] == b"\x14" and self.scriptPubKey[23:24] == b"\x88" and self.scriptPubKey[24:25] == b"\xac"
     def is_p2pk(self):
-        return (len(self.scriptPubKey) == 35 or len(self.scriptPubKey) == 67) and (self.scriptPubKey[0] == b"\x21" or self.scriptPubKey[0] == b"\x41") and self.scriptPubKey[-1] == b"\xac"
+        return (len(self.scriptPubKey) == 35 or len(self.scriptPubKey) == 67) and (self.scriptPubKey[0:1] == b"\x21" or self.scriptPubKey[0:1] == b"\x41") and self.scriptPubKey[-1:] == b"\xac"
 
     def __repr__(self):
         return "CTxOut(nValue=%i.%08i scriptPubKey=%s)" \

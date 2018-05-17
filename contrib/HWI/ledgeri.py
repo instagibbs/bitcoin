@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 
 import sys
-sys.path.insert(0, '/home/instagibbs/elements-dev/bitcoin/contrib/HWI')
+sys.path.insert(0, '/home/greg/bitcoin-dev/bitcoin/contrib/HWI')
 
 # Ledger interaction script
 
@@ -102,6 +102,7 @@ class LedgerClient(HardwareWalletClient):
         # Detect changepath, (p2sh-)p2(w)pkh only
         change_path = ''
         for txout, i_num in zip(c_tx.vout, range(len(c_tx.vout))):
+
             # Find which wallet key could be change based on hdsplit: m/.../1/k
             # Wallets shouldn't be sending to change address as user action
             # otherwise this will get confused
@@ -115,8 +116,8 @@ class LedgerClient(HardwareWalletClient):
                         change_path = change_path[:-1]
 
 
+        # Note this assumes the psbt.tx input info has been appended
         for txin, psbt_in, i_num in zip(c_tx.vin, tx.inputs, range(len(c_tx.vin))):
-
             seq = format(txin.nSequence, 'x')
             seq = seq.zfill(8)
             seq = bytearray.fromhex(seq)
@@ -141,6 +142,8 @@ class LedgerClient(HardwareWalletClient):
                 redeemscript = tx.redeem_scripts[psbt_in.witness_utxo.scriptPubKey[2:22]]
                 witness_program += redeemscript
             else:
+                # TODO fix this for native p2wsh
+                redeemscript = b''
                 witness_program += psbt_in.witness_utxo.scriptPubKey
 
             # Check if witness_program is script hash
@@ -156,14 +159,25 @@ class LedgerClient(HardwareWalletClient):
             # Save scriptcode for later signing
             script_codes[i_num] = scriptCode
 
+            #Write to file as workaround
+            file = open("signpsbt2.txt", 'w')
+            file.write(binascii.hexlify(witness_program).decode('utf-8')+"\n")
+            file.write(binascii.hexlify(redeemscript).decode('utf-8')+"\n")
+
             # Find which pubkeys could sign this input
             for pubkey in tx.hd_keypaths.keys():
+                # TODO bytes to hex str
+                file.write(binascii.hexlify(pubkey).decode('utf-8')+"\n")
+                file.write(binascii.hexlify(hash160(pubkey)).decode('utf-8')+"\n")
+                file.write(binascii.hexlify(scriptCode).decode('utf-8')+"\n")
                 if hash160(pubkey) in scriptCode or pubkey in scriptCode:
                     pubkeys.append(pubkey)
 
+            file.close()
             # Figure out which keys in inputs are from our wallet
             for pubkey in pubkeys:
                 keypath = tx.hd_keypaths[pubkey]
+
                 if master_fpr == struct.pack("<I", keypath[0]):
                     # Add the keypath strings
                     keypath_str = ''
@@ -189,13 +203,14 @@ class LedgerClient(HardwareWalletClient):
                 self.app.startUntrustedTransaction(False, 0, [segwit_inputs[i]], script_codes[i], c_tx.nVersion)
                 tx.inputs[i].partial_sigs[signature_attempt[1]] = self.app.untrustedHashSign(signature_attempt[0], "", c_tx.nLockTime, 0x01)
 
+
         #Write to file as workaround
         file = open("signpsbt.txt", 'w')
-        file.write(tx.serialize())
+        file.write(tx.serialize().decode('utf-8'))
         file.close()
 
         # Send PSBT back
-        return tx.serialize()
+        return json.dumps(tx.serialize().decode('utf-8'))
 
     # Must return a base64 encoded string with the signed message
     # The message can be any string

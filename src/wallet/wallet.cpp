@@ -3325,10 +3325,16 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
                 psbt.SetNull();
                 CTransaction txn_copy(txNew);
                 fill_psbt(this, psbt, &txn_copy, true);
+                psbt.tx = txNew;
                 if (!SignHWWPSBT(psbt, strFailReason)) {
                     strFailReason = _("Hardware wallet signing failed. Make sure the dongle is connected and bitcoin app loaded.");
                     return false;
                 }
+                // Finalize here, let sww signer take it from here
+                // TODO: we cannot sign multisig mixture between hww and sww
+                // replace the sww signing with psbt steps as well
+                FinalizePartialTransaction(psbt);
+                psbt.SanitizeForSerialization();
                 // Stitch back together CTransaction from psbt
                 txNew = psbt.tx;//
             }
@@ -3356,7 +3362,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
 
                 ScriptError serror = SCRIPT_ERR_OK;
                 if (!VerifyScript(txNew.vin[nIn].scriptSig, scriptPubKey, &txNew.vin[nIn].scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, TransactionSignatureChecker(&txFinalConst, nIn, coin.txout.nValue), &serror)) {
-                    strFailReason = _("Transaction signing failed.");
+                    strFailReason = _("Transaction signing verification failed.");
                     return false;
                 }
 

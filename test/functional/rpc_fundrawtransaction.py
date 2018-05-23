@@ -106,7 +106,6 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.nodes[0].lockunspent(False, [{"txid": self.watchonly_txid, "vout": self.watchonly_vout}])
 
         self.nodes[0].sendtoaddress(self.nodes[3].getnewaddress(), self.watchonly_amount / 10)
-
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 1.5)
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 1.0)
         self.nodes[0].sendtoaddress(self.nodes[2].getnewaddress(), 5.0)
@@ -378,10 +377,10 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         #create same transaction over sendtoaddress
         txId = self.nodes[0].sendtoaddress(self.nodes[1].getnewaddress(), 1.1)
-        signedFee = self.nodes[0].getrawmempool(True)[txId]['fee']
+        mempool_tx = self.nodes[0].getrawmempool(True)[txId]
 
-        #compare fee
-        feeDelta = Decimal(fundedTx['fee']) - Decimal(signedFee)
+        #compare feerates
+        feeDelta = (Decimal(fundedTx['fee']) / Decimal(len(fundedTx['hex']) / 2)) - (Decimal(mempool_tx['fee']) / mempool_tx['vsize'])
         assert feeDelta >= 0 and feeDelta <= self.fee_tolerance
         ############################################################
 
@@ -394,10 +393,10 @@ class RawTransactionsTest(BitcoinTestFramework):
         fundedTx = self.nodes[0].fundrawtransaction(rawtx)
         #create same transaction over sendtoaddress
         txId = self.nodes[0].sendmany("", outputs)
-        signedFee = self.nodes[0].getrawmempool(True)[txId]['fee']
+        mempool_tx = self.nodes[0].getrawmempool(True)[txId]
 
-        #compare fee
-        feeDelta = Decimal(fundedTx['fee']) - Decimal(signedFee)
+        #compare feerates
+        feeDelta = (Decimal(fundedTx['fee']) / Decimal(len(fundedTx['hex']) / 2)) - (Decimal(mempool_tx['fee']) / mempool_tx['vsize'])
         assert feeDelta >= 0 and feeDelta <= self.fee_tolerance
         ############################################################
 
@@ -421,10 +420,10 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         #create same transaction over sendtoaddress
         txId = self.nodes[0].sendtoaddress(mSigObj, 1.1)
-        signedFee = self.nodes[0].getrawmempool(True)[txId]['fee']
+        mempool_tx = self.nodes[0].getrawmempool(True)[txId]
 
-        #compare fee
-        feeDelta = Decimal(fundedTx['fee']) - Decimal(signedFee)
+        #compare feerates
+        feeDelta = (Decimal(fundedTx['fee']) / Decimal(len(fundedTx['hex']) / 2)) - (Decimal(mempool_tx['fee']) / mempool_tx['vsize'])
         assert feeDelta >= 0 and feeDelta <= self.fee_tolerance
         ############################################################
 
@@ -454,10 +453,10 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         #create same transaction over sendtoaddress
         txId = self.nodes[0].sendtoaddress(mSigObj, 1.1)
-        signedFee = self.nodes[0].getrawmempool(True)[txId]['fee']
+        mempool_tx = self.nodes[0].getrawmempool(True)[txId]
 
-        #compare fee
-        feeDelta = Decimal(fundedTx['fee']) - Decimal(signedFee)
+        #compare feerates
+        feeDelta = (Decimal(fundedTx['fee']) / Decimal(len(fundedTx['hex']) / 2)) - (Decimal(mempool_tx['fee']) / mempool_tx['vsize'])
         assert feeDelta >= 0 and feeDelta <= self.fee_tolerance
         ############################################################
 
@@ -652,6 +651,10 @@ class RawTransactionsTest(BitcoinTestFramework):
         ###############################################################
         # test fundrawtransaction using the entirety of watched funds #
         ###############################################################
+
+        self.nodes[0].sendtoaddress(self.nodes[3].getnewaddress(), self.watchonly_amount / 10)
+        self.nodes[0].generate(6)
+        self.sync_all()
 
         inputs = []
         outputs = {self.nodes[2].getnewaddress(): self.watchonly_amount}

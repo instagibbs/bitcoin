@@ -263,7 +263,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Generate a bunch of transactions.
         node.generate(101)
         num_transactions = 25
-        address = node.getnewaddress()
+        address = node.getnewaddress(address_type='legacy')
 
         segwit_tx_generated = False
         for i in range(num_transactions):

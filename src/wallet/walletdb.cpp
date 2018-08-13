@@ -71,7 +71,7 @@ bool WalletBatch::WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey,
     return WriteIC(std::make_pair(std::string("key"), vchPubKey), std::make_pair(vchPrivKey, Hash(vchKey.begin(), vchKey.end())), false);
 }
 
-bool CWalletDB::WriteHWWKey(const CPubKey& vchPubKey, const CKeyMetadata& keyMeta)
+bool WalletBatch::WriteHWWKey(const CPubKey& vchPubKey, const CKeyMetadata& keyMeta)
 {
     if (!WriteIC(std::make_pair(std::string("keymeta"), vchPubKey), keyMeta, false)) {
         return false;
@@ -868,7 +868,7 @@ bool WalletBatch::EraseDestData(const std::string &address, const std::string &k
     return EraseIC(std::make_pair(std::string("destdata"), std::make_pair(address, key)));
 }
 
-bool CWalletDB::WriteHWW(const std::string& derivation_path)
+bool WalletBatch::WriteHWW(const std::string& derivation_path)
 {
     return WriteIC(std::string("hww_path"), derivation_path);
 }

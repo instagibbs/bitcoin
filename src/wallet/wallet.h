@@ -91,7 +91,7 @@ enum WalletFeature
 
     FEATURE_PRE_SPLIT_KEYPOOL = 169900, // Upgraded to HD SPLIT and can have a pre-split keypool
 
-    FEATURE_LATEST = FEATURE_PRE_SPLIT_KEYPOOL
+    FEATURE_LATEST = FEATURE_PRE_SPLIT_KEYPOOL,
     
     FEATURE_EXTERNAL_HD = 1179900, // External Hierarchical key derivation after BIP32 (HD Wallet)
     // This wallet should never be loaded in stock Bitcoin Core

@@ -1496,7 +1496,7 @@ void CWallet::SetHDSeed(const CPubKey& seed)
 
 bool CWallet::SetHWW(const std::string& derivation_path, bool mem_only)
 {
-    if (!mem_only && !CWalletDB(*dbw).WriteHWW(derivation_path)) {
+    if (!mem_only && !WalletBatch(*database).WriteHWW(derivation_path)) {
         throw std::runtime_error(std::string(__func__) + ": writing hww failed");
     }
     m_hww_path = derivation_path;
@@ -1519,7 +1519,7 @@ bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
     // the child index counter in the database
     // as a hdchain object
     CHDChain newHdChain;
-    newHdChain.masterKeyID = extPubKey.pubkey.GetID();
+    newHdChain.seed_id = extPubKey.pubkey.GetID();
     newHdChain.isExternalHD = true;
     newHdChain.externalHD = extPubKey;
     SetHDChain(newHdChain, false);

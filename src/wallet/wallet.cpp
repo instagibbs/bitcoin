@@ -293,7 +293,7 @@ bool CWallet::AddKeyPubKeyWithDB(WalletBatch &batch, const CKey& secret, const C
     return true;
 }
 
-bool CWallet::AddPubKeyWithDB(CWalletDB &walletdb, const CPubKey &pubkey)
+bool CWallet::AddPubKeyWithDB(WalletBatch &walletdb, const CPubKey &pubkey)
 {
     AssertLockHeld(cs_wallet); // mapKeyMetadata
 
@@ -324,7 +324,7 @@ bool CWallet::AddKeyPubKey(const CKey& secret, const CPubKey &pubkey)
 
 bool CWallet::AddPubKey(const CPubKey &pubkey)
 {
-    CWalletDB walletdb(*dbw);
+    WalletBatch walletdb(*database);
     return CWallet::AddPubKeyWithDB(walletdb, pubkey);
 }
 

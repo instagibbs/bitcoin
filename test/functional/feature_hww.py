@@ -200,10 +200,6 @@ class ExternalHDTest(BitcoinTestFramework):
         # Simple sign{hww, raw}transaction test
         rawtx = self.nodes[0].createrawtransaction([{"txid":utxo["txid"], "vout":utxo["vout"]}], {self.nodes[0].getnewaddress():1})
 
-        signed_tx_ret = self.nodes[0].signrawtransaction(rawtx)
-
-        assert_equal(signed_tx_ret["complete"], True)
-
         signed_tx_ret = self.nodes[0].signhwwtransaction(rawtx, [self.nodes[0].gettransaction(utxo["txid"])["hex"]])
 
         assert_equal(signed_tx_ret["complete"], True)
@@ -230,10 +226,14 @@ class ExternalHDTest(BitcoinTestFramework):
 
         rawtx2 = self.nodes[0].createrawtransaction([{"txid":utxo1[0], "vout":utxo1[1]}, {"txid":utxo2[0], "vout":utxo2[1]}], {self.nodes[0].getnewaddress():1})
 
-        # This will self-verify the scripts being signed, but not amounts or other policy constraints
-        assert_equal(self.nodes[0].signrawtransaction(rawtx2)["complete"], True)
         # Only will do one input, has no knowledge of sw wallet
         assert_equal(self.nodes[0].signhwwtransaction(rawtx2, [raw1, raw2])["complete"], False)
+
+
+        '''
+        We don't support signrawtransaction anymore. Swap out calls for signhwwtransaction?
+
+        TODO: Replace with PSBT flow entirely.
 
         # Node 1 signs an input, node 0 then signs to complete
         node1_utxo = self.nodes[1].listunspent(0)[0]
@@ -247,6 +247,7 @@ class ExternalHDTest(BitcoinTestFramework):
         # Passing in the full prevtxs fixes this
         full_signed = self.nodes[0].signhwwtransaction(part_signed["hex"], [raw1, self.nodes[1].gettransaction(node1_utxo["txid"])["hex"]])
         assert(full_signed["complete"])
+        '''
 
         print("Bumpfee test")
         # super basic bumpfee test

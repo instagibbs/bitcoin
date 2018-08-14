@@ -637,7 +637,7 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 
     pwallet->WalletLogPrintf("nFileVersion = %d\n", wss.nFileVersion);
 
-    pwallet->WalletLogPrintf("Keys: %u plaintext, %u encrypted, %u w/ metadata, %u hww, %u , %u total. Unknown wallet records: %u\n",
+    pwallet->WalletLogPrintf("Keys: %u plaintext, %u encrypted, %u w/ metadata, %u hww, %u total. Unknown wallet records: %u\n",
            wss.nKeys, wss.nCKeys, wss.nKeyMeta, wss.num_hww_pubkeys, wss.nKeys + wss.nCKeys + wss.num_hww_pubkeys, wss.m_unknown_records);
 
     // nTimeFirstKey is only reliable if all keys have metadata

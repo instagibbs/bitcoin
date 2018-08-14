@@ -536,14 +536,12 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
                 strErr = "Error reading wallet database: Unknown non-tolerable wallet flags found";
                 return false;
             }
-        } else if (strType != "bestblock" && strType != "bestblock_nomerkle") {
-            wss.m_unknown_records++;
-        }
-        else if (strType == "hww_path")
-        {
+        } else if (strType == "hww_path") {
             std::string path;
             ssValue >> path;
             pwallet->SetHWW(path, true);
+        } else if (strType != "bestblock" && strType != "bestblock_nomerkle") {
+            wss.m_unknown_records++;
         }
     } catch (...)
     {

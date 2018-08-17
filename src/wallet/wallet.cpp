@@ -1597,7 +1597,7 @@ std::string CWallet::GetHWWPath() const
     return m_hww_path;
 }
 
-bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
+bool CWallet::SetExternalHD(const CExtPubKey& extPubKey, const CExtPubKey& master_pubkey)
 {
     LOCK(cs_wallet);
 
@@ -1608,7 +1608,7 @@ bool CWallet::SetExternalHD(const CExtPubKey& extPubKey)
     // the child index counter in the database
     // as a hdchain object
     CHDChain newHdChain;
-    newHdChain.seed_id = extPubKey.pubkey.GetID();
+    newHdChain.seed_id = master_pubkey.pubkey.GetID();
     newHdChain.isExternalHD = true;
     newHdChain.externalHD = extPubKey;
     SetHDChain(newHdChain, false);
@@ -4570,7 +4570,9 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, 
                     return nullptr;
                 }
                 std::string xpub = "";
+                std::string master_xpub = "";
                 try {
+                    // Grabbing xpub at defined path
                     UniValue params(UniValue::VARR);
                     params.push_back(path);
                     params.push_back(Params().NetworkIDString() == "main");
@@ -4602,16 +4604,51 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, 
                         InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and device plugged in and unlocked."));
                         return nullptr;
                     }
+
+                    // Grabbing xpub at master for fingerprint
+                    UniValue params2(UniValue::VARR);
+                    params.push_back("m/");
+                    params.push_back(Params().NetworkIDString() == "main");
+                    UniValue valReply2 = CallHardwareWallet(JSONRPCRequestObj("getxpub", params, 1));
+
+                    const UniValue& result2 = find_value(valReply, "result");
+                    const UniValue& error2 = find_value(valReply, "error");
+
+                    if (error2.isNull()) {
+                        const UniValue& xpub_uni = find_value(result, "xpub");
+
+                        // Workaround to get the message back
+                        std::string line;
+                        std::ifstream myReadFile ("xpub.txt");
+                        if (myReadFile.is_open()) {
+                            if ( !getline(myReadFile,line) || remove( "xpub.txt" ) != 0){
+                                InitError(_("Getting xpub from device failed."));
+                                return nullptr;
+                            }
+                            master_xpub = line;
+                        } else if (xpub_uni.getValStr().empty()) {
+                            InitError(_("Getting xpub from device failed."));
+                            return nullptr;
+                        } else {
+                            // This isn't working for now FIXME
+                            master_xpub = xpub_uni.getValStr();
+                        }
+                    } else {
+                        InitError(_("Error getting master pubkey from device. Make sure your `-hardwarewallet` path is correct and device plugged in and unlocked."));
+                        return nullptr;
+                    }
+
                 } catch (...) {
                     InitError(_("Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked."));
                     return nullptr;
                 }
 
                 CExtPubKey ext_hww_pubkey(DecodeExtPubKey(xpub));
+                CExtPubKey master_pubkey(DecodeExtPubKey(master_xpub));
 
                 // Set xpub grabbed from device
                 walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
-                if (!walletInstance->SetExternalHD(ext_hww_pubkey)) {
+                if (!walletInstance->SetExternalHD(ext_hww_pubkey, master_pubkey)) {
                     throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
                 }
                 // Set the path used
@@ -4629,7 +4666,8 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, 
             }
 
             walletInstance->SetMinVersion(FEATURE_EXTERNAL_HD);
-            if (!walletInstance->SetExternalHD(xpubkey)) {
+            // TODO: Allow people to set proper master pubkey? Seems obtuse to use.
+            if (!walletInstance->SetExternalHD(xpubkey, xpubkey)) {
                 throw std::runtime_error(std::string(__func__) + ": Storing master pubkey failed");
             }
 

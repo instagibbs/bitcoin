@@ -1194,7 +1194,7 @@ public:
        caller must ensure the current wallet version is correct before calling
        this function). */
     void SetHDSeed(const CPubKey& key);
-    bool SetExternalHD(const CExtPubKey& extPubKey);
+    bool SetExternalHD(const CExtPubKey& extPubKey, const CExtPubKey& master_pubkey);
 
     /**
      * Blocks until the wallet state is up-to-date to /at least/ the current

@@ -4607,9 +4607,9 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, 
 
                     // Grabbing xpub at master for fingerprint
                     UniValue params2(UniValue::VARR);
-                    params.push_back("m/");
-                    params.push_back(Params().NetworkIDString() == "main");
-                    UniValue valReply2 = CallHardwareWallet(JSONRPCRequestObj("getxpub", params, 1));
+                    params2.push_back("m/");
+                    params2.push_back(Params().NetworkIDString() == "main");
+                    UniValue valReply2 = CallHardwareWallet(JSONRPCRequestObj("getxpub", params2, 1));
 
                     const UniValue& result2 = find_value(valReply, "result");
                     const UniValue& error2 = find_value(valReply, "error");

@@ -4419,6 +4419,8 @@ bool CWallet::Verify(std::string wallet_file, bool salvage_wallet, std::string& 
     return WalletBatch::VerifyDatabaseFile(wallet_path, warning_string, error_string);
 }
 
+extern bool ParseHDKeypath(std::string keypath_str, std::vector<uint32_t>& keypath);
+
 std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, const fs::path& path, uint64_t wallet_creation_flags)
 {
     const std::string& walletFile = name;
@@ -4562,8 +4564,8 @@ std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, 
                 // We assume BIP44 if none given
                 std::string path = gArgs.GetArg("-derivationpath", "m/44'/0'/0'");
                 // Filter some common derivation path errors
-                if (path.substr(0,2) != "m/" || path.substr(path.size()-1, path.size()) == "/"
-                        || path.find('h') != std::string::npos) {
+                std::vector<uint32_t> keypath;
+                if (!ParseHDKeypath(path, keypath)) {
                     InitError(_("Derivation path is malformed. Example: m/44'/0'/0'"));
                     return nullptr;
                 }

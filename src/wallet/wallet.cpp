@@ -4419,8 +4419,6 @@ bool CWallet::Verify(std::string wallet_file, bool salvage_wallet, std::string& 
     return WalletBatch::VerifyDatabaseFile(wallet_path, warning_string, error_string);
 }
 
-extern bool ParseHDKeypath(std::string keypath_str, std::vector<uint32_t>& keypath);
-
 std::shared_ptr<CWallet> CWallet::CreateWalletFromFile(const std::string& name, const fs::path& path, uint64_t wallet_creation_flags)
 {
     const std::string& walletFile = name;
@@ -5016,4 +5014,45 @@ std::vector<OutputGroup> CWallet::GroupOutputs(const std::vector<COutput>& outpu
         for (const auto& it : gmap) groups.push_back(it.second);
     }
     return groups;
+}
+
+bool ParseHDKeypath(std::string keypath_str, std::vector<uint32_t>& keypath)
+{
+    std::stringstream ss(keypath_str);
+    std::string item;
+    bool first = true;
+    while (std::getline(ss, item, '/')) {
+        if (item.compare("m") == 0) {
+            if (first) {
+                first = false;
+                continue;
+            }
+            return false;
+        }
+        // Finds whether it is hardened
+        uint32_t path = 0;
+        size_t pos = item.find("'");
+        if (pos != std::string::npos) {
+            // The hardened tick can only be in the last index of the string
+            if (pos != item.size() - 1) {
+                return false;
+            }
+            path |= 0x80000000;
+            item = item.substr(0, item.size() - 1); // Drop the last character which is the hardened tick
+        }
+
+        // Ensure this is only numbers
+        if (item.find_first_not_of( "0123456789" ) != std::string::npos) {
+            return false;
+        }
+        uint32_t number;
+        if (!ParseUInt32(item, &number)) {
+            return false;
+        }
+        path |= number;
+
+        keypath.push_back(path);
+        first = false;
+    }
+    return true;
 }

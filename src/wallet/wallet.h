@@ -1343,6 +1343,8 @@ public:
     }
 };
 
+bool ParseHDKeypath(std::string keypath_str, std::vector<uint32_t>& keypath);
+
 // Calculate the size of the transaction assuming all signatures are max size
 // Use DummySignatureCreator, which inserts 71 byte signatures everywhere.
 // NOTE: this requires that all inputs must be in mapWallet (eg the tx should

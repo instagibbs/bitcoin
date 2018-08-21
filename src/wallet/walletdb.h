@@ -93,11 +93,13 @@ class CKeyMetadata
 public:
     static const int VERSION_BASIC=1;
     static const int VERSION_WITH_HDDATA=10;
-    static const int CURRENT_VERSION=VERSION_WITH_HDDATA;
+    static const int VERSION_WITH_MASTER_ID = 11;
+    static const int CURRENT_VERSION=VERSION_WITH_MASTER_ID;
     int nVersion;
     int64_t nCreateTime; // 0 means unknown
     std::string hdKeypath; //optional HD/bip32 keypath
     CKeyID hd_seed_id; //id of the HD seed used to derive this key
+    CKeyID master_key_id; // ID of the HD master key used to derive this key.
 
     CKeyMetadata()
     {
@@ -120,6 +122,10 @@ public:
             READWRITE(hdKeypath);
             READWRITE(hd_seed_id);
         }
+        if (this->nVersion >= VERSION_WITH_MASTER_ID)
+        {
+            READWRITE(master_key_id);
+        }
     }
 
     void SetNull()
@@ -128,6 +134,7 @@ public:
         nCreateTime = 0;
         hdKeypath.clear();
         hd_seed_id.SetNull();
+        master_key_id.SetNull();
     }
 };
 

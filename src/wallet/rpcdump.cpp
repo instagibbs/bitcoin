@@ -917,6 +917,53 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                 pwallet->SetAddressBook(dest, label, "receive");
             }
 
+            // Import public keys
+            for (size_t i = 0; i < pubKeys.size(); ++i) {
+                const std::string& pubkey = pubKeys[i].get_str();
+
+                if (!IsHex(pubkey)) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Pubkey must be a hex string");
+                }
+
+                std::vector<unsigned char> vData(ParseHex(pubkey));
+                CPubKey pubKey(vData.begin(), vData.end());
+
+                if (!pubKey.IsFullyValid()) {
+                    throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Pubkey is not a valid public key");
+                }
+
+                CTxDestination pubkey_dest = pubKey.GetID();
+                CScript pubKeyScript = GetScriptForDestination(pubkey_dest);
+
+                if (::IsMine(*pwallet, pubKeyScript) == ISMINE_SPENDABLE) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "The wallet already contains the private key for this address or script");
+                }
+
+                pwallet->MarkDirty();
+
+                if (!pwallet->AddWatchOnly(pubKeyScript, timestamp)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
+                }
+
+                // add to address book or update label
+                if (IsValidDestination(pubkey_dest)) {
+                    pwallet->SetAddressBook(pubkey_dest, label, "receive");
+                }
+
+                // TODO Is this necessary?
+                CScript scriptRawPubKey = GetScriptForRawPubKey(pubKey);
+
+                if (::IsMine(*pwallet, scriptRawPubKey) == ISMINE_SPENDABLE) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "The wallet already contains the private key for this address or script");
+                }
+
+                pwallet->MarkDirty();
+
+                if (!pwallet->AddWatchOnly(scriptRawPubKey, timestamp)) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
+                }
+            }
+
             // Import private keys.
             if (keys.size()) {
                 for (size_t i = 0; i < keys.size(); i++) {

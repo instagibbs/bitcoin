@@ -252,6 +252,7 @@ void CWallet::DeriveNewChildKey(WalletBatch &batch, CKeyMetadata& metadata, CKey
     } while (HaveKey(childKey.key.GetPubKey().GetID()));
     secret = childKey.key;
     metadata.hd_seed_id = hdChain.seed_id;
+    metadata.master_key_id = masterKey.key.GetPubKey().GetID();
     // update the chain model in the database
     if (!batch.WriteHDChain(hdChain))
         throw std::runtime_error(std::string(__func__) + ": Writing HD chain model failed");
@@ -329,6 +330,33 @@ void CWallet::LoadScriptMetadata(const CScriptID& script_id, const CKeyMetadata 
     AssertLockHeld(cs_wallet); // m_script_metadata
     UpdateTimeFirstKey(meta.nCreateTime);
     m_script_metadata[script_id] = meta;
+}
+
+void CWallet::UpgradeKeyMetadata()
+{
+    AssertLockHeld(cs_wallet); // mapKeyMetadata
+
+    for (auto& meta_pair : mapKeyMetadata) {
+        CKeyMetadata& meta = meta_pair.second;
+        if (!meta.hd_seed_id.IsNull() && meta.master_key_id.IsNull()) {
+            CKey key;
+            GetKey(meta.hd_seed_id, key);
+            CExtKey masterKey;
+            masterKey.SetSeed(key.begin(), key.size());
+            // Add to map
+            CKeyID master_id = masterKey.key.GetPubKey().GetID();
+            meta.master_key_id = master_id;
+            if (meta.nVersion < CKeyMetadata::VERSION_WITH_MASTER_ID) {
+                meta.nVersion = CKeyMetadata::VERSION_WITH_MASTER_ID;
+            }
+
+            // Write meta to wallet
+            CPubKey pubkey;
+            if (GetPubKey(meta_pair.first, pubkey)) {
+                WriteKeyMetadata(meta, pubkey, true);
+            }
+        }
+    }
 }
 
 bool CWallet::LoadCryptedKey(const CPubKey &vchPubKey, const std::vector<unsigned char> &vchCryptedSecret)
@@ -4480,7 +4508,10 @@ bool CWallet::GetKeyOrigin(const CKeyID& keyID, KeyOriginInfo& info) const
             meta = it->second;
         }
     }
-    if (!meta.hdKeypath.empty()) {
+    if (!meta.hdKeypath.empty() && !meta.master_key_id.IsNull()) {
+        if (!ParseHDKeypath(meta.hdKeypath, info.path)) return false;
+        std::copy(meta.master_key_id.begin(), meta.master_key_id.begin() + 4, info.fingerprint);
+    } else if (!meta.hdKeypath.empty() && !meta.hd_seed_id.IsNull()) {
         if (!ParseHDKeypath(meta.hdKeypath, info.path)) return false;
         // Get the proper master key id
         CKey key;

@@ -636,6 +636,9 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
         pwallet->wtxOrdered.insert(make_pair(entry.nOrderPos, CWallet::TxPair(nullptr, &entry)));
     }
 
+    // Upgrade all of the wallet keymetadata to have the hd master key id
+    pwallet->UpgradeKeyMetadata();
+
     return result;
 }
 

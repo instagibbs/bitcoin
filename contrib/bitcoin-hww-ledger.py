@@ -375,6 +375,9 @@ def get_pubkey_at_path(path, mainnet):
     app = btchip(dongle)
 
     path = path[2:]
+    # remove trailing separators
+    if len(path) > 0 and path[-1] == "/":
+        path = path[:-1]
     # This call returns raw uncompressed pubkey, chaincode
     pubkey = app.getWalletPublicKey(path)
     if path != "":

@@ -39,7 +39,6 @@ class ExternalHDTest(BitcoinTestFramework):
         self.nodes[0].assert_start_raises_init_error(extra_args=['-hardwarewallet=dummy.py'], expected_msg="Error: Error getting xpub from device. Make sure your `-hardwarewallet` path is correct and the device plugged in and unlocked.")
         self.nodes[0].assert_start_raises_init_error(extra_args=['-hardwarewallet='+hww_driver_path, '-externalhd=tpubDAenfwNu5GyCJWv8oqRAckdKMSUoZjgVF5p8WvQwHQeXjDhAHmGrPa4a4y2Fn7HF2nfCLefJanHV3ny1UY25MRVogizB2zRUdAo7Tr9XAjm'], expected_msg="Error: externalhd and hardwarewallet cannot be both set.")
         self.nodes[0].assert_start_raises_init_error(extra_args=['-hardwarewallet='+hww_driver_path, "-derivationpath=mm/44'/0'/0'"], expected_msg="Error: Derivation path is malformed. Example: m/44'/0'/0'")
-        self.nodes[0].assert_start_raises_init_error(extra_args=['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44'/0'/0'/"], expected_msg="Error: Derivation path is malformed. Example: m/44'/0'/0'")
         self.nodes[0].assert_start_raises_init_error(extra_args=['-hardwarewallet='+hww_driver_path, "-derivationpath=m/44h/0h/0h"], expected_msg="Error: Derivation path is malformed. Example: m/44'/0'/0'")
 
         # One node will be the default BIP44 path, one some bizarre specified path

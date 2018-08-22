@@ -919,7 +919,14 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
 
             // Import public keys
             for (size_t i = 0; i < pubKeys.size(); ++i) {
-                const std::string& pubkey = pubKeys[i].get_str();
+                std::string pubkey;
+                UniValue key_origin;
+                if (pubKeys[i].getType() == UniValue::VOBJ) {
+                    pubkey = pubKeys[i].get_obj().getKeys()[0];
+                    key_origin = pubKeys[i][pubkey].get_obj();
+                } else {
+                    pubkey = pubKeys[i].get_str();
+                }
 
                 if (!IsHex(pubkey)) {
                     throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Pubkey must be a hex string");
@@ -962,12 +969,37 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                 if (!pwallet->AddWatchOnly(scriptRawPubKey, timestamp)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
                 }
+
+                // Add key origin to keymetadata
+                if (!key_origin.isNull()) {
+                    const std::string& master = key_origin.getKeys()[0];
+                    const std::string& path = key_origin[master].get_str();
+
+                    // Parse the keypath and make sure it is correct
+                    std::vector<uint32_t> keypath;
+                    if (!ParseHDKeypath(path, keypath)) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Keypath is not a valid keypath");
+                    }
+
+                    pwallet->mapKeyMetadata[pubKey.GetID()].master_key_id.SetHex(master);
+                    pwallet->mapKeyMetadata[pubKey.GetID()].hdKeypath = path;
+                    if (!pwallet->WriteKeyMetadata(pwallet->mapKeyMetadata[pubKey.GetID()], pubKey, false)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Error adding pubkey metadata to wallet");
+                    }
+                }
             }
 
             // Import private keys.
             if (keys.size()) {
                 for (size_t i = 0; i < keys.size(); i++) {
-                    const std::string& privkey = keys[i].get_str();
+                    std::string privkey;
+                    UniValue key_origin;
+                    if (keys[i].getType() == UniValue::VOBJ) {
+                        privkey = keys[i].get_obj().getKeys()[0];
+                        key_origin = keys[i][privkey].get_obj();
+                    } else {
+                        privkey = keys[i].get_str();
+                    }
 
                     CKey key = DecodeSecret(privkey);
 
@@ -988,6 +1020,21 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
 
                     pwallet->mapKeyMetadata[vchAddress].nCreateTime = timestamp;
 
+                    // Add key origin to keymetadata
+                    if (!key_origin.isNull()) {
+                        const std::string& master = key_origin.getKeys()[0];
+                        const std::string& path = key_origin[master].get_str();
+
+                        // Parse the keypath and make sure it is correct
+                        std::vector<uint32_t> keypath;
+                        if (!ParseHDKeypath(path, keypath)) {
+                            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Keypath is not a valid keypath");
+                        }
+
+                        pwallet->mapKeyMetadata[pubkey.GetID()].master_key_id.SetHex(master);
+                        pwallet->mapKeyMetadata[pubkey.GetID()].hdKeypath = path;
+                    }
+
                     if (!pwallet->AddKeyPubKey(key, pubkey)) {
                         throw JSONRPCError(RPC_WALLET_ERROR, "Error adding key to wallet");
                     }
@@ -1000,7 +1047,14 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
         } else {
             // Import public keys.
             if (pubKeys.size() && keys.size() == 0) {
-                const std::string& strPubKey = pubKeys[0].get_str();
+                std::string strPubKey;
+                UniValue key_origin;
+                if (pubKeys[0].getType() == UniValue::VOBJ) {
+                    strPubKey = pubKeys[0].get_obj().getKeys()[0];
+                    key_origin = pubKeys[0][strPubKey].get_obj();
+                } else {
+                    strPubKey = pubKeys[0].get_str();
+                }
 
                 if (!IsHex(strPubKey)) {
                     throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Pubkey must be a hex string");
@@ -1061,12 +1115,37 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                     throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
                 }
 
+                // Add key origin to keymetadata
+                if (!key_origin.isNull()) {
+                    const std::string& master = key_origin.getKeys()[0];
+                    const std::string& path = key_origin[master].get_str();
+
+                    // Parse the keypath and make sure it is correct
+                    std::vector<uint32_t> keypath;
+                    if (!ParseHDKeypath(path, keypath)) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Keypath is not a valid keypath");
+                    }
+
+                    pwallet->mapKeyMetadata[pubKey.GetID()].master_key_id.SetHex(master);
+                    pwallet->mapKeyMetadata[pubKey.GetID()].hdKeypath = path;
+                    if (!pwallet->WriteKeyMetadata(pwallet->mapKeyMetadata[pubKey.GetID()], pubKey, false)) {
+                        throw JSONRPCError(RPC_WALLET_ERROR, "Error adding pubkey metadata to wallet");
+                    }
+                }
+
                 success = true;
             }
 
             // Import private keys.
             if (keys.size()) {
-                const std::string& strPrivkey = keys[0].get_str();
+                std::string strPrivkey;
+                UniValue key_origin;
+                if (keys[0].getType() == UniValue::VOBJ) {
+                    strPrivkey = keys[0].get_obj().getKeys()[0];
+                    key_origin = keys[0][strPrivkey].get_obj();
+                } else {
+                    strPrivkey = keys[0].get_str();
+                }
 
                 // Checks.
                 CKey key = DecodeSecret(strPrivkey);
@@ -1105,6 +1184,21 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                 }
 
                 pwallet->mapKeyMetadata[vchAddress].nCreateTime = timestamp;
+
+                // Add key origin to keymetadata
+                if (!key_origin.isNull()) {
+                    const std::string& master = key_origin.getKeys()[0];
+                    const std::string& path = key_origin[master].get_str();
+
+                    // Parse the keypath and make sure it is correct
+                    std::vector<uint32_t> keypath;
+                    if (!ParseHDKeypath(path, keypath)) {
+                        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Keypath is not a valid keypath");
+                    }
+
+                    pwallet->mapKeyMetadata[pubKey.GetID()].master_key_id.SetHex(master);
+                    pwallet->mapKeyMetadata[pubKey.GetID()].hdKeypath = path;
+                }
 
                 if (!pwallet->AddKeyPubKey(key, pubKey)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Error adding key to wallet");
@@ -1193,8 +1287,8 @@ UniValue importmulti(const JSONRPCRequest& mainRequest)
             "                                                              0 can be specified to scan the entire blockchain. Blocks up to 2 hours before the earliest key\n"
             "                                                              creation time of all keys being imported by the importmulti call will be scanned.\n"
             "      \"redeemscript\": \"<script>\"                            , (string, optional) Allowed only if the scriptPubKey is a P2SH address or a P2SH scriptPubKey\n"
-            "      \"pubkeys\": [\"<pubKey>\", ... ]                         , (array, optional) Array of strings giving pubkeys that must occur in the output or redeemscript\n"
-            "      \"keys\": [\"<key>\", ... ]                               , (array, optional) Array of strings giving private keys whose corresponding public keys must occur in the output or redeemscript\n"
+            "      \"pubkeys\": [{\"pubkey\":{\"master_key_id\":\"keypath\"}}, ... ]                         , (array, optional) Array of strings giving pubkeys that must occur in the output or redeemscript\n"
+            "      \"keys\": [{\"<key>\":{\"master_key_id\":\"keypath\"}}, ... ]                               , (array, optional) Array of strings giving private keys whose corresponding public keys must occur in the output or redeemscript\n"
             "      \"internal\": <true>                                    , (boolean, optional, default: false) Stating whether matching outputs should be treated as not incoming payments\n"
             "      \"watchonly\": <true>                                   , (boolean, optional, default: false) Stating whether matching outputs should be considered watched even when they're not spendable, only allowed if keys are empty\n"
             "      \"label\": <label>                                      , (string, optional, default: '') Label to assign to the address, only allowed with internal=false\n"

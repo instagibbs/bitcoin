@@ -479,6 +479,53 @@ class ImportMultiTest(BitcoinTestFramework):
         import_pub2 = self.nodes[0].getaddressinfo(addr2)['pubkey']
         assert_equal(pub2, import_pub2)
 
+        # Import pubkeys with key origin info
+        self.log.info("Addresses should have hd keypath and master key id after import with key origin")
+        pub_addr = self.nodes[1].getnewaddress()
+        info = self.nodes[1].getaddressinfo(pub_addr)
+        pub = info['pubkey']
+        pub_keypath = info['hdkeypath']
+        pub_masterid = info['hdmasterkeyid']
+        result = self.nodes[0].importmulti(
+            [{
+                'scriptPubKey' : { 'address' : pub_addr},
+                'pubkeys' : [{pub:{pub_masterid:pub_keypath}}],
+                "timestamp": "now",
+            }]
+        )
+        assert result[0]['success']
+        pub_import_info = self.nodes[0].getaddressinfo(pub_addr)
+        assert_equal(pub_import_info['hdmasterkeyid'], pub_masterid)
+        assert_equal(pub_import_info['pubkey'], pub)
+        assert_equal(pub_import_info['hdkeypath'], pub_keypath)
+
+        # Import privkeys with key origin info
+        priv_addr = self.nodes[1].getnewaddress()
+        info = self.nodes[1].getaddressinfo(priv_addr)
+        priv = self.nodes[1].dumpprivkey(priv_addr)
+        priv_keypath = info['hdkeypath']
+        priv_masterid = info['hdmasterkeyid']
+        result = self.nodes[0].importmulti(
+            [{
+                'scriptPubKey' : { 'address' : priv_addr},
+                'keys' : [{priv:{priv_masterid:priv_keypath}}],
+                "timestamp": "now",
+            }]
+        )
+        assert result[0]['success']
+        priv_import_info = self.nodes[0].getaddressinfo(priv_addr)
+        assert_equal(priv_import_info['hdmasterkeyid'], priv_masterid)
+        assert_equal(priv_import_info['hdkeypath'], priv_keypath)
+
+        # Make sure the key origin info are still there after a restart
+        self.stop_nodes()
+        self.start_nodes()
+        import_info = self.nodes[0].getaddressinfo(pub_addr)
+        assert_equal(import_info['hdmasterkeyid'], pub_masterid)
+        assert_equal(import_info['hdkeypath'], pub_keypath)
+        import_info = self.nodes[0].getaddressinfo(priv_addr)
+        assert_equal(import_info['hdmasterkeyid'], priv_masterid)
+        assert_equal(import_info['hdkeypath'], priv_keypath)
 
 if __name__ == '__main__':
     ImportMultiTest ().main ()

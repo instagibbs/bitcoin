@@ -826,6 +826,7 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
         const bool internal = data.exists("internal") ? data["internal"].get_bool() : false;
         const bool watchOnly = data.exists("watchonly") ? data["watchonly"].get_bool() : false;
         const std::string& label = data.exists("label") && !internal ? data["label"].get_str() : "";
+        const bool add_keypool = data.exists("keypool") ? data["keypool"].get_bool() : false;
 
         bool isScript = scriptPubKey.getType() == UniValue::VSTR;
         bool isP2SH = strRedeemScript.length() > 0;
@@ -871,6 +872,16 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
         // Invalid P2SH redeemScript
         if (isP2SH && !IsHex(strRedeemScript)) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid redeem script");
+        }
+
+        // Add to keypool only works with privkeys disabled
+        if (add_keypool && !pwallet->IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Keys can only be imported to the keypool when private keys are disabled");
+        }
+
+        // Add to keypool only works with pubkeys
+        if (add_keypool && pubKeys.size() == 0) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Only pubkeys can be imported to the keypool");
         }
 
         // Process. //
@@ -967,6 +978,10 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                     throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
                 }
 
+                // Add pubkey to keypool
+                if (add_keypool) {
+                    pwallet->AddKeypoolPubkey(pubKey, internal);
+                }
                 // Add key origin to keymetadata
                 if (!key_origin.isNull()) {
                     const std::string& master = key_origin.getKeys()[0];
@@ -1101,6 +1116,10 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                     throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
                 }
 
+                // Add pubkey to keypool
+                if (add_keypool) {
+                    pwallet->AddKeypoolPubkey(pubKey, internal);
+                }
                 // Add key origin to keymetadata
                 if (!key_origin.isNull()) {
                     const std::string& master = key_origin.getKeys()[0];
@@ -1265,6 +1284,7 @@ UniValue importmulti(const JSONRPCRequest& mainRequest)
             "      \"internal\": <true>                                    , (boolean, optional, default: false) Stating whether matching outputs should be treated as not incoming payments\n"
             "      \"watchonly\": <true>                                   , (boolean, optional, default: false) Stating whether matching outputs should be considered watched even when they're not spendable, only allowed if keys are empty\n"
             "      \"label\": <label>                                      , (string, optional, default: '') Label to assign to the address, only allowed with internal=false\n"
+            "      \"keypool\": <true|false>                               , (boolean, optional, default: false) If true, adds the pubkeys to the keypool if private keys are disabled for the wallet.\n"
             "    }\n"
             "  ,...\n"
             "  ]\n"

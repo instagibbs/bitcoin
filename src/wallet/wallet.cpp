@@ -332,6 +332,11 @@ void CWallet::LoadScriptMetadata(const CScriptID& script_id, const CKeyMetadata 
     m_script_metadata[script_id] = meta;
 }
 
+bool CWallet::WriteKeyMetadata(const CKeyMetadata& meta, const CPubKey& pubkey, const bool overwrite)
+{
+    return WalletBatch(*database).WriteKeyMetadata(meta, pubkey, overwrite);
+}
+
 void CWallet::UpgradeKeyMetadata()
 {
     AssertLockHeld(cs_wallet); // mapKeyMetadata

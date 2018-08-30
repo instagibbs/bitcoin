@@ -2676,7 +2676,7 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient>& vecSend, CTransac
                 //  post-backup change.
 
                 // Reserve a new key pair from key pool
-                if (IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS)) {
+                if (IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && setInternalKeyPool.empty()) {
                     strFailReason = _("Can't generate a change-address key. Private keys are disabled for this wallet.");
                     return false;
                 }

@@ -203,6 +203,17 @@ public:
     ReadStatus InitData(const CTxMemPool* pool, const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn);
     bool IsTxAvailable(size_t index) const;
     ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing);
+
+    ADD_SERIALIZE_METHODS;
+
+    template <typename Stream, typename Operation>
+    inline void SerializationOp(Stream& s, Operation ser_action) {
+        READWRITE(txn_available);
+        READWRITE(prefilled_count);
+        READWRITE(mempool_count);
+        READWRITE(extra_count);
+        READWRITE(header);
+    }
 };
 
 #endif // BITCOIN_BLOCKENCODINGS_H

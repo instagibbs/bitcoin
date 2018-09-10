@@ -82,6 +82,15 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest)
         BOOST_CHECK(!partialBlock.IsTxAvailable(1));
         BOOST_CHECK( partialBlock.IsTxAvailable(2));
 
+        // Serialization round-trip mini-test
+        CDataStream ssPartialBlock(SER_NETWORK, PROTOCOL_VERSION);
+        ssPartialBlock << partialBlock;
+        PartiallyDownloadedBlock partialBlock_back;
+        ssPartialBlock >> partialBlock_back;
+        BOOST_CHECK( partialBlock_back.IsTxAvailable(0));
+        BOOST_CHECK(!partialBlock_back.IsTxAvailable(1));
+        BOOST_CHECK( partialBlock_back.IsTxAvailable(2));
+
         BOOST_CHECK_EQUAL(pool.mapTx.find(block.vtx[2]->GetHash())->GetSharedTx().use_count(), SHARED_TX_OFFSET + 1);
 
         size_t poolSize = pool.size();

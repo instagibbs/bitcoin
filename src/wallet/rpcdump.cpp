@@ -805,9 +805,49 @@ UniValue dumpwallet(const JSONRPCRequest& request)
     return reply;
 }
 
+UniValue ProcessDescriptor(CWallet * const pwallet, const UniValue& data, const int64_t timestamp)
+{
+
+    const bool internal = data.exists("internal") ? data["internal"].get_bool() : false;
+    std::string desc_str = data.get_str();
+    int range = 1000;
+        desc_str = desc_uni.get_str();
+        UniValue range_uni = find_value(scanobject, "range");
+        if (!range_uni.isNull()) {
+            range = range_uni.get_int();
+            if (range < 0 || range > 1000000) throw JSONRPCError(RPC_INVALID_PARAMETER, "range out of range");
+        }
+    } else { 
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Scan object needs to be either a string or an object");
+    }
+
+    FlatSigningProvider provider;
+    auto desc = Parse(desc_str, provider);
+    if (!desc) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Invalid descriptor '%s'", desc_str));
+    }
+    if (!desc->IsRange()) range = 0;
+    for (int i = 0; i <= range; ++i) {
+        std::vector<CScript> scripts;
+        if (!desc->Expand(i, provider, scripts, provider)) {
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, strprintf("Cannot derive script without private keys: '%s'", desc_str));
+        }
+        needles.insert(scripts.begin(), scripts.end());
+    }
+}
 
 static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, const int64_t timestamp) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
 {
+    // Process entry as a descriptor
+    if (data.exists("desc")) {
+        if (data.exists("scriptPubKey") || (scriptPubKey.getType() == UniValue::VOBJ && scriptPubKey.exists("address"))) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "You cannot give both `desc` and `address/scriptPubKey`");
+        }
+
+        return ProcessDescriptor(pwallet, data, timestamp);
+
+    }
+
     try {
         bool success = false;
 

@@ -619,5 +619,18 @@ class ImportMultiTest(BitcoinTestFramework):
         address_assert = self.nodes[1].getaddressinfo(multi_sig_script['address'])
         assert_equal(address_assert['solvable'], True)
 
+        # Test importing of a P2SH-P2WPKH address via descriptor + private key
+        address = self.nodes[0].getaddressinfo(self.nodes[0].getnewaddress(address_type="p2sh-segwit"))
+        self.log.info("Should import a p2sh-p2wpkh address from descriptor and private key")
+        result = self.nodes[1].importmulti([{
+            "desc": "sh(wpkh(" + address["pubkey"] + "))",
+            "timestamp": "now",
+            "label": "Descriptor import test",
+            "keys": [self.nodes[0].dumpprivkey(address["address"])]
+        }])
+        assert_equal(result[0]['success'], True)
+        result = self.nodes[1].getaddressinfo(address["address"])
+        assert_equal(result['ismine'], True)
+
 if __name__ == '__main__':
     ImportMultiTest ().main ()

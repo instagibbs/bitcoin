@@ -103,7 +103,8 @@ BOOST_FIXTURE_TEST_CASE(rescan, TestChain100Setup)
                       "transactions and coins using this key may not appear in the wallet. This error could be caused "
                       "by pruning or data corruption (see bitcoind log for details) and could be dealt with by "
                       "downloading and rescanning the relevant blocks (see -reindex and -rescan "
-                      "options).\"}},{\"success\":true}]",
+                      "options).\"}},{\"success\":true,\"warnings\":[\"Assuming watchonly as no redeemscript, "
+                      "witnessscript, keys, or pubkeys are provided.\"]}]",
                               0, oldTip->GetBlockTimeMax(), TIMESTAMP_WINDOW));
         RemoveWallet(wallet);
     }

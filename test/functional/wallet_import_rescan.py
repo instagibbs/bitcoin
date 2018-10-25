@@ -61,7 +61,7 @@ class Variant(collections.namedtuple("Variant", "call data rescan prune")):
                 "timestamp": timestamp + TIMESTAMP_WINDOW + (1 if self.rescan == Rescan.late_timestamp else 0),
                 "pubkeys": [self.address["pubkey"]] if self.data == Data.pub else [],
                 "keys": [self.key] if self.data == Data.priv else [],
-                "watchonly": self.data != Data.priv
+                "watchonly": self.data == Data.address
             }], {"rescan": self.rescan in (Rescan.yes, Rescan.late_timestamp)})
             assert_equal(response, [{"success": True}])
 

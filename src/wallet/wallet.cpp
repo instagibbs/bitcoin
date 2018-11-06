@@ -4383,3 +4383,18 @@ bool CWallet::GetKeyOrigin(const CKeyID& keyID, KeyOriginInfo& info) const
     }
     return true;
 }
+
+bool CWallet::AddKeyOrigin(const CPubKey& pubkey, const KeyOriginInfo& info)
+{
+    LOCK(cs_wallet);
+    std::vector<unsigned char> fingerprint_data(20, 0);
+    fingerprint_data[0] = info.fingerprint[0];
+    fingerprint_data[1] = info.fingerprint[1];
+    fingerprint_data[2] = info.fingerprint[2];
+    fingerprint_data[3] = info.fingerprint[3];
+    uint160 fpr_data(fingerprint_data);
+    CKeyID master_key_id(fpr_data);
+    mapKeyMetadata[pubkey.GetID()].master_key_id = master_key_id;
+    mapKeyMetadata[pubkey.GetID()].hdKeypath = WriteHdKeypath(info.path);
+    return WriteKeyMetadata(mapKeyMetadata[pubkey.GetID()], pubkey, true);
+}

@@ -818,6 +818,7 @@ struct ImportData
     std::set<CScript> import_scripts;
     std::set<CKeyID> used_keys; // Import these private keys if available
     std::set<CKeyID> require_keys; // Fail if these public keys are not available
+    std::map<CKeyID, KeyOriginInfo> key_origins;
 };
 
 enum class ScriptContext
@@ -1056,6 +1057,7 @@ static void ProcessImportDescriptor(ImportData& import_data, const UniValue& dat
         import_data.import_scripts.emplace(x.second);
     }
     std::copy(out_keys.pubkeys.begin(), out_keys.pubkeys.end(), std::inserter(import_data.pubkeys, import_data.pubkeys.end()));
+    import_data.key_origins = out_keys.origins;
     for (size_t i = 0; i < priv_keys.size(); ++i) {
         const auto& str = priv_keys[i].get_str();
         CKey key = DecodeSecret(str);
@@ -1131,6 +1133,7 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                 if (!pwallet->GetPubKey(id, temp) && !pwallet->AddWatchOnly(GetScriptForRawPubKey(pubkey), timestamp)) {
                     throw JSONRPCError(RPC_WALLET_ERROR, "Error adding address to wallet");
                 }
+                pwallet->AddKeyOrigin(pubkey, import_data.key_origins[id]);
             }
         }
 

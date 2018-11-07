@@ -811,11 +811,12 @@ struct ImportData
     std::unique_ptr<CScript> redeemscript; //! Provided redeemScript; will be mvoed to `import_scripts` if relevant.
     std::unique_ptr<CScript> witnessscript; //! Provided witnessScript; will be moved to `import_scripts` if relevant.
     std::map<CKeyID, CPubKey> pubkeys;
+    std::vector<CPubKey> ordered_pubkeys; //! Used to track ordering of insertion of pubkeys
     std::map<CKeyID, CKey> privkeys;
 
     // Output data
-    std::set<CScript> script_pub_keys;
-    std::set<CScript> import_scripts;
+    std::vector<CScript> script_pub_keys;
+    std::vector<CScript> import_scripts;
     std::set<CKeyID> used_keys; // Import these private keys if available
     std::set<CKeyID> require_keys; // Fail if these public keys are not available
     std::map<CKeyID, KeyOriginInfo> key_origins;
@@ -855,7 +856,7 @@ static std::string RecurseImportData(const CScript& script, ImportData& data, Sc
         auto subscript = std::move(data.redeemscript);
         if (!subscript) return "missing redeemscript";
         if (CScriptID(*subscript) != id) return "redeemScript does not match the scriptPubKey";
-        data.import_scripts.emplace(*subscript);
+        data.import_scripts.emplace_back(*subscript);
         RecurseImportData(*subscript, data, ScriptContext::P2SH);
         break;
     }
@@ -874,8 +875,8 @@ static std::string RecurseImportData(const CScript& script, ImportData& data, Sc
         auto subscript = std::move(data.witnessscript);
         if (!subscript) return "missing witnessscript";
         if (CScriptID(*subscript) != id) return "witnessScript does not match the scriptPubKey or redeemScript";
-        data.import_scripts.emplace(script); // Special rule for IsMine: native P2WSH requires the full script imported
-        data.import_scripts.emplace(*subscript);
+        data.import_scripts.emplace_back(script); // Special rule for IsMine: native P2WSH requires the full script imported
+        data.import_scripts.emplace_back(*subscript);
         RecurseImportData(*subscript, data, ScriptContext::WITNESS_V0);
         break;
     }
@@ -884,7 +885,7 @@ static std::string RecurseImportData(const CScript& script, ImportData& data, Sc
         CKeyID id = CKeyID(uint160(solverdata[0]));
         data.require_keys.emplace(id);
         data.used_keys.emplace(id);
-        data.import_scripts.emplace(script); // Special rule for IsMine: native P2WPKH requires the full script imported
+        data.import_scripts.emplace_back(script); // Special rule for IsMine: native P2WPKH requires the full script imported
         break;
     }
     default:
@@ -929,7 +930,7 @@ static UniValue ProcessImportLegacy(ImportData& import_data, const UniValue& dat
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Internal must be set to true for nonstandard scriptPubKey imports.");
         }
     }
-    import_data.script_pub_keys.emplace(script);
+    import_data.script_pub_keys.emplace_back(script);
 
     // Parse all arguments
     if (strRedeemScript.size()) {
@@ -957,6 +958,7 @@ static UniValue ProcessImportLegacy(ImportData& import_data, const UniValue& dat
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Pubkey is not a valid public key");
         }
         import_data.pubkeys.emplace(pubkey.GetID(), pubkey);
+        import_data.ordered_pubkeys.emplace_back(pubkey);
     }
     for (size_t i = 0; i < keys.size(); ++i) {
         const auto& str = keys[i].get_str();
@@ -1046,18 +1048,22 @@ static void ProcessImportDescriptor(ImportData& import_data, const UniValue& dat
     } else if (parsed_desc->IsRange() && !data.exists("range")) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Descriptor is ranged, please specify the range");
     }
-    FlatSigningProvider out_keys;
+    // New signing provider each expansion to preserve ordering of entries
     for (int i = range_start; i <= range_end; ++i) {
+        FlatSigningProvider out_keys;
         std::vector<CScript> scripts_temp;
         parsed_desc->Expand(i, keys, scripts_temp, out_keys);
         std::copy(scripts_temp.begin(), scripts_temp.end(), std::inserter(import_data.script_pub_keys, import_data.script_pub_keys.end()));
+        for (auto const& x : out_keys.scripts) {
+            import_data.import_scripts.emplace_back(x.second);
+        }
+        std::copy(out_keys.pubkeys.begin(), out_keys.pubkeys.end(), std::inserter(import_data.pubkeys, import_data.pubkeys.end()));
+        std::copy(out_keys.origins.begin(), out_keys.origins.end(), std::inserter(import_data.key_origins, import_data.key_origins.end()));
+        for (const auto& entry : out_keys.pubkeys) {
+            import_data.ordered_pubkeys.emplace_back(entry.second);
+        }
     }
 
-    for (auto const& x : out_keys.scripts) {
-        import_data.import_scripts.emplace(x.second);
-    }
-    std::copy(out_keys.pubkeys.begin(), out_keys.pubkeys.end(), std::inserter(import_data.pubkeys, import_data.pubkeys.end()));
-    import_data.key_origins = out_keys.origins;
     for (size_t i = 0; i < priv_keys.size(); ++i) {
         const auto& str = priv_keys[i].get_str();
         CKey key = DecodeSecret(str);
@@ -1131,9 +1137,9 @@ static UniValue ProcessImport(CWallet * const pwallet, const UniValue& data, con
                 }
                 pwallet->UpdateTimeFirstKey(timestamp);
             }
-            for (const auto& entry : import_data.pubkeys) {
-                const CPubKey& pubkey = entry.second;
-                const CKeyID& id = entry.first;
+            // Iterate pubkeys in order for keypool insertion
+            for (const auto& pubkey : import_data.ordered_pubkeys) {
+                const CKeyID& id(pubkey.GetID());
                 pwallet->mapKeyMetadata[id].nCreateTime = timestamp;
                 CPubKey temp;
                 if (!pwallet->GetPubKey(id, temp) && !pwallet->AddWatchOnly(GetScriptForRawPubKey(pubkey), timestamp)) {

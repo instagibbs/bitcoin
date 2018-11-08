@@ -133,8 +133,10 @@ public:
     }
 
     void operator()(const CKeyID &keyId) {
-        if (keystore.HaveKey(keyId))
+        CPubKey pubkey;
+        if (keystore.HaveKey(keyId) || keystore.GetPubKey(keyId, pubkey)) {
             vKeys.push_back(keyId);
+        }
     }
 
     void operator()(const CScriptID &scriptId) {
@@ -156,7 +158,8 @@ public:
     void operator()(const WitnessV0KeyHash& keyid)
     {
         CKeyID id(keyid);
-        if (keystore.HaveKey(id)) {
+        CPubKey pubkey;
+        if (keystore.HaveKey(id) || keystore.GetPubKey(id, pubkey)) {
             vKeys.push_back(id);
         }
     }
@@ -1017,7 +1020,7 @@ bool CWallet::AddToWalletIfInvolvingMe(const CTransactionRef& ptx, const CBlockI
                         WalletLogPrintf("%s: Detected a used keypool key, mark all keypool key up to this key as used\n", __func__);
                         MarkReserveKeysAsUsed(mi->second);
 
-                        if (!TopUpKeyPool()) {
+                        if (!IsWalletFlagSet(WALLET_FLAG_DISABLE_PRIVATE_KEYS) && !TopUpKeyPool()) {
                             WalletLogPrintf("%s: Topping up keypool failed (locked wallet)\n", __func__);
                         }
                     }

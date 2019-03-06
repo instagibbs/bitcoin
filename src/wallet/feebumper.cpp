@@ -73,7 +73,7 @@ bool TransactionCanBeBumped(const CWallet* wallet, const uint256& txid)
     return res == feebumper::Result::OK;
 }
 
-Result CreateTransaction(const CWallet* wallet, const uint256& txid, const CCoinControl& coin_control, CAmount total_fee, std::vector<std::string>& errors,
+Result CreateTotalBumpTransaction(const CWallet* wallet, const uint256& txid, const CCoinControl& coin_control, CAmount total_fee, std::vector<std::string>& errors,
                          CAmount& old_fee, CAmount& new_fee, CMutableTransaction& mtx)
 {
     auto locked_chain = wallet->chain().lock();
@@ -208,6 +208,96 @@ Result CreateTransaction(const CWallet* wallet, const uint256& txid, const CCoin
         }
     }
 
+
+    return Result::OK;
+}
+
+
+Result CreateConfBumpTransaction(CWallet* wallet, const uint256& txid, const CCoinControl& coin_control, std::vector<std::string>& errors,
+                         CAmount& old_fee, CAmount& new_fee, CMutableTransaction& mtx)
+{
+    auto locked_chain = wallet->chain().lock();
+    LOCK(wallet->cs_wallet);
+    errors.clear();
+    auto it = wallet->mapWallet.find(txid);
+    if (it == wallet->mapWallet.end()) {
+        errors.push_back("Invalid or non-wallet transaction id");
+        return Result::INVALID_ADDRESS_OR_KEY;
+    }
+    const CWalletTx& wtx = it->second;
+
+    Result result = PreconditionChecks(*locked_chain, wallet, wtx, errors);
+    if (result != Result::OK) {
+        return result;
+    }
+
+    // Fill in recipients(take out change outputs)
+    std::vector<CRecipient> recipients;
+    for (const auto& output : wtx.tx->vout) {
+        if (!wallet->IsChange(output)) {
+            CRecipient recipient = {output.scriptPubKey, output.nValue, false};
+            recipients.push_back(recipient);
+        }
+    }
+
+    // Old transaction stuff
+    // return old fee first
+    old_fee = wtx.GetDebit(ISMINE_SPENDABLE) - wtx.tx->GetValueOut();
+    int64_t txSize = GetVirtualTransactionSize(*(wtx.tx));
+    // Feerate of thing we are bumping
+    CFeeRate old_feerate(old_fee, txSize);
+
+    // The wallet uses a conservative WALLET_INCREMENTAL_RELAY_FEE value to
+    // future proof against changes to network wide policy for incremental relay
+    // fee that our node may not be aware of.
+    CFeeRate walletIncrementalRelayFee = CFeeRate(WALLET_INCREMENTAL_RELAY_FEE);
+    if (::incrementalRelayFee > walletIncrementalRelayFee) {
+        walletIncrementalRelayFee = ::incrementalRelayFee;
+    }
+
+    // Compute required fee rate / total fee to hit
+    // We must be >= to this rate, and since tx will be as large or larger we should pass bip125 total fee check
+    CFeeRate min_new_feerate(old_feerate.GetFeePerK() + 1 + walletIncrementalRelayFee.GetFeePerK());
+    // m_conf_target feerate may be lower than this level! Just pick the highest of the two rates
+    CCoinControl new_coin_control(coin_control);
+    new_coin_control.m_feerate = 0; // Wipe boost::optional to not consider this rate next line
+    FeeCalculation fee_calc;
+    CFeeRate block_feerate(GetMinimumFeeRate(*wallet, new_coin_control, &fee_calc));
+    if (block_feerate.GetFeePerK() > min_new_feerate.GetFeePerK()) {
+        min_new_feerate = block_feerate;
+    }
+    // Set feerate to useful rate for replacement, will be used above conf estimate internally
+    new_coin_control.m_feerate = min_new_feerate;
+
+    // Fill in required inputs we are double-spending(all of them)
+    for (const auto& inputs : wtx.tx->vin) {
+        new_coin_control.Select(COutPoint(inputs.prevout));
+    }
+    // Probably redundant?
+    new_coin_control.fAllowOtherInputs = true;
+    new_coin_control.m_signal_bip125_rbf = true;
+
+    CTransactionRef tx_new = MakeTransactionRef();
+    CReserveKey reservekey(wallet);
+    CAmount fee_ret;
+    int change_pos_in_out; // We don't care were change goes
+    std::string fail_reason;
+    // Create replacement transaction but do not sign yet.
+    if (!wallet->CreateTransaction(*locked_chain, recipients, tx_new, reservekey, fee_ret, change_pos_in_out, fail_reason, new_coin_control, false)) {
+        errors.push_back("Unable to create transaction: " + fail_reason);
+    }
+
+    // Write back new fee if successful
+    new_fee = fee_ret;
+
+    // Write back transaction
+    mtx = CMutableTransaction(*tx_new);
+    // Mark new tx not replaceable, if requested.
+    if (!coin_control.m_signal_bip125_rbf.get_value_or(wallet->m_signal_rbf)) {
+        for (auto& input : mtx.vin) {
+            if (input.nSequence < 0xfffffffe) input.nSequence = 0xfffffffe;
+        }
+    }
 
     return Result::OK;
 }

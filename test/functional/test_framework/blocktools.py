@@ -101,22 +101,31 @@ def script_BIP34_coinbase_height(height):
     return CScript([CScriptNum(height)])
 
 
-def create_coinbase(height, pubkey=None):
-    """Create a coinbase transaction, assuming no miner fees.
+def create_coinbase(height, pubkey=None, extra_output_script=None, fees=0):
+    """Create a coinbase transaction.
 
     If pubkey is passed in, the coinbase output will be a P2PK output;
-    otherwise an anyone-can-spend output."""
+    otherwise an anyone-can-spend output.
+
+    If extra_output_script is given, make a 0-value output to that
+    script. This is useful to pad block weight/sigops as needed. """
     coinbase = CTransaction()
     coinbase.vin.append(CTxIn(COutPoint(0, 0xffffffff), script_BIP34_coinbase_height(height), 0xffffffff))
     coinbaseoutput = CTxOut()
     coinbaseoutput.nValue = 50 * COIN
     halvings = int(height / 150)  # regtest
     coinbaseoutput.nValue >>= halvings
-    if (pubkey is not None):
+    coinbaseoutput.nValue += fees
+    if pubkey is not None:
         coinbaseoutput.scriptPubKey = CScript([pubkey, OP_CHECKSIG])
     else:
         coinbaseoutput.scriptPubKey = CScript([OP_TRUE])
     coinbase.vout = [coinbaseoutput]
+    if extra_output_script is not None:
+        coinbaseoutput2 = CTxOut()
+        coinbaseoutput2.nValue = 0
+        coinbaseoutput2.scriptPubKey = extra_output_script
+        coinbase.vout.append(coinbaseoutput2)
     coinbase.calc_sha256()
     return coinbase
 

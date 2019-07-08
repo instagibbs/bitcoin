@@ -60,8 +60,10 @@ extern const std::string CRYPTED_KEY;
 extern const std::string CSCRIPT;
 extern const std::string DEFAULTKEY;
 extern const std::string DESTDATA;
+extern const std::string ACTIVEEXTERNALSPK;
 extern const std::string FLAGS;
 extern const std::string HDCHAIN;
+extern const std::string ACTIVEINTERNALSPK;
 extern const std::string KEY;
 extern const std::string KEYMETA;
 extern const std::string MASTER_KEY;
@@ -74,6 +76,7 @@ extern const std::string PURPOSE;
 extern const std::string SETTINGS;
 extern const std::string TX;
 extern const std::string VERSION;
+extern const std::string WALLETDESCRIPTOR;
 extern const std::string WATCHMETA;
 extern const std::string WATCHS;
 } // namespace DBKeys
@@ -244,6 +247,8 @@ public:
     bool WriteDestData(const std::string &address, const std::string &key, const std::string &value);
     /// Erase destination data tuple from wallet database
     bool EraseDestData(const std::string &address, const std::string &key);
+
+    bool WriteActiveScriptPubKeyMan(uint8_t type, const uint256& id, bool internal);
 
     DBErrors LoadWallet(CWallet* pwallet);
     DBErrors FindWalletTx(std::vector<uint256>& vTxHash, std::vector<CWalletTx>& vWtx);

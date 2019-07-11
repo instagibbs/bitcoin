@@ -1852,7 +1852,7 @@ bool DescriptorScriptPubKeyMan::HavePrivateKeys() const
 
 int64_t DescriptorScriptPubKeyMan::GetOldestKeyPoolTime() const
 {
-    return GetTime();
+    return 0;
 }
 
 size_t DescriptorScriptPubKeyMan::KeypoolCountExternalKeys() const

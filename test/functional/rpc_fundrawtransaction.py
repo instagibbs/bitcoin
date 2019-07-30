@@ -53,7 +53,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         # than a minimum sized signature.
 
         #            = 2 bytes * minRelayTxFeePerByte
-        feeTolerance = 2 * min_relay_tx_fee/1000
+        feeTolerance = 2 * min_relay_tx_fee/100
 
         self.nodes[2].generate(1)
         self.sync_all()

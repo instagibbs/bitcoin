@@ -630,7 +630,7 @@ class RawTransactionsTest(BitcoinTestFramework):
 
     def test_watchonly(self):
         ##################################################
-        # test a fundrawtransaction using only watchonly #
+        # test a fundrawtransaction using watchonly #
         ##################################################
 
         inputs = []
@@ -639,8 +639,11 @@ class RawTransactionsTest(BitcoinTestFramework):
 
         result = self.nodes[3].fundrawtransaction(rawtx, {'includeWatching': True })
         res_dec = self.nodes[0].decoderawtransaction(result["hex"])
-        assert_equal(len(res_dec["vin"]), 1)
-        assert_equal(res_dec["vin"][0]["txid"], self.watchonly_txid)
+        # Between one and two inputs depending on coin selection algorithm.
+        assert_equal(len(self.nodes[3].listunspent()), 2)
+        assert_greater_than(3, len(res_dec["vin"]))
+        assert_greater_than(len(res_dec["vin"]), 0)
+        assert res_dec["vin"][0]["txid"] == self.watchonly_txid or res_dec["vin"][1]["txid"] == self.watchonly_txid
 
         assert "fee" in result.keys()
         assert_greater_than(result["changepos"], -1)
@@ -678,7 +681,10 @@ class RawTransactionsTest(BitcoinTestFramework):
         #######################
 
         # Make sure there is exactly one input so coin selection can't skew the result
-        assert_equal(len(self.nodes[3].listunspent(1)), 1)
+        self.nodes[3].sendtoaddress(self.nodes[3].getnewaddress(), self.nodes[3].getbalance(), "", "", True)
+        self.sync_all()
+        self.nodes[0].generate(1)
+        self.sync_all()
 
         inputs = []
         outputs = {self.nodes[3].getnewaddress() : 1}

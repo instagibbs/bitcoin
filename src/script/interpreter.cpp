@@ -1405,10 +1405,11 @@ uint256 GetSpentScriptsSHA256(const std::vector<CTxOut>& outputs_spent)
 
 /* Not Exported, just convenience */
 template<typename TxType>
-uint256 GetDefaultCheckTemplateVerifyHashWithScript(const TxType& tx, const uint256& outputs_hash, const uint256& sequences_hash,
-                                const uint256& scriptSig_hash, const uint32_t input_index) {
+uint256 GetDefaultCheckTemplateVerifyHashWithScript(
+        const TxType& tx, const uint256& outputs_hash, const uint256& sequences_hash,
+        const uint256& scriptSig_hash, const uint32_t input_index) {
     auto h = HashWriter{}
-        << tx.nVersion
+    << tx.version
         << tx.nLockTime
         << scriptSig_hash
         << uint32_t(tx.vin.size())
@@ -1420,10 +1421,10 @@ uint256 GetDefaultCheckTemplateVerifyHashWithScript(const TxType& tx, const uint
 }
 
 template<typename TxType>
-uint256 GetDefaultCheckTemplateVerifyHashEmptyScript(const TxType& tx, const uint256& outputs_hash, const uint256& sequences_hash,
-                                const uint32_t input_index) {
+uint256 GetDefaultCheckTemplateVerifyHashEmptyScript(
+        const TxType& tx, const uint256& outputs_hash, const uint256& sequences_hash, const uint32_t input_index) {
     auto h = HashWriter{}
-        << tx.nVersion
+    << tx.version
         << tx.nLockTime
         << uint32_t(tx.vin.size())
         << sequences_hash
@@ -1441,8 +1442,8 @@ uint256 GetDefaultCheckTemplateVerifyHash(const TxType& tx, uint32_t input_index
 }
 
 template<typename TxType>
-uint256 GetDefaultCheckTemplateVerifyHash(const TxType& tx, const uint256& outputs_hash, const uint256& sequences_hash,
-                                const uint32_t input_index) {
+uint256 GetDefaultCheckTemplateVerifyHash(
+        const TxType& tx, const uint256& outputs_hash, const uint256& sequences_hash, const uint32_t input_index) {
     bool skip_scriptSigs = std::find_if(tx.vin.begin(), tx.vin.end(),
             [](const CTxIn& c) { return c.scriptSig != CScript(); }) == tx.vin.end();
     return skip_scriptSigs ? GetDefaultCheckTemplateVerifyHashEmptyScript(tx, outputs_hash, sequences_hash, input_index) :
@@ -1836,6 +1837,15 @@ bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSeq
     return true;
 }
 
+template <class T>
+bool GenericTransactionSignatureChecker<T>::CheckDefaultCheckTemplateVerifyHash(const std::vector<unsigned char>& hash) const
+{
+    // Should already be checked before calling...
+    assert(hash.size() == 32);
+    assert(txTo != nullptr);
+    uint256 hash_tmpl = GetDefaultCheckTemplateVerifyHash(*txTo, nIn);
+    return std::equal(hash_tmpl.begin(), hash_tmpl.end(), hash.data());
+}
 // explicit instantiation
 template class GenericTransactionSignatureChecker<CTransaction>;
 template class GenericTransactionSignatureChecker<CMutableTransaction>;

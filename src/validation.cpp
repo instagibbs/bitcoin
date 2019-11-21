@@ -1945,6 +1945,11 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
         flags |= SCRIPT_VERIFY_CHECKSEQUENCEVERIFY;
     }
 
+    // Enforce ANYPREVOUT (BIP118/pr943)
+    if (DeploymentActiveAt(block_index, consensusparams, Consensus::DEPLOYMENT_ANYPREVOUT)) {
+        flags |= SCRIPT_VERIFY_ANYPREVOUT;
+    }
+
     // Enforce BIP147 NULLDUMMY (activated simultaneously with segwit)
     if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_SEGWIT)) {
         flags |= SCRIPT_VERIFY_NULLDUMMY;

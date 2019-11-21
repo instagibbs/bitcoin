@@ -1292,6 +1292,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager& 
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_SEGWIT);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
+    SoftForkDescPushBack(blockindex, softforks, consensusParams, Consensus::DEPLOYMENT_ANYPREVOUT);
     return softforks;
 }
 } // anon namespace

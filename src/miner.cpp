@@ -79,14 +79,13 @@ void BlockAssembler::resetBlock()
     fIncludeWitness = false;
 
     // These counters do not include coinbase tx
-    nBlockTx = 0;
     nFees = 0;
 }
 
 Optional<int64_t> BlockAssembler::m_last_block_num_txs{nullopt};
 Optional<int64_t> BlockAssembler::m_last_block_weight{nullopt};
 
-std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn)
+std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& scriptPubKeyIn, const std::vector<CTransactionRef> * pre_selected_txs)
 {
     int64_t nTimeStart = GetTimeMicros();
 
@@ -134,12 +133,15 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
 
     int nPackagesSelected = 0;
     int nDescendantsUpdated = 0;
-    addPackageTxs(nPackagesSelected, nDescendantsUpdated);
+    if (pre_selected_txs) {
+        // For testing purposes only
+        pblock->vtx.insert(pblock->vtx.end(), pre_selected_txs->begin(), pre_selected_txs->end());
+    } else {
+        addPackageTxs(nPackagesSelected, nDescendantsUpdated);
+    }
 
     int64_t nTime1 = GetTimeMicros();
 
-    m_last_block_num_txs = nBlockTx;
-    m_last_block_weight = nBlockWeight;
 
     // Create coinbase transaction.
     CMutableTransaction coinbaseTx;
@@ -153,7 +155,11 @@ std::unique_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock(const CScript& sc
     pblocktemplate->vchCoinbaseCommitment = GenerateCoinbaseCommitment(*pblock, pindexPrev, chainparams.GetConsensus());
     pblocktemplate->vTxFees[0] = -nFees;
 
-    LogPrintf("CreateNewBlock(): block weight: %u txs: %u fees: %ld sigops %d\n", GetBlockWeight(*pblock), nBlockTx, nFees, nBlockSigOpsCost);
+    // Cache info for getmininginfo
+    m_last_block_weight = GetBlockWeight(*pblock);
+    m_last_block_num_txs = pblock->vtx.size() - 1; // Excludes coinbase
+
+    LogPrintf("CreateNewBlock(): block weight: %u txs: %u fees: %ld sigops %d\n", *m_last_block_weight, *m_last_block_num_txs, nFees, nBlockSigOpsCost);
 
     // Fill in header
     pblock->hashPrevBlock  = pindexPrev->GetBlockHash();
@@ -217,7 +223,6 @@ void BlockAssembler::AddToBlock(CTxMemPool::txiter iter)
     pblocktemplate->vTxFees.push_back(iter->GetFee());
     pblocktemplate->vTxSigOpsCost.push_back(iter->GetSigOpCost());
     nBlockWeight += iter->GetTxWeight();
-    ++nBlockTx;
     nBlockSigOpsCost += iter->GetSigOpCost();
     nFees += iter->GetFee();
     inBlock.insert(iter);

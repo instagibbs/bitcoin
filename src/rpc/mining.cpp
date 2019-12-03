@@ -103,11 +103,11 @@ static UniValue getnetworkhashps(const JSONRPCRequest& request)
 }
 
 // Returning false implies we should not try to make more blocks
-static bool generateBlock(const CScript& coinbase_script, uint64_t& nMaxTries, unsigned int& nExtraNonce, uint256& block_hash)
+static bool generateBlock(const CScript& coinbase_script, uint64_t& nMaxTries, unsigned int& nExtraNonce, uint256& block_hash, const std::vector<CTransactionRef>* pre_selected_txs)
 {
     block_hash.SetNull();
 
-    std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler(Params()).CreateNewBlock(coinbase_script));
+    std::unique_ptr<CBlockTemplate> pblocktemplate(BlockAssembler(Params()).CreateNewBlock(coinbase_script, pre_selected_txs));
     if (!pblocktemplate.get())
         throw JSONRPCError(RPC_INTERNAL_ERROR, "Couldn't create new block");
     CBlock *pblock = &pblocktemplate->block;
@@ -148,7 +148,7 @@ static UniValue generateBlocks(const CScript& coinbase_script, int nGenerate, ui
     while (nHeight < nHeightEnd && !ShutdownRequested())
     {
         uint256 block_hash;
-        if (!generateBlock(coinbase_script, nMaxTries, nExtraNonce, block_hash)) {
+        if (!generateBlock(coinbase_script, nMaxTries, nExtraNonce, block_hash, nullptr /* pre_selected_txs */)) {
             break;
         }
         if (!block_hash.IsNull()) {
@@ -236,75 +236,6 @@ static UniValue generatetoaddress(const JSONRPCRequest& request)
     return generateBlocks(coinbase_script, nGenerate, nMaxTries);
 }
 
-static std::string GenerateCustomBlock(const CScript& coinbase_script, const std::vector<CTransactionRef>& txs)
-{
-    CBlock block;
-    CChainParams chainparams(Params());
-
-    CBlockIndex* previous_index;
-    {
-        LOCK(cs_main);
-        previous_index = ::ChainActive().Tip();
-    }
-    CHECK_NONFATAL(previous_index != nullptr);
-
-    const int height = previous_index->nHeight + 1;
-
-    // Create coinbase transaction.
-    CMutableTransaction coinbase_tx;
-    coinbase_tx.vin.resize(1);
-    coinbase_tx.vin[0].prevout.SetNull();
-    coinbase_tx.vout.resize(1);
-    coinbase_tx.vout[0].scriptPubKey = coinbase_script;
-    coinbase_tx.vout[0].nValue = GetBlockSubsidy(height, chainparams.GetConsensus());
-    coinbase_tx.vin[0].scriptSig = CScript() << height << OP_0;
-    block.vtx.push_back(MakeTransactionRef(std::move(coinbase_tx)));
-
-    // Add transactions
-    block.vtx.insert(block.vtx.end(), txs.begin(), txs.end());
-
-    block.nVersion = ComputeBlockVersion(previous_index, chainparams.GetConsensus());
-    if (chainparams.MineBlocksOnDemand())
-        block.nVersion = gArgs.GetArg("-blockversion", block.nVersion);
-
-    // Fill in header
-    block.hashPrevBlock = previous_index->GetBlockHash();
-    block.nTime = GetAdjustedTime();
-    UpdateTime(&block, chainparams.GetConsensus(), previous_index);
-    block.nBits = GetNextWorkRequired(previous_index, &block, chainparams.GetConsensus());
-    block.nNonce = 0;
-
-    GenerateCoinbaseCommitment(block, previous_index, chainparams.GetConsensus());
-
-    {
-        LOCK(cs_main);
-        unsigned int extra_nonce = 0;
-        IncrementExtraNonce(&block, ::ChainActive().Tip(), extra_nonce);
-
-        BlockValidationState state;
-        if (!TestBlockValidity(state, chainparams, block, previous_index, false, false)) {
-            throw JSONRPCError(RPC_VERIFY_ERROR, strprintf("TestBlockValidity failed: %s", FormatStateMessage(state)));
-        }
-    }
-
-    int max_tries{1000000};
-
-    while (max_tries > 0 && !CheckProofOfWork(block.GetHash(), block.nBits, chainparams.GetConsensus()) && !ShutdownRequested()) {
-        ++block.nNonce;
-        --max_tries;
-    }
-
-    if (max_tries == 0) {
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "Exceeded max tries");
-    }
-
-    std::shared_ptr<const CBlock> shared_block = std::make_shared<const CBlock>(block);
-    if (!ProcessNewBlock(chainparams, shared_block, true, nullptr))
-        throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
-
-    return block.GetHash().GetHex();
-}
-
 static UniValue generatecustomblock(const JSONRPCRequest& request)
 {
     RPCHelpMan{"generatecustomblock",
@@ -382,7 +313,15 @@ static UniValue generatecustomblock(const JSONRPCRequest& request)
         }
     }
 
-    return GenerateCustomBlock(coinbase_script, txs);
+    uint256 block_hash;
+    uint64_t nMaxTries = 1000000;
+    unsigned int nExtraNonce;
+    while (block_hash.IsNull()) {
+        if (!generateBlock(coinbase_script, nMaxTries, nExtraNonce, block_hash, &txs)) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Shutdown requested, failed to make block.");
+        }
+    }
+    return block_hash.GetHex();
 }
 
 static UniValue getmininginfo(const JSONRPCRequest& request)

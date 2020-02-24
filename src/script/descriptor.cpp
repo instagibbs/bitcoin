@@ -1050,3 +1050,21 @@ std::unique_ptr<Descriptor> InferDescriptor(const CScript& script, const Signing
 {
     return InferScript(script, ParseScriptContext::TOP, provider);
 }
+
+void DescriptorCache::CacheExtPubKey(const KeyOriginInfo& origin_info, const CExtPubKey& xpub)
+{
+    m_xpubs[origin_info] = xpub;
+}
+
+bool DescriptorCache::GetCachedExtPubKey(const KeyOriginInfo& origin_info, CExtPubKey& xpub) const
+{
+    const auto& it = m_xpubs.find(origin_info);
+    if (it == m_xpubs.end()) return false;
+    xpub = it->second;
+    return true;
+}
+
+const std::map<KeyOriginInfo, CExtPubKey> DescriptorCache::GetCachedExtPubKeys() const
+{
+    return m_xpubs;
+}

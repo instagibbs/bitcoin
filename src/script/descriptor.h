@@ -13,6 +13,17 @@
 
 #include <vector>
 
+// Cache for pre-computed descriptor things
+class DescriptorCache {
+private:
+    std::map<KeyOriginInfo, CExtPubKey> m_xpubs;
+
+public:
+    void CacheExtPubKey(const KeyOriginInfo& origin_info, const CExtPubKey& xpub);
+    bool GetCachedExtPubKey(const KeyOriginInfo& origin_info, CExtPubKey& xpub) const;
+
+    const std::map<KeyOriginInfo, CExtPubKey> GetCachedExtPubKeys() const;
+};
 
 /** \brief Interface for parsed descriptor objects.
  *

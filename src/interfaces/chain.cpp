@@ -79,6 +79,13 @@ class LockImpl : public Chain::Lock, public UniqueLock<RecursiveMutex>
         assert(block != nullptr);
         return block->GetMedianTimePast();
     }
+    arith_uint256 getTotalChainWork() override
+    {
+        LockAssertion lock(::cs_main);
+        int height = ::ChainActive().Height();
+        CBlockIndex* block = ::ChainActive()[height];
+        return block->nChainWork;
+    }
     bool haveBlockOnDisk(int height) override
     {
         LockAssertion lock(::cs_main);

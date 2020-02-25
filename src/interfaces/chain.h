@@ -7,6 +7,7 @@
 
 #include <optional.h>               // For Optional and nullopt
 #include <primitives/transaction.h> // For CTransactionRef
+#include <arith_uint256.h> // for arith_uint256
 
 #include <memory>
 #include <stddef.h>
@@ -85,6 +86,10 @@ public:
         //! Get block median time past. Height must be valid or this function
         //! will abort.
         virtual int64_t getBlockMedianTimePast(int height) = 0;
+
+        //! Get total chain work for active chain.
+        //! Height must be valid or this function will abort.
+        virtual arith_uint256 getTotalChainWork() = 0;
 
         //! Check that the block is available on disk (i.e. has not been
         //! pruned), and contains transactions.

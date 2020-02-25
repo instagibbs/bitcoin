@@ -380,7 +380,7 @@ public:
         }
         return result;
     }
-    bool tryGetBalances(WalletBalances& balances, int& num_blocks) override
+    bool tryGetBalances(WalletBalances& balances, arith_uint256& total_work) override
     {
         auto locked_chain = m_wallet->chain().lock(true /* try_lock */);
         if (!locked_chain) return false;
@@ -389,7 +389,7 @@ public:
             return false;
         }
         balances = getBalances();
-        num_blocks = locked_chain->getHeight().get_value_or(-1);
+        total_work = locked_chain->getTotalChainWork();
         return true;
     }
     CAmount getBalance() override { return m_wallet->GetBalance().m_mine_trusted; }

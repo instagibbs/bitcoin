@@ -9,6 +9,7 @@
 #include <config/bitcoin-config.h>
 #endif
 
+#include <arith_uint256.h>
 #include <key.h>
 #include <script/standard.h>
 
@@ -177,7 +178,7 @@ private:
     // Cache some values to be able to detect changes
     interfaces::WalletBalances m_cached_balances;
     EncryptionStatus cachedEncryptionStatus;
-    int cachedNumBlocks;
+    arith_uint256 cached_total_work;
 
     void subscribeToCoreSignals();
     void unsubscribeFromCoreSignals();

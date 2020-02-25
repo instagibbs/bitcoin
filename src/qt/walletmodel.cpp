@@ -37,8 +37,7 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, interfaces:
     QObject(parent), m_wallet(std::move(wallet)), m_node(node), optionsModel(_optionsModel), addressTableModel(nullptr),
     transactionTableModel(nullptr),
     recentRequestsTableModel(nullptr),
-    cachedEncryptionStatus(Unencrypted),
-    cachedNumBlocks(0)
+    cachedEncryptionStatus(Unencrypted)
 {
     fHaveWatchOnly = m_wallet->haveWatchOnly();
     addressTableModel = new AddressTableModel(this);
@@ -77,17 +76,17 @@ void WalletModel::pollBalanceChanged()
     // holding the locks for a longer time - for example, during a wallet
     // rescan.
     interfaces::WalletBalances new_balances;
-    int numBlocks = -1;
-    if (!m_wallet->tryGetBalances(new_balances, numBlocks)) {
+    arith_uint256 total_work;
+    if (!m_wallet->tryGetBalances(new_balances, total_work)) {
         return;
     }
 
-    if(fForceCheckBalanceChanged || numBlocks != cachedNumBlocks)
+    if(fForceCheckBalanceChanged || total_work != cached_total_work)
     {
         fForceCheckBalanceChanged = false;
 
         // Balance and number of transactions might have changed
-        cachedNumBlocks = numBlocks;
+        cached_total_work = total_work;
 
         checkBalanceChanged(new_balances);
         if(transactionTableModel)

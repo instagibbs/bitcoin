@@ -6,6 +6,7 @@
 #define BITCOIN_INTERFACES_WALLET_H
 
 #include <amount.h>                    // For CAmount
+#include <arith_uint256.h>             // For arith_uint256
 #include <pubkey.h>                    // For CKeyID and CScriptID (definitions needed in CTxDestination instantiation)
 #include <script/standard.h>           // For CTxDestination
 #include <support/allocators/secure.h> // For SecureString
@@ -202,7 +203,7 @@ public:
     virtual WalletBalances getBalances() = 0;
 
     //! Get balances if possible without blocking.
-    virtual bool tryGetBalances(WalletBalances& balances, int& num_blocks) = 0;
+    virtual bool tryGetBalances(WalletBalances& balances, arith_uint256& total_work) = 0;
 
     //! Get balance.
     virtual CAmount getBalance() = 0;

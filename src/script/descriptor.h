@@ -23,6 +23,9 @@ public:
     bool GetCachedExtPubKey(const KeyOriginInfo& origin_info, CExtPubKey& xpub) const;
 
     const std::map<KeyOriginInfo, CExtPubKey> GetCachedExtPubKeys() const;
+
+    // Get the map CExtPubKeys that are in xpubs but not in m_xpubs;
+    std::map<KeyOriginInfo, CExtPubKey> GetNotCached(const std::map<KeyOriginInfo, CExtPubKey> xpubs) const;
 };
 
 /** \brief Interface for parsed descriptor objects.

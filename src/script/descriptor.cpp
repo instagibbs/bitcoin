@@ -1091,3 +1091,14 @@ const std::map<KeyOriginInfo, CExtPubKey> DescriptorCache::GetCachedExtPubKeys()
 {
     return m_xpubs;
 }
+
+std::map<KeyOriginInfo, CExtPubKey> DescriptorCache::GetNotCached(const std::map<KeyOriginInfo, CExtPubKey> xpubs) const
+{
+    std::map<KeyOriginInfo, CExtPubKey> out;
+    for (const auto& it : xpubs) {
+        const auto& fit = m_xpubs.find(it.first);
+        if (fit != m_xpubs.end()) continue;
+        out.emplace(it.first, it.second);
+    }
+    return out;
+}

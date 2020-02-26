@@ -331,10 +331,12 @@ public:
         assert(der);
         key = extkey.pubkey;
         if (write_cache) {
-            write_cache->CacheExtPubKey(info_out, extkey);
             // Only cache parent if there is any unhardened derivation
             if (m_derive != DeriveType::HARDENED) {
                 write_cache->CacheExtPubKey(parent_info, parent);
+            } else if (info_out.path.size() > 0) {
+                write_cache->CacheExtPubKey(info_out, extkey);
+            }
         }
 
         info = info_out;

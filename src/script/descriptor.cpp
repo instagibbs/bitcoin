@@ -156,7 +156,7 @@ struct PubkeyProvider
      *  read_cache is the cache to read keys from (if not nullptr)
      *  write_cache is the cache to write keys to (if not nullptr)
      */
-    virtual bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) const = 0;
+    virtual bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) = 0;
 
     /** Whether this represent multiple public keys at different positions. */
     virtual bool IsRange() const = 0;
@@ -186,7 +186,7 @@ class OriginPubkeyProvider final : public PubkeyProvider
 
 public:
     OriginPubkeyProvider(KeyOriginInfo info, std::unique_ptr<PubkeyProvider> provider) : m_origin(std::move(info)), m_provider(std::move(provider)) {}
-    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) const override
+    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) override
     {
         if (!m_provider->GetPubKey(pos, arg, key, info, read_cache, write_cache)) return false;
         std::copy(std::begin(m_origin.fingerprint), std::end(m_origin.fingerprint), info.fingerprint);
@@ -216,7 +216,7 @@ class ConstPubkeyProvider final : public PubkeyProvider
 
 public:
     ConstPubkeyProvider(const CPubKey& pubkey) : m_pubkey(pubkey) {}
-    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) const override
+    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) override
     {
         key = m_pubkey;
         info.path.clear();
@@ -250,6 +250,7 @@ enum class DeriveType {
 class BIP32PubkeyProvider final : public PubkeyProvider
 {
     CExtPubKey m_extkey;
+    CExtPubKey m_cached_xpub;
     KeyPath m_path;
     DeriveType m_derive;
 
@@ -288,7 +289,7 @@ public:
     BIP32PubkeyProvider(const CExtPubKey& extkey, KeyPath path, DeriveType derive) : m_extkey(extkey), m_path(std::move(path)), m_derive(derive) {}
     bool IsRange() const override { return m_derive != DeriveType::NO; }
     size_t GetSize() const override { return 33; }
-    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) const override
+    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) override
     {
         // Put the KeyOriginInfo into a temp variable to avoid modifying info before successful derivation
         KeyOriginInfo info_out, parent_info;
@@ -312,6 +313,9 @@ public:
                 if (!read_cache->GetCachedExtPubKey(parent_info, parent)) return false;
                 der = parent.Derive(extkey, pos);
             }
+        } else if (m_cached_xpub.pubkey.IsValid() && m_derive != DeriveType::HARDENED) {
+            parent = extkey = m_cached_xpub;
+            if (m_derive == DeriveType::UNHARDENED) der = parent.Derive(extkey, pos);
         } else if (IsHardened()) {
             CExtKey xprv;
             if (!GetDerivedExtKey(arg, xprv)) return false;
@@ -330,6 +334,7 @@ public:
         }
         assert(der);
         key = extkey.pubkey;
+        if (!m_cached_xpub.pubkey.IsValid() && m_derive != DeriveType::HARDENED) m_cached_xpub = parent;
         if (write_cache) {
             // Only cache parent if there is any unhardened derivation
             if (m_derive != DeriveType::HARDENED) {

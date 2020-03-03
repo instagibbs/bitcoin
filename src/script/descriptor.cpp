@@ -249,19 +249,22 @@ enum class DeriveType {
 /** An object representing a parsed extended public key in a descriptor. */
 class BIP32PubkeyProvider final : public PubkeyProvider
 {
-    CExtPubKey m_extkey;
-    CExtPubKey m_cached_xpub;
+    // Root xpub, path, and final derivation step type being used, if any
+    CExtPubKey m_root_extkey;
     KeyPath m_path;
     DeriveType m_derive;
+    // Cache of the parent of the final derived pubkeys.
+    // Primarily useful for situations when no read_cache is provided.
+    CExtPubKey m_cached_xpub;
 
     bool GetExtKey(const SigningProvider& arg, CExtKey& ret) const
     {
         CKey key;
-        if (!arg.GetKey(m_extkey.pubkey.GetID(), key)) return false;
-        ret.nDepth = m_extkey.nDepth;
-        std::copy(m_extkey.vchFingerprint, m_extkey.vchFingerprint + sizeof(ret.vchFingerprint), ret.vchFingerprint);
-        ret.nChild = m_extkey.nChild;
-        ret.chaincode = m_extkey.chaincode;
+        if (!arg.GetKey(m_root_extkey.pubkey.GetID(), key)) return false;
+        ret.nDepth = m_root_extkey.nDepth;
+        std::copy(m_root_extkey.vchFingerprint, m_root_extkey.vchFingerprint + sizeof(ret.vchFingerprint), ret.vchFingerprint);
+        ret.nChild = m_root_extkey.nChild;
+        ret.chaincode = m_root_extkey.chaincode;
         ret.key = key;
         return true;
     }
@@ -286,70 +289,75 @@ class BIP32PubkeyProvider final : public PubkeyProvider
     }
 
 public:
-    BIP32PubkeyProvider(const CExtPubKey& extkey, KeyPath path, DeriveType derive) : m_extkey(extkey), m_path(std::move(path)), m_derive(derive) {}
+    BIP32PubkeyProvider(const CExtPubKey& extkey, KeyPath path, DeriveType derive) : m_root_extkey(extkey), m_path(std::move(path)), m_derive(derive) {}
     bool IsRange() const override { return m_derive != DeriveType::NO; }
     size_t GetSize() const override { return 33; }
-    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key, KeyOriginInfo& info, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) override
+    bool GetPubKey(int pos, const SigningProvider& arg, CPubKey& key_out, KeyOriginInfo& child_info_out, const DescriptorCache* read_cache = nullptr, DescriptorCache* write_cache = nullptr) override
     {
-        // Put the KeyOriginInfo into a temp variable to avoid modifying info before successful derivation
-        KeyOriginInfo info_out, parent_info;
-        CKeyID keyid = m_extkey.pubkey.GetID();
-        std::copy(keyid.begin(), keyid.begin() + sizeof(info_out.fingerprint), info_out.fingerprint);
-        info_out.path = m_path;
-        parent_info = info_out;
+        // Info of parent of pubkey-to-be-derived
+        KeyOriginInfo parent_info;
+        CKeyID keyid = m_root_extkey.pubkey.GetID();
+        std::copy(keyid.begin(), keyid.begin() + sizeof(parent_info.fingerprint), parent_info.fingerprint);
+        parent_info.path = m_path;
 
-        // For a ranged descriptor, add derivation step to path, otherwise return public key at current depth.
-        if (m_derive == DeriveType::UNHARDENED) info_out.path.push_back((uint32_t)pos);
-        if (m_derive == DeriveType::HARDENED) info_out.path.push_back(((uint32_t)pos) | 0x80000000L);
+        // Info of the derived key itself which is copied out upon successful completion
+        KeyOriginInfo child_info_out_tmp = parent_info;
+        if (m_derive == DeriveType::UNHARDENED) child_info_out_tmp.path.push_back((uint32_t)pos);
+        if (m_derive == DeriveType::HARDENED) child_info_out_tmp.path.push_back(((uint32_t)pos) | 0x80000000L);
 
         // Derive keys or fetch them from cache
-        CExtPubKey extkey = m_extkey;
-        CExtPubKey parent = extkey;
+        CExtPubKey child_extkey = m_root_extkey;
+        CExtPubKey parent_extkey = m_root_extkey;
         bool der = true;
         if (read_cache) {
-            if (!read_cache->GetCachedExtPubKey(info_out, extkey)) {
+            if (!read_cache->GetCachedExtPubKey(child_info_out_tmp, child_extkey)) {
                 if (m_derive != DeriveType::UNHARDENED) return false;
                 // Try to get the derivation parent
-                if (!read_cache->GetCachedExtPubKey(parent_info, parent)) return false;
-                der = parent.Derive(extkey, pos);
+                if (!read_cache->GetCachedExtPubKey(parent_info, parent_extkey)) return false;
+                der = parent_extkey.Derive(child_extkey, pos);
             }
         } else if (m_cached_xpub.pubkey.IsValid() && m_derive != DeriveType::HARDENED) {
-            parent = extkey = m_cached_xpub;
-            if (m_derive == DeriveType::UNHARDENED) der = parent.Derive(extkey, pos);
+            // We've cached the parent xpub and can compute child xpub directly, use it
+            parent_extkey = child_extkey = m_cached_xpub;
+            if (m_derive == DeriveType::UNHARDENED) der = parent_extkey.Derive(child_extkey, pos);
         } else if (IsHardened()) {
             CExtKey xprv;
             if (!GetDerivedExtKey(arg, xprv)) return false;
-            parent = xprv.Neuter();
+            parent_extkey = xprv.Neuter();
             if (m_derive == DeriveType::UNHARDENED) der = xprv.Derive(xprv, pos);
             if (m_derive == DeriveType::HARDENED) der = xprv.Derive(xprv, pos | 0x80000000UL);
-            extkey = xprv.Neuter();
+            child_extkey = xprv.Neuter();
         } else {
-            for (auto entry : m_path) {
-                der = parent.Derive(parent, entry);
+            for (auto entry : parent_info.path) {
+                der = parent_extkey.Derive(parent_extkey, entry);
                 assert(der);
             }
-            extkey = parent;
-            if (m_derive == DeriveType::UNHARDENED) der = parent.Derive(extkey, pos);
+            child_extkey = parent_extkey;
+            if (m_derive == DeriveType::UNHARDENED) der = parent_extkey.Derive(child_extkey, pos);
             assert(m_derive != DeriveType::HARDENED);
         }
         assert(der);
-        key = extkey.pubkey;
-        if (!m_cached_xpub.pubkey.IsValid() && m_derive != DeriveType::HARDENED) m_cached_xpub = parent;
+
+        child_info_out = child_info_out_tmp;
+        key_out = child_extkey.pubkey;
+
+        // We rely on the consumer to check that m_derive isn't HARDENED as above
+        m_cached_xpub = parent_extkey;
+
         if (write_cache) {
             // Only cache parent if there is any unhardened derivation
             if (m_derive != DeriveType::HARDENED) {
-                write_cache->CacheExtPubKey(parent_info, parent);
-            } else if (info_out.path.size() > 0) {
-                write_cache->CacheExtPubKey(info_out, extkey);
+                write_cache->CacheExtPubKey(parent_info, parent_extkey);
+            } else if (child_info_out.path.size() > 0) {
+                write_cache->CacheExtPubKey(child_info_out, child_extkey);
             }
         }
 
-        info = info_out;
         return true;
     }
     std::string ToString() const override
     {
-        std::string ret = EncodeExtPubKey(m_extkey) + FormatHDKeypath(m_path);
+        std::string ret = EncodeExtPubKey(m_root_extkey) + FormatHDKeypath(m_path);
         if (IsRange()) {
             ret += "/*";
             if (m_derive == DeriveType::HARDENED) ret += '\'';

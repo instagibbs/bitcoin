@@ -535,18 +535,19 @@ public:
         return ExpandHelper(pos, DUMMY_SIGNING_PROVIDER, &read_cache, output_scripts, out, nullptr);
     }
 
-    void ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const final
+    bool ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const final
     {
         for (const auto& p : m_pubkey_args) {
             CKey key;
-            if (!p->GetPrivKey(pos, provider, key)) continue;
+            if (!p->GetPrivKey(pos, provider, key)) return false;
             out.keys.emplace(key.GetPubKey().GetID(), key);
         }
         if (m_subdescriptor_arg) {
             FlatSigningProvider subprovider;
-            m_subdescriptor_arg->ExpandPrivate(pos, provider, subprovider);
+            if (!m_subdescriptor_arg->ExpandPrivate(pos, provider, subprovider)) return false;
             out = Merge(out, subprovider);
         }
+        return true;
     }
 
     Optional<OutputType> GetOutputType() const override { return nullopt; }

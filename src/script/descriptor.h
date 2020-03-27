@@ -118,7 +118,7 @@ struct Descriptor {
      * @param[in] provider The provider to query for the private keys.
      * @param[out] out Any private keys available for the specified `pos`.
      */
-    virtual void ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const = 0;
+    virtual bool ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const = 0;
 
     /** @return The OutputType of the scriptPubKey(s) produced by this descriptor. Or nullopt if indeterminate (multiple or none) */
     virtual Optional<OutputType> GetOutputType() const = 0;

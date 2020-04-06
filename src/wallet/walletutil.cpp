@@ -100,10 +100,5 @@ WalletLocation::WalletLocation(const std::string& name)
 
 bool WalletLocation::Exists() const
 {
-    fs::path path = m_path;
-    // For the default wallet, check specifically for the wallet.dat file
-    if (m_name.empty()) {
-        path = fs::absolute("wallet.dat", m_path);
-    }
-    return fs::symlink_status(path).type() != fs::file_not_found;
+    return fs::symlink_status(m_path).type() != fs::file_not_found;
 }

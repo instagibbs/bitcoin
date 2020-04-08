@@ -673,6 +673,78 @@ UniValue importwallet(const JSONRPCRequest& request)
     return NullUniValue;
 }
 
+UniValue dumpdescriptors(const JSONRPCRequest& request)
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    const CWallet* const pwallet = wallet.get();
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
+        return NullUniValue;
+    }
+
+            RPCHelpMan{"dumpdescriptors",
+                "\nReturns object of wallet descriptors with various metadata.\n",
+                {
+                },
+                RPCResult{
+                    RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::ARR, "active", "The list of active descriptors",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                {
+                                    {RPCResult::Type::STR, "descriptor_string", "String representation of descriptor"},
+                                }},
+                            }
+                        },
+                        {RPCResult::Type::ARR, "inactive", "The list of inactive descriptors",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                {
+                                    {RPCResult::Type::STR, "descriptor_string", "String representation of descriptor"},
+                                }},
+                            }
+                        },
+                    }
+                },
+                RPCExamples{
+                    HelpExampleCli("dumpdescriptors", "")
+            + HelpExampleRpc("dumpdescriptors", "")
+                },
+            }.Check(request);
+
+    auto locked_chain = pwallet->chain().lock();
+    LOCK(pwallet->cs_wallet);
+
+    UniValue obj(UniValue::VOBJ);
+
+    if (pwallet->IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
+        std::set<std::string> active_set;
+        UniValue active_list(UniValue::VARR);
+        for (auto& spk_man : pwallet->GetActiveScriptPubKeyMans()) {
+            UniValue desc(UniValue::VOBJ);
+            const std::string desc_str = ((DescriptorScriptPubKeyMan*)spk_man)->GetWalletDescriptor().descriptor->ToString();
+            desc.pushKV("descriptor_string", desc_str);
+            active_list.push_back(desc);
+            active_set.insert(desc_str);
+        }
+        obj.pushKV("active", active_list);
+
+        UniValue inactive_list(UniValue::VARR);
+        for (auto& spk_man : pwallet->GetAllScriptPubKeyMans()) {
+            const std::string desc_str = ((DescriptorScriptPubKeyMan*)spk_man)->GetWalletDescriptor().descriptor->ToString();
+            if (active_set.count(desc_str) > 0) {
+                continue;
+            }
+            UniValue desc(UniValue::VOBJ);
+            desc.pushKV("descriptor_string", desc_str);
+            inactive_list.push_back(desc);
+        }
+        obj.pushKV("inactive", inactive_list);
+    }
+
+    return obj;
+}
+
 UniValue dumpprivkey(const JSONRPCRequest& request)
 {
     std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);

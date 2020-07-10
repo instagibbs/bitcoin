@@ -1050,7 +1050,8 @@ bool MemPoolAccept::AcceptSingleTransaction(const CTransactionRef& ptx, ATMPArgs
 
     if (!Finalize(args, workspace)) return false;
 
-    GetMainSignals().TransactionAddedToMempool(ptx);
+    // Notify listeners of the transaction and increment mempool sequence number
+    GetMainSignals().TransactionAddedToMempool(ptx, m_pool.sequence_number++);
 
     return true;
 }
@@ -2910,7 +2911,7 @@ bool CChainState::ActivateBestChain(BlockValidationState &state, const CChainPar
 
                 for (const PerBlockConnectTrace& trace : connectTrace.GetBlocksConnected()) {
                     assert(trace.pblock && trace.pindex);
-                    GetMainSignals().BlockConnected(trace.pblock, trace.pindex);
+                    GetMainSignals().BlockConnected(trace.pblock, trace.pindex ::mempool);
                 }
             } while (!m_chain.Tip() || (starting_tip && CBlockIndexWorkComparator()(m_chain.Tip(), starting_tip)));
             if (!blocks_connected) return true;

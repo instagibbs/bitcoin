@@ -16,12 +16,12 @@ bool CZMQAbstractNotifier::NotifyBlock(const CBlockIndex * /*CBlockIndex*/)
     return true;
 }
 
-bool CZMQAbstractNotifier::NotifyTransaction(const CTransaction &/*transaction*/, uint64_t mempool_sequence)
+bool CZMQAbstractNotifier::NotifyTransaction(const CTransaction &/*transaction*/, uint32_t mempool_sequence)
 {
     return true;
 }
 
-bool CZMQAbstractNotifier::NotifyTransactionEviction(const CTransaction &/*transaction*/, MemPoolRemovalReason reason)
+bool CZMQAbstractNotifier::NotifyTransactionEviction(const CTransaction &/*transaction*/, MemPoolRemovalReason reason, uint32_t mempool_sequence)
 {
     return true;
 }

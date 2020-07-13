@@ -27,7 +27,8 @@ public:
     bool Initialize(void *pcontext) override;
     void Shutdown() override;
 
-    bool NotifyTransactionX(const CTransaction&, const char*); // Common code between txn publishers
+    // Common code between txn publishers
+    bool NotifyTransactionX(const CTransaction &transaction, const char *pub_type, uint32_t mempool_sequence);
 };
 
 class CZMQPublishHashBlockNotifier : public CZMQAbstractPublishNotifier
@@ -39,13 +40,13 @@ public:
 class CZMQPublishHashTransactionNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyTransaction(const CTransaction &transaction) override;
+    bool NotifyTransaction(const CTransaction &transaction, uint32_t mempool_sequence) override;
 };
 
 class CZMQPublishHashTransactionEvictionNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason) override;
+    bool NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason, uint32_t mempool_sequence) override;
 };
 
 
@@ -58,13 +59,13 @@ public:
 class CZMQPublishRawTransactionNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyTransaction(const CTransaction &transaction) override;
+    bool NotifyTransaction(const CTransaction &transaction, uint32_t mempool_sequence) override;
 };
 
 class CZMQPublishRawTransactionEvictionNotifier : public CZMQAbstractPublishNotifier
 {
 public:
-    bool NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason) override;
+    bool NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason, uint32_t mempool_sequence) override;
 };
 
 #endif // BITCOIN_ZMQ_ZMQPUBLISHNOTIFIER_H

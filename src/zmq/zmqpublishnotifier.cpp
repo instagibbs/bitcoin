@@ -170,16 +170,21 @@ bool CZMQPublishHashBlockNotifier::NotifyBlock(const CBlockIndex *pindex)
     return SendMessage(MSG_HASHBLOCK, data, 32);
 }
 
-bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transaction, const char *pub_type)
+bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transaction, const char *pub_type, uint32_t mempool_sequence)
 {
     uint256 hash = transaction.GetHash();
     LogPrint(BCLog::ZMQ, "zmq: Publish %s %s\n", pub_type, hash.GetHex());
     if (pub_type == MSG_HASHTX || pub_type == MSG_HASHTX_EVICT) {
-        char data[sizeof(uint256)];
-        for (unsigned int i = 0; i < sizeof(data); i++) {
+        unsigned char data[sizeof(uint256)+sizeof(uint64_t)];
+        for (unsigned int i = 0; i < sizeof(uint256); i++) {
             data[31 - i] = hash.begin()[i];
         }
-        return SendMessage(pub_type, data, sizeof(data));
+        uint32_t payload_size = sizeof(uint256);
+        if (mempool_sequence > 0) {
+            payload_size += sizeof(uint32_t);
+            WriteLE32(data+sizeof(uint256), mempool_sequence);
+        }
+        return SendMessage(pub_type, data, payload_size);
     } else {
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
         ss << transaction;
@@ -187,14 +192,14 @@ bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transac
     }
 }
 
-bool CZMQPublishHashTransactionNotifier::NotifyTransaction(const CTransaction &transaction)
+bool CZMQPublishHashTransactionNotifier::NotifyTransaction(const CTransaction &transaction, uint32_t mempool_sequence)
 {
-    return NotifyTransactionX(transaction, MSG_HASHTX);
+    return NotifyTransactionX(transaction, MSG_HASHTX, mempool_sequence);
 }
 
-bool CZMQPublishHashTransactionEvictionNotifier::NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason)
+bool CZMQPublishHashTransactionEvictionNotifier::NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason, uint32_t mempool_sequence)
 {
-    return NotifyTransactionX(transaction, MSG_HASHTX_EVICT);
+    return NotifyTransactionX(transaction, MSG_HASHTX_EVICT, mempool_sequence);
 }
 
 bool CZMQPublishHashTransactionEvictionNotifier::NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason)
@@ -228,14 +233,14 @@ bool CZMQPublishRawBlockNotifier::NotifyBlock(const CBlockIndex *pindex)
     return SendMessage(MSG_RAWBLOCK, &(*ss.begin()), ss.size());
 }
 
-bool CZMQPublishRawTransactionNotifier::NotifyTransaction(const CTransaction &transaction)
+bool CZMQPublishRawTransactionNotifier::NotifyTransaction(const CTransaction &transaction, uint32_t mempool_sequence)
 {
-    return NotifyTransactionX(transaction, MSG_RAWTX);
+    return NotifyTransactionX(transaction, MSG_RAWTX, mempool_sequence);
 }
 
-bool CZMQPublishRawTransactionEvictionNotifier::NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason)
+bool CZMQPublishRawTransactionEvictionNotifier::NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason, uint32_t mempool_sequence)
 {
-    return NotifyTransactionX(transaction, MSG_RAWTX_EVICT);
+    return NotifyTransactionX(transaction, MSG_RAWTX_EVICT, mempool_sequence);
 }
 
 bool CZMQPublishRawTransactionEvictionNotifier::NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason)

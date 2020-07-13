@@ -42,8 +42,8 @@ public:
     virtual void Shutdown() = 0;
 
     virtual bool NotifyBlock(const CBlockIndex *pindex);
-    virtual bool NotifyTransaction(const CTransaction &transaction);
-    virtual bool NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason);
+    virtual bool NotifyTransaction(const CTransaction &transaction, uint32_t mempool_sequence);
+    virtual bool NotifyTransactionEviction(const CTransaction &transaction, MemPoolRemovalReason reason, uint32_t mempool_sequence);
 
 protected:
     void *psocket;

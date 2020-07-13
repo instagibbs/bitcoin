@@ -1167,7 +1167,7 @@ void CWallet::blockConnected(const CBlock& block, int height)
     m_last_block_processed = block_hash;
     for (size_t index = 0; index < block.vtx.size(); index++) {
         SyncTransaction(block.vtx[index], {CWalletTx::Status::CONFIRMED, height, block_hash, (int)index});
-        transactionRemovedFromMempool(block.vtx[index], MemPoolRemovalReason::BLOCK);
+        transactionRemovedFromMempool(block.vtx[index], MemPoolRemovalReason::BLOCK, 0 /* mempool_sequence */);
     }
 }
 

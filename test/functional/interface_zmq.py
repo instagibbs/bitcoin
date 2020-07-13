@@ -121,13 +121,11 @@ class ZMQTest (BitcoinTestFramework):
             payment_txid = self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 1.0)
             self.sync_all()
 
-            from pdb import set_trace
-            set_trace()
-            # Should receive the broadcasted txid.
+            # Should receive the broadcasted txid with mempool sequence number.
             txid = hashtx.receive(1)
             assert_equal(payment_txid, txid.hex())
 
-            # Should receive the broadcasted raw transaction.
+            # Should receive the broadcasted raw transaction with mempool sequence number.
             hex = rawtx.receive(1)
             assert_equal(payment_txid, hash256_reversed(hex).hex())
 
@@ -277,8 +275,8 @@ class ZMQTest (BitcoinTestFramework):
         rbf_data = self.nodes[0].bumpfee(txid)
         assert rbf_data["txid"] in self.nodes[0].getrawmempool()
 
-        assert_equal(hashtx_evict.receive(), bytearray.fromhex(txid))
-        assert_equal(rawtx_evict.receive(), bytearray.fromhex(self.nodes[0].gettransaction(txid)["hex"]))
+        assert_equal(hashtx_evict.receive(2), bytearray.fromhex(txid))
+        assert_equal(rawtx_evict.receive(2), bytearray.fromhex(self.nodes[0].gettransaction(txid)["hex"]))
 
         # No additional messages should occur even if txns are added in mempool
         check_no_messages()

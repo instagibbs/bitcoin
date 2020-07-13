@@ -172,6 +172,8 @@ bool CZMQPublishHashBlockNotifier::NotifyBlock(const CBlockIndex *pindex)
 
 bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transaction, const char *pub_type, uint32_t mempool_sequence)
 {
+    bool publish_mempool_sequence = mempool_sequence > 0 && gArgs.GetBoolArg("-zmqpubmempoolsequence", false);
+
     uint256 hash = transaction.GetHash();
     LogPrint(BCLog::ZMQ, "zmq: Publish %s %s, mempool sequence:%d\n", pub_type, hash.GetHex(), mempool_sequence);
     if (pub_type == MSG_HASHTX || pub_type == MSG_HASHTX_EVICT) {
@@ -180,7 +182,7 @@ bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transac
             data[31 - i] = hash.begin()[i];
         }
         uint32_t payload_size = sizeof(uint256);
-        if (mempool_sequence > 0) {
+        if (publish_mempool_sequence > 0) {
             payload_size += sizeof(uint32_t);
             WriteLE32(data+sizeof(uint256), mempool_sequence);
         }
@@ -188,7 +190,7 @@ bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transac
     } else {
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
         ss << transaction;
-        if (mempool_sequence > 0) {
+        if (publish_mempool_sequence > 0) {
             ss << mempool_sequence;
         }
         return SendMessage(pub_type, &(*ss.begin()), ss.size());

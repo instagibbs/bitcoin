@@ -52,18 +52,22 @@ class ZMQTest (BitcoinTestFramework):
         self.ctx = zmq.Context()
         try:
             self.test_basic()
+            self.test_basic(publish_mempool_sequence=True)
             self.test_reorg()
             self.test_evict()
+            self.test_evict(publish_mempool_sequence=True)
         finally:
             # Destroy the ZMQ context.
             self.log.debug("Destroying ZMQ context")
             self.ctx.destroy(linger=None)
 
-    def test_basic(self):
+    def test_basic(self, publish_mempool_sequence=False):
         import zmq
 
         # Invalid zmq arguments don't take down the node, see #17185.
-        self.restart_node(0, ["-zmqpubrawtx=foo", "-zmqpubhashtx=bar"])
+        extended_args = ["-zmqpubrawtx=foo", "-zmqpubhashtx=bar"]
+
+        self.restart_node(0, extended_args)
 
         address = 'tcp://127.0.0.1:28332'
         sockets = []
@@ -80,7 +84,12 @@ class ZMQTest (BitcoinTestFramework):
         rawblock = subs[2]
         rawtx = subs[3]
 
-        self.restart_node(0, ["-zmqpub%s=%s" % (sub.topic.decode(), address) for sub in [hashblock, hashtx, rawblock, rawtx]])
+        extended_args = ["-zmqpub%s=%s" % (sub.topic.decode(), address) for sub in [hashblock, hashtx, rawblock, rawtx]]
+
+        if publish_mempool_sequence:
+            extended_args.append("-zmqpubmempoolsequence")
+
+        self.restart_node(0, extended_args)
         connect_nodes(self.nodes[0], 1)
         for socket in sockets:
             socket.connect(address)
@@ -122,11 +131,11 @@ class ZMQTest (BitcoinTestFramework):
             self.sync_all()
 
             # Should receive the broadcasted txid with mempool sequence number.
-            txid = hashtx.receive(1)
+            txid = hashtx.receive(1 if publish_mempool_sequence else 0)
             assert_equal(payment_txid, txid.hex())
 
             # Should receive the broadcasted raw transaction with mempool sequence number.
-            hex = rawtx.receive(1)
+            hex = rawtx.receive(1 if publish_mempool_sequence else 0)
             assert_equal(payment_txid, hash256_reversed(hex).hex())
 
             # Mining the block with this tx should result in second notification
@@ -210,7 +219,7 @@ class ZMQTest (BitcoinTestFramework):
         # And the current tip
         assert_equal(hashtx.receive().hex(), self.nodes[1].getblock(connect_blocks[0])["tx"][0])
 
-    def test_evict(self):
+    def test_evict(self, publish_mempool_sequence=False):
 
         if not self.is_wallet_compiled():
 
@@ -259,7 +268,12 @@ class ZMQTest (BitcoinTestFramework):
             except zmq.error.Again:
                 pass
 
-        self.restart_node(0, ["-zmqpub%s=%s" % (sub.topic.decode(), address) for sub in [hashtx_evict, rawtx_evict]])
+        extended_args = ["-zmqpub%s=%s" % (sub.topic.decode(), address) for sub in [hashtx_evict, rawtx_evict]]
+
+        if publish_mempool_sequence:
+            extended_args.append("-zmqpubmempoolsequence")
+
+        self.restart_node(0, extended_args)
 
         assert_equal(self.nodes[0].getzmqnotifications(), [
             {'type': 'pubhashtxevict', 'address': 'tcp://127.0.0.1:28332', 'hwm': 1000},
@@ -275,8 +289,8 @@ class ZMQTest (BitcoinTestFramework):
         rbf_data = self.nodes[0].bumpfee(txid)
         assert rbf_data["txid"] in self.nodes[0].getrawmempool()
 
-        assert_equal(hashtx_evict.receive(2), bytearray.fromhex(txid))
-        assert_equal(rawtx_evict.receive(2), bytearray.fromhex(self.nodes[0].gettransaction(txid)["hex"]))
+        assert_equal(hashtx_evict.receive(2 if publish_mempool_sequence else 0), bytearray.fromhex(txid))
+        assert_equal(rawtx_evict.receive(2 if publish_mempool_sequence else 0), bytearray.fromhex(self.nodes[0].gettransaction(txid)["hex"]))
 
         # No additional messages should occur even if txns are added in mempool
         check_no_messages()

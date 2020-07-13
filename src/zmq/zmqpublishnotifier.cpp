@@ -188,6 +188,9 @@ bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transac
     } else {
         CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
         ss << transaction;
+        if (mempool_sequence > 0) {
+            ss << mempool_sequence;
+        }
         return SendMessage(pub_type, &(*ss.begin()), ss.size());
     }
 }

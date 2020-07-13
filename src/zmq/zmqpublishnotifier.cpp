@@ -173,7 +173,7 @@ bool CZMQPublishHashBlockNotifier::NotifyBlock(const CBlockIndex *pindex)
 bool CZMQAbstractPublishNotifier::NotifyTransactionX(const CTransaction &transaction, const char *pub_type, uint32_t mempool_sequence)
 {
     uint256 hash = transaction.GetHash();
-    LogPrint(BCLog::ZMQ, "zmq: Publish %s %s\n", pub_type, hash.GetHex());
+    LogPrint(BCLog::ZMQ, "zmq: Publish %s %s, mempool sequence:%d\n", pub_type, hash.GetHex(), mempool_sequence);
     if (pub_type == MSG_HASHTX || pub_type == MSG_HASHTX_EVICT) {
         unsigned char data[sizeof(uint256)+sizeof(uint64_t)];
         for (unsigned int i = 0; i < sizeof(uint256); i++) {

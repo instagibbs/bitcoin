@@ -24,13 +24,18 @@ class ZMQSubscriber:
         import zmq
         self.socket.setsockopt(zmq.SUBSCRIBE, self.topic)
 
-    def receive(self):
+    def receive(self, expected_mempool_sequence = 0):
         topic, body, seq = self.socket.recv_multipart()
         # Topic should match the subscriber topic.
         assert_equal(topic, self.topic)
         # Sequence should be incremental.
         assert_equal(struct.unpack('<I', seq)[-1], self.sequence)
         self.sequence += 1
+        if expected_mempool_sequence > 0:
+            number = struct.unpack('<I', body[-4:])[0]
+            if expected_mempool_sequence != number:
+                raise Exception("Unexpected mempool sequence number encountered! {} vs {}".format(expected_mempool_sequence, number))
+            body = body[:-4]
         return body
 
 
@@ -116,12 +121,14 @@ class ZMQTest (BitcoinTestFramework):
             payment_txid = self.nodes[1].sendtoaddress(self.nodes[0].getnewaddress(), 1.0)
             self.sync_all()
 
+            from pdb import set_trace
+            set_trace()
             # Should receive the broadcasted txid.
-            txid = hashtx.receive()
+            txid = hashtx.receive(1)
             assert_equal(payment_txid, txid.hex())
 
             # Should receive the broadcasted raw transaction.
-            hex = rawtx.receive()
+            hex = rawtx.receive(1)
             assert_equal(payment_txid, hash256_reversed(hex).hex())
 
             # Mining the block with this tx should result in second notification

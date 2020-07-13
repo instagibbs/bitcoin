@@ -459,7 +459,7 @@ private:
     // In-memory counter for external mempool tracking purposes.
     // This number is incremented once every time a transaction
     // is added or removed from the mempool.
-    mutable uint32_t sequence_number{0};
+    mutable uint32_t sequence_number{1};
 
     void trackPackageRemoved(const CFeeRate& rate) EXCLUSIVE_LOCKS_REQUIRED(cs);
 

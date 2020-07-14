@@ -735,6 +735,10 @@ public:
         return sequence_number++;
     }
 
+    uint32_t GetSequence() const {
+        return sequence_number;
+    }
+
 private:
     /** UpdateForDescendants is used by UpdateTransactionsFromBlock to update
      *  the descendants for a single transaction that has been added to the

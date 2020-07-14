@@ -483,7 +483,7 @@ static void entryToJSON(const CTxMemPool& pool, UniValue& info, const CTxMemPool
     info.pushKV("unbroadcast", pool.IsUnbroadcastTx(tx.GetHash()));
 }
 
-UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose)
+UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose, bool include_mempool_sequence)
 {
     if (verbose) {
         LOCK(pool.cs);
@@ -497,16 +497,29 @@ UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose)
             // UniValue::__pushKV is used instead which currently is O(1).
             o.__pushKV(hash.ToString(), info);
         }
+        o.pushKV("mempool_sequence", (uint64_t)pool.GetSequence());
         return o;
     } else {
+        uint32_t mempool_sequence = 0;
         std::vector<uint256> vtxid;
-        pool.queryHashes(vtxid);
+        {
+            LOCK(pool.cs);
+            pool.queryHashes(vtxid);
+            mempool_sequence = pool.GetSequence();
+        }
 
         UniValue a(UniValue::VARR);
         for (const uint256& hash : vtxid)
             a.push_back(hash.ToString());
 
-        return a;
+        if (!include_mempool_sequence) {
+            return a;
+        } else {
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("txids", a);
+            o.pushKV("mempool_sequence", (uint64_t)mempool_sequence);
+            return o;
+        }
     }
 }
 
@@ -517,6 +530,7 @@ static UniValue getrawmempool(const JSONRPCRequest& request)
                 "\nHint: use getmempoolentry to fetch a specific transaction from the mempool.\n",
                 {
                     {"verbose", RPCArg::Type::BOOL, /* default */ "false", "True for a json object, false for array of transaction ids"},
+                    {"mempool_sequence", RPCArg::Type::BOOL, /* default */ "false", "If verbose=false, returns a json object with transaction list and mempool sequence number attached."},
                 },
                 {
                     RPCResult{"for verbose = false",
@@ -529,6 +543,15 @@ static UniValue getrawmempool(const JSONRPCRequest& request)
                         {
                             {RPCResult::Type::OBJ_DYN, "transactionid", "", MempoolEntryDescription()},
                         }},
+                    RPCResult{"for verbose = false and mempool_sequence = true",
+                        RPCResult::Type::OBJ, "", "",
+                        {
+                            {RPCResult::Type::STR_HEX, "mempool_sequence", "The transaction id"},
+                            {RPCResult::Type::ARR, "txids", "",
+                            {
+                                {RPCResult::Type::STR_HEX, "", "The transaction id"},
+                            }},
+                        }},
                 },
                 RPCExamples{
                     HelpExampleCli("getrawmempool", "true")
@@ -540,7 +563,12 @@ static UniValue getrawmempool(const JSONRPCRequest& request)
     if (!request.params[0].isNull())
         fVerbose = request.params[0].get_bool();
 
-    return MempoolToJSON(EnsureMemPool(request.context), fVerbose);
+    bool include_mempool_sequence = false;
+    if (!request.params[1].isNull()) {
+        include_mempool_sequence = request.params[1].get_bool();
+    }
+
+    return MempoolToJSON(EnsureMemPool(request.context), fVerbose, include_mempool_sequence);
 }
 
 static UniValue getmempoolancestors(const JSONRPCRequest& request)
@@ -2380,7 +2408,7 @@ static const CRPCCommand commands[] =
     { "blockchain",         "getmempooldescendants",  &getmempooldescendants,  {"txid","verbose"} },
     { "blockchain",         "getmempoolentry",        &getmempoolentry,        {"txid"} },
     { "blockchain",         "getmempoolinfo",         &getmempoolinfo,         {} },
-    { "blockchain",         "getrawmempool",          &getrawmempool,          {"verbose"} },
+    { "blockchain",         "getrawmempool",          &getrawmempool,          {"verbose", "mempool_sequence"} },
     { "blockchain",         "gettxout",               &gettxout,               {"txid","n","include_mempool"} },
     { "blockchain",         "gettxoutsetinfo",        &gettxoutsetinfo,        {"hash_type"} },
     { "blockchain",         "pruneblockchain",        &pruneblockchain,        {"height"} },

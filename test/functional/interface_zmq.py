@@ -56,6 +56,7 @@ class ZMQTest (BitcoinTestFramework):
             self.test_reorg()
             self.test_evict()
             self.test_evict(publish_mempool_sequence=True)
+            self.test_mempool_sequence()
         finally:
             # Destroy the ZMQ context.
             self.log.debug("Destroying ZMQ context")
@@ -297,6 +298,43 @@ class ZMQTest (BitcoinTestFramework):
 
         # Even if a transaction is mined, it won't be published in this channel
         check_no_messages()
+
+    def test_mempool_sequence(self):
+
+        self.log.info("Testing mempool sequence number publication over ZMQ notifications and getrawmempool RPC")
+
+        import zmq
+
+        address = 'tcp://127.0.0.1:28332'
+        sockets = []
+        subs = []
+        services = [b"hashtx", b"hashtxevict"]
+        for service in services:
+            sockets.append(self.ctx.socket(zmq.SUB))
+            sockets[-1].set(zmq.RCVTIMEO, 60000)
+            subs.append(ZMQSubscriber(sockets[-1], service))
+
+        # Subscribe to all available topics.
+        hashtx = subs[0]
+        hashtx_evict = subs[1]
+
+        extended_args = ["-zmqpub%s=%s" % (sub.topic.decode(), address) for sub in [hashtx, hashtx_evict]]
+        extended_args.append("-zmqpubmempoolsequence")
+
+        self.restart_node(0, extended_args)
+        connect_nodes(self.nodes[0], 1)
+        for socket in sockets:
+            socket.connect(address)
+
+        # Relax so that the subscriber is ready before publishing zmq messages
+        sleep(0.2)
+
+        # Sequence value starts at 1, is exposed as key in object when requested only for non-verbose
+        assert_equal(self.nodes[0].getrawmempool(), [])
+        assert_equal(self.nodes[0].getrawmempool(mempool_sequence=True)["mempool_sequence"], 1)
+        assert_equal(self.nodes[0].getrawmempool(verbose=True)["mempool_sequence"], 1)
+
+        # Mining a block doesn't result
 
 if __name__ == '__main__':
     ZMQTest().main()

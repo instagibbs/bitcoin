@@ -219,7 +219,6 @@ class ZMQTest (BitcoinTestFramework):
         assert_equal(hashtx.receive().hex(), self.nodes[1].getblock(connect_blocks[0])["tx"][0])
 
     def test_evict(self, publish_mempool_sequence=False):
-
         if not self.is_wallet_compiled():
 
             return
@@ -288,8 +287,8 @@ class ZMQTest (BitcoinTestFramework):
         rbf_data = self.nodes[0].bumpfee(txid)
         assert rbf_data["txid"] in self.nodes[0].getrawmempool()
 
-        assert_equal(hashtx_evict.receive(2 if publish_mempool_sequence else 0), bytearray.fromhex(txid))
-        assert_equal(rawtx_evict.receive(2 if publish_mempool_sequence else 0), bytearray.fromhex(self.nodes[0].gettransaction(txid)["hex"]))
+        assert_equal(hashtx_evict.receive(2 if publish_mempool_sequence else 0).hex(), txid)
+        assert_equal(rawtx_evict.receive(2 if publish_mempool_sequence else 0).hex(), self.nodes[0].gettransaction(txid)["hex"])
 
         # No additional messages should occur even if txns are added in mempool
         check_no_messages()

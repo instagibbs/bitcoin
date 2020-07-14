@@ -133,10 +133,9 @@ class ZMQTest (BitcoinTestFramework):
             # Should receive the broadcasted txid with mempool sequence number.
             txid = hashtx.receive(1 if publish_mempool_sequence else 0)
             assert_equal(payment_txid, txid.hex())
-
             # Should receive the broadcasted raw transaction with mempool sequence number.
             hex = rawtx.receive(1 if publish_mempool_sequence else 0)
-            assert_equal(payment_txid, hash256_reversed(hex).hex())
+            assert_equal(payment_txid, self.nodes[0].decoderawtransaction(hex.hex())["txid"])
 
             # Mining the block with this tx should result in second notification
             # after coinbase tx notification

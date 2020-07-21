@@ -330,17 +330,6 @@ def spender_alwaysvalid_p2sh(spenders, info, comment, standard, script):
 
     spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn))
 
-def spender_two_paths_no_sig(spenders, info, comment, standard, success, failure):
-    """Same as spender_two_paths but not support for signatures or padding witness."""
-    spk = info[0]
-    addr = get_taproot_bech32(info)
-
-    # Empty witness required
-    def fn(t, i, u, v):
-        return []
-
-    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn))
-
 def nested_script(script, depth):
     if depth == 0:
         return script

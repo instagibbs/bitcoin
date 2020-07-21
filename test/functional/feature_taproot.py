@@ -390,16 +390,18 @@ class TaprootTest(BitcoinTestFramework):
     def test_spenders(self, spenders, input_counts):
         """Run randomized tests with a number of "spenders".
 
+        Each spender embodies a test; in a large randomized test, it is verified
+        that toggling the valid argument to each lambda toggles the validity of
+        the transaction by invalidating a single signature per test run.
+
         Steps:
             1) Generate an appropriate UTXO for each spender to test spend conditions
             2) Generate 100 random addresses of all wallet types: pkh/sh_wpkh/wpkh
-            3) Select random number of inputs from (1)
+            3) Select random number(N) of inputs from (1)
             4) Select random number of addresses from (2) as outputs
+            5) Sign the transaction N+1 times, each with one input signed incorrectly
+               except the last pass. Assert mempool/block failure as expected.
 
-        Each spender embodies a test; in a large randomized test, it is verified
-        that toggling the valid argument to each lambda toggles the validity of
-        the transaction. This is accomplished by constructing transactions consisting
-        of all valid inputs, except one invalid one.
         """
 
         # Construct a UTXO to spend for each of the spenders, with the script to satisfy being given by the spender

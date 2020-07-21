@@ -178,8 +178,9 @@ def damage_bytes(b):
 #   - An input position (int)
 #   - The spent UTXOs by this transaction (list of CTxOut)
 #   - Whether to produce a valid spend (bool)
+# - A string with an expected error message for failure case if known
 
-Spender = namedtuple("Spender", "script,address,comment,is_standard,sat_function")
+Spender = namedtuple("Spender", "script,address,comment,is_standard,sat_function,err_msg")
 
 def spend_no_sig(tx, input_index, spent_utxos, info, script):
     """Construct witness."""
@@ -281,9 +282,9 @@ def spender_sighash_mutation(spenders, info, comment, standard=True, **kwargs):
     def fn(t, i, u, v):
         return spend_single_sig(t, i, u, damage=not v, info=info, **kwargs)
 
-    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn))
+    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn, err_msg=None))
 
-def spender_two_paths(spenders, info, comment, standard, success, failure):
+def spender_two_paths(spenders, info, comment, standard, success, failure, err_msg=None):
     """Gives caller a way to specify two merkle paths to test validity satisfaction: One expected success, and one failure."""
     spk = info[0]
     addr = get_taproot_bech32(info)
@@ -291,9 +292,9 @@ def spender_two_paths(spenders, info, comment, standard, success, failure):
     def fn(t, i, u, v):
         return spend_single_sig(t, i, u, damage=False, info=info, **(success if v else failure))
 
-    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn))
+    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn, err_msg=err_msg))
 
-def spender_alwaysvalid(spenders, info, comment, **kwargs):
+def spender_alwaysvalid(spenders, info, comment, err_msg=None, **kwargs):
     """Mutates the witness when requested, intended for otherwise always true scripts."""
     spk = info[0]
     addr = get_taproot_bech32(info)
@@ -301,9 +302,9 @@ def spender_alwaysvalid(spenders, info, comment, **kwargs):
     def fn(t, i, u, v):
         return spend_alwaysvalid(t, i, damage=not v, info=info, **kwargs)
 
-    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=False, sat_function=fn))
+    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=False, sat_function=fn, err_msg=err_msg))
 
-def spender_two_paths_alwaysvalid(spenders, info, comment, standard, success, failure):
+def spender_two_paths_alwaysvalid(spenders, info, comment, standard, success, failure, err_msg=None):
     """Allows specifying both a success and failure script without any signatures or additional witness data required."""
     spk = info[0]
     addr = get_taproot_bech32(info)
@@ -311,9 +312,9 @@ def spender_two_paths_alwaysvalid(spenders, info, comment, standard, success, fa
     def fn(t, i, u, v):
         return spend_no_sig(t, i, u, info, (success if v else failure))
 
-    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn))
+    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn, err_msg=err_msg))
 
-def spender_alwaysvalid_p2sh(spenders, info, comment, standard, script):
+def spender_alwaysvalid_p2sh(spenders, info, comment, standard, script, err_msg=None):
     """Tests that p2sh-wrapping witness program v1 are always valid, since they are not covered by tapscript."""
     spk = get_p2sh_spk(info)
     addr = get_version1_p2sh(info)
@@ -328,7 +329,7 @@ def spender_alwaysvalid_p2sh(spenders, info, comment, standard, script):
             t.vin[i].scriptSig = CScript()
         return
 
-    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn))
+    spenders.append(Spender(script=spk, address=addr, comment=comment, is_standard=standard, sat_function=fn, err_msg=err_msg))
 
 def nested_script(script, depth):
     if depth == 0:
@@ -347,7 +348,7 @@ class TaprootTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [["-whitelist=127.0.0.1", "-par=1"]]
 
-    def block_submit(self, node, txs, msg, cb_pubkey=None, fees=0, witness=False, accept=False):
+    def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, witness=False, accept=False):
 
         # Deplete block of any non-tapscript sigops using a single additional 0-value coinbase output
         # It's physically impossible to fit enough tapscript sigops to hit the old 80k limit without
@@ -374,7 +375,9 @@ class TaprootTest(BitcoinTestFramework):
         witness and add_witness_commitment(block)
         block.rehash()
         block.solve()
-        node.submitblock(block.serialize(True).hex())
+        block_response = node.submitblock(block.serialize(True).hex())
+        if err_msg is not None:
+            assert err_msg in block_response
         if (accept):
             assert node.getbestblockhash() == block.hash, "Failed to accept: " + msg
             self.tip = block.sha256
@@ -493,6 +496,8 @@ class TaprootTest(BitcoinTestFramework):
 
             # Sign each input incorrectly once on each complete signing pass, except the very last
             for fail_input in range(inputs + 1):
+                # Expected message with each input failure, may be None(which is ignored)
+                expected_fail_msg = None if fail_input == inputs else input_utxos[fail_input].spender.err_msg
                 # Wipe scriptSig/witness
                 for i in range(inputs):
                     tx.vin[i].scriptSig = CScript()
@@ -511,7 +516,7 @@ class TaprootTest(BitcoinTestFramework):
                     assert_raises_rpc_error(-26, None, self.nodes[0].sendrawtransaction, tx.serialize().hex(), 0)
                 # Submit in a block
                 msg = ','.join(utxo.spender.comment + ("*" if n == fail_input else "") for n, utxo in enumerate(input_utxos))
-                self.block_submit(self.nodes[0], [tx], msg, witness=True, accept=fail_input == inputs, cb_pubkey=random.choice(host_pubkeys), fees=fee)
+                self.block_submit(self.nodes[0], [tx], msg, witness=True, accept=fail_input == inputs, cb_pubkey=random.choice(host_pubkeys), fees=fee, err_msg=expected_fail_msg)
 
     def build_spenders(self):
         VALID_SIGHASHES = [SIGHASH_DEFAULT, SIGHASH_ALL, SIGHASH_NONE, SIGHASH_SINGLE, SIGHASH_ANYONECANPAY + SIGHASH_ALL,
@@ -563,7 +568,7 @@ class TaprootTest(BitcoinTestFramework):
                 ]
             ]
             info = taproot_construct(pub1, nested_script(scripts, 127))
-            spender_two_paths(spenders, info, "taproot/merklelimit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0]}, failure={"key": sec1, "hashtype": hashtype, "annex": annex, "script": scripts[1][0]})
+            spender_two_paths(spenders, info, "taproot/merklelimit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0]}, failure={"key": sec1, "hashtype": hashtype, "annex": annex, "script": scripts[1][0]}, err_msg="Invalid Taproot control block size")
 
             # Above OP_16 to avoid minimal encoding complaints
             checksigadd_val = random.randrange(17, 100)
@@ -650,45 +655,45 @@ class TaprootTest(BitcoinTestFramework):
             info = taproot_construct(pub1, scripts)
             info2 = taproot_construct(pub1, scripts2)
             # Test that 520 byte stack element inputs are valid, but 521 byte ones are not.
-            spender_two_paths(spenders, info, "tapscript/input520limit", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(520)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(521)]})
+            spender_two_paths(spenders, info, "tapscript/input520limit", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(520)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(521)]}, err_msg="Push value size limit exceeded")
             # Test that 80 byte stack element inputs are valid and standard; 81 bytes ones are valid and nonstandard
-            spender_two_paths(spenders, info, "tapscript/input80limit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(80)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(521)]})
-            spender_two_paths(spenders, info, "tapscript/input81limit", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(81)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(521)]})
+            spender_two_paths(spenders, info, "tapscript/input80limit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(80)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(521)]}, err_msg="Push value size limit exceeded")
+            spender_two_paths(spenders, info, "tapscript/input81limit", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(81)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[0], "suffix": [random_bytes(521)]}, err_msg="Push value size limit exceeded")
             # Test that OP_CHECKMULTISIG and OP_CHECKMULTISIGVERIFY cause failure, but OP_CHECKSIG and OP_CHECKSIGVERIFY work.
-            spender_two_paths(spenders, info, "tapscript/disabled/checkmultisig", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[1]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[3]})
-            spender_two_paths(spenders, info, "tapscript/disabled/checkmultisigverify", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[2]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[4]})
+            spender_two_paths(spenders, info, "tapscript/disabled/checkmultisig", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[1]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[3]}, err_msg="Attempted to use a disabled opcode")
+            spender_two_paths(spenders, info, "tapscript/disabled/checkmultisigverify", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[2]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[4]}, err_msg="Attempted to use a disabled opcode")
             # Test that OP_IF and OP_NOTIF do not accept 0x02 as truth value (the MINIMALIF rule is consensus in Tapscript)
-            spender_two_paths(spenders, info, "tapscript/minimalif", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[5], "suffix": [bytes([1])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[5], "suffix": [bytes([2])]})
-            spender_two_paths(spenders, info, "tapscript/minimalnotif", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[6], "suffix": [bytes([1])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[6], "suffix": [bytes([3])]})
+            spender_two_paths(spenders, info, "tapscript/minimalif", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[5], "suffix": [bytes([1])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[5], "suffix": [bytes([2])]}, err_msg="OP_IF/NOTIF argument must be minimal")
+            spender_two_paths(spenders, info, "tapscript/minimalnotif", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[6], "suffix": [bytes([1])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[6], "suffix": [bytes([3])]}, err_msg="OP_IF/NOTIF argument must be minimal")
             # Test that 1-byte public keys (which are unknown) are acceptable but nonstandard with unrelated signatures, but 0-byte public keys are not valid.
-            spender_two_paths(spenders, info, "tapscript/unkpk/checksig", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[16]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[7]})
-            spender_two_paths(spenders, info, "tapscript/unkpk/checksigadd", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[17]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[10]})
-            spender_two_paths(spenders, info, "tapscript/unkpk/checksigverify", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[18]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[8]})
+            spender_two_paths(spenders, info, "tapscript/unkpk/checksig", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[16]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[7]}, err_msg="Public key is neither compressed or uncompressed")
+            spender_two_paths(spenders, info, "tapscript/unkpk/checksigadd", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[17]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[10]}, err_msg="Public key is neither compressed or uncompressed")
+            spender_two_paths(spenders, info, "tapscript/unkpk/checksigverify", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[18]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[8]}, err_msg="Public key is neither compressed or uncompressed")
             # Test that 0-byte public keys are not acceptable.
-            spender_two_paths(spenders, info, "tapscript/emptypk/checksig", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[1]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[7]})
-            spender_two_paths(spenders, info, "tapscript/emptypk/checksigverify", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[2]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[8]})
-            spender_two_paths(spenders, info, "tapscript/emptypk/checksigadd", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[9]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[10]})
+            spender_two_paths(spenders, info, "tapscript/emptypk/checksig", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[1]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[7]}, err_msg="Public key is neither compressed or uncompressed")
+            spender_two_paths(spenders, info, "tapscript/emptypk/checksigverify", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[2]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[8]}, err_msg="Public key is neither compressed or uncompressed")
+            spender_two_paths(spenders, info, "tapscript/emptypk/checksigadd", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[9]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[10]}, err_msg="Public key is neither compressed or uncompressed")
             # Test that OP_CHECKSIGADD results are as expected
-            spender_two_paths(spenders, info, "tapscript/checksigaddresults", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[28]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[30]})
-            spender_two_paths(spenders, info, "tapscript/checksigaddoversize", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[29]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[30]})
+            spender_two_paths(spenders, info, "tapscript/checksigaddresults", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[28]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[30]}, err_msg="unknown error")
+            spender_two_paths(spenders, info, "tapscript/checksigaddoversize", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[29]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[30]}, err_msg="unknown error")
             # Test that OP_CHECKSIGADD requires 3 stack elements.
-            spender_two_paths(spenders, info, "tapscript/checksigadd3args", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[9]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[11]})
+            spender_two_paths(spenders, info, "tapscript/checksigadd3args", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[9]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[11]}, err_msg="Operation not valid with the current stack size")
             # Test that empty signatures do not cause script failure in OP_CHECKSIG and OP_CHECKSIGADD (but do fail with empty pubkey, and do fail OP_CHECKSIGVERIFY)
-            spender_two_paths(spenders, info, "tapscript/emptysigs/checksig", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[12], "prefix": [bytes([])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[13], "prefix": [bytes([])]})
-            spender_two_paths(spenders, info, "tapscript/emptysigs/nochecksigverify", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[12], "prefix": [bytes([])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[20], "prefix": [bytes([])]})
-            spender_two_paths(spenders, info, "tapscript/emptysigs/checksigadd", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[14], "prefix": [bytes([])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[15], "prefix": [bytes([])]})
+            spender_two_paths(spenders, info, "tapscript/emptysigs/checksig", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[12], "prefix": [bytes([])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[13], "prefix": [bytes([])]}, err_msg="Public key is neither compressed or uncompressed")
+            spender_two_paths(spenders, info, "tapscript/emptysigs/nochecksigverify", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[12], "prefix": [bytes([])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[20], "prefix": [bytes([])]}, err_msg="Public key is neither compressed or uncompressed")
+            spender_two_paths(spenders, info, "tapscript/emptysigs/checksigadd", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[14], "prefix": [bytes([])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[15], "prefix": [bytes([])]}, err_msg="Public key is neither compressed or uncompressed")
             # Test that scripts over 10000 bytes (and over 201 non-push ops) are acceptable.
-            spender_two_paths(spenders, info, "tapscript/no10000limit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[19]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[7]})
+            spender_two_paths(spenders, info, "tapscript/no10000limit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[19]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[7]}, err_msg="Public key is neither compressed or uncompressed")
             # Test that the (witsize+50 >= 50*(1+sigchecks)) rule is enforced (but only for executed checksigs)
-            spender_two_paths(spenders, info2, "tapscript/sigopratio", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts2[0], "suffix": [bytes([1])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts2[0], "suffix": [bytes([2])]})
+            spender_two_paths(spenders, info2, "tapscript/sigopratio", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts2[0], "suffix": [bytes([1])]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts2[0], "suffix": [bytes([2])]}, err_msg="Too much signature validation relative to witness weight")
             # Test that a stack size of 1000 elements is permitted, but 1001 isn't.
-            spender_two_paths(spenders, info, "tapscript/1000stack", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[21]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[22]})
+            spender_two_paths(spenders, info, "tapscript/1000stack", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[21]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[22]}, err_msg="Stack size limit exceeded")
             # Test that an input stack size of 1000 elements is permitted, but 1001 isn't.
-            spender_two_paths(spenders, info, "tapscript/1000stack", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[23], "suffix": [bytes() for _ in range(999)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[24], "suffix": [bytes() for _ in range(1000)]})
+            spender_two_paths(spenders, info, "tapscript/1000stack", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[23], "suffix": [bytes() for _ in range(999)]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[24], "suffix": [bytes() for _ in range(1000)]}, err_msg="Stack size limit exceeded")
             # Test that pushing a 520 byte stack element is valid, but a 521 byte one is not.
-            spender_two_paths(spenders, info, "tapscript/push520limit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[25]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[26]})
+            spender_two_paths(spenders, info, "tapscript/push520limit", standard=no_annex, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[25]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[26]}, err_msg="Push value size limit exceeded")
             # ... unless there exists an OP_SUCCESSX somewhere in the script
-            spender_two_paths(spenders, info, "tapscript/push520limit", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[27]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[26]})
+            spender_two_paths(spenders, info, "tapscript/push520limit", standard=False, success={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[27]}, failure={"key": sec2, "hashtype": hashtype, "annex": annex, "script": scripts[26]}, err_msg="Push value size limit exceeded")
 
 
             # OP_SUCCESSx and unknown leaf versions
@@ -705,17 +710,17 @@ class TaprootTest(BitcoinTestFramework):
             ]
             info = taproot_construct(pub1, scripts)
             spender_sighash_mutation(spenders, info, "alwaysvalid/pk", key=sec1, hashtype=random.choice(VALID_SIGHASHES), annex=annex, standard=no_annex)
-            spender_alwaysvalid(spenders, info, "alwaysvalid/success", script=scripts[0], annex=annex)
-            spender_alwaysvalid(spenders, info, "alwaysvalid/success#if", script=scripts[1], annex=annex)
-            spender_alwaysvalid(spenders, info, "alwaysvalid/success#verif", script=scripts[2], annex=annex)
-            spender_alwaysvalid(spenders, info, "alwaysvalid/unknownversion#return", script=scripts[3], annex=annex)
-            spender_alwaysvalid_p2sh(spenders, info, "alwaysvalid/success/p2sh", standard=False, script=scripts[0])
+            spender_alwaysvalid(spenders, info, "alwaysvalid/success", script=scripts[0], annex=annex, err_msg="Witness program hash mismatch")
+            spender_alwaysvalid(spenders, info, "alwaysvalid/success#if", script=scripts[1], annex=annex, err_msg="Witness program hash mismatch")
+            spender_alwaysvalid(spenders, info, "alwaysvalid/success#verif", script=scripts[2], annex=annex, err_msg="Witness program hash mismatch")
+            spender_alwaysvalid(spenders, info, "alwaysvalid/unknownversion#return", script=scripts[3], annex=annex, err_msg="Witness program hash mismatch")
+            spender_alwaysvalid_p2sh(spenders, info, "alwaysvalid/success/p2sh", standard=False, script=scripts[0], err_msg="Operation not valid with the current stack size")
             # Test that OP_SUCCESSX works when hit before unparseable script opcode, but not after.
-            spender_two_paths_alwaysvalid(spenders, info, "alwaysvalid/unparsesuccess", standard=False, success={"script":scripts[6]}, failure={"script":scripts[5]})
+            spender_two_paths_alwaysvalid(spenders, info, "alwaysvalid/unparsesuccess", standard=False, success={"script":scripts[6]}, failure={"script":scripts[5]}, err_msg="Opcode missing or not understood")
 
             if (info[2][scripts[4][1]][0] != ANNEX_TAG):
                 # Annex is mandatory for control block with leaf version 0x50
-                spender_alwaysvalid(spenders, info, "alwaysvalid/unknownversion#fe", script=scripts[4], annex=annex)
+                spender_alwaysvalid(spenders, info, "alwaysvalid/unknownversion#fe", script=scripts[4], annex=annex, err_msg="Witness program hash mismatch")
 
         return spenders
 

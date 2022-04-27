@@ -30,7 +30,7 @@ public:
 
     /** Create a singular (non-script) signature. */
     virtual bool CreateSig(const SigningProvider& provider, std::vector<unsigned char>& vchSig, const CKeyID& keyid, const CScript& scriptCode, SigVersion sigversion) const =0;
-    virtual bool CreateSchnorrSig(const SigningProvider& provider, std::vector<unsigned char>& sig, const XOnlyPubKey& pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion) const =0;
+    virtual bool CreateSchnorrSig(const SigningProvider& provider, std::vector<unsigned char>& sig, const VersionedXOnlyPubKey& ver_pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion) const =0;
 };
 
 /** A signature creator for transactions. */
@@ -47,7 +47,7 @@ public:
     MutableTransactionSignatureCreator(const CMutableTransaction* tx, unsigned int input_idx, const CAmount& amount, const PrecomputedTransactionData* txdata, int hash_type);
     const BaseSignatureChecker& Checker() const override { return checker; }
     bool CreateSig(const SigningProvider& provider, std::vector<unsigned char>& vchSig, const CKeyID& keyid, const CScript& scriptCode, SigVersion sigversion) const override;
-    bool CreateSchnorrSig(const SigningProvider& provider, std::vector<unsigned char>& sig, const XOnlyPubKey& pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion) const override;
+    bool CreateSchnorrSig(const SigningProvider& provider, std::vector<unsigned char>& sig, const VersionedXOnlyPubKey& ver_pubkey, const uint256* leaf_hash, const uint256* merkle_root, SigVersion sigversion) const override;
 };
 
 /** A signature creator that just produces 71-byte empty signatures. */

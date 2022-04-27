@@ -1504,7 +1504,13 @@ bool SignatureHashSchnorr(uint256& hash_out, ScriptExecutionData& execdata, cons
     // Hash type
     const uint8_t output_type = (hash_type == SIGHASH_DEFAULT) ? SIGHASH_ALL : (hash_type & SIGHASH_OUTPUT_MASK); // Default (no sighash byte) is equivalent to SIGHASH_ALL
     const uint8_t input_type = hash_type & SIGHASH_INPUT_MASK;
-    if (!(hash_type <= 0x03 || (hash_type >= 0x81 && hash_type <= 0x83))) return false;
+    switch(hash_type) {
+        case 0: case 1: case 2: case 3:
+        case 0x81: case 0x82: case 0x83:
+            break;
+        default:
+            return false;
+    }
     ss << hash_type;
 
     // Transaction level data

@@ -914,11 +914,11 @@ def spenders_taproot_active():
         # 15) OP_CHECKSIGADD with empty key that needs invalid signature
         ("t15", CScript([pubs[1], OP_CHECKSIGVERIFY, OP_0, OP_0, OP_CHECKSIGADD, OP_NOT])),
         # 16) OP_CHECKSIG with unknown pubkey type
-        ("t16", CScript([OP_1, OP_CHECKSIG])),
+        ("t16", CScript([OP_2, OP_CHECKSIG])),
         # 17) OP_CHECKSIGADD with unknown pubkey type
-        ("t17", CScript([OP_0, OP_1, OP_CHECKSIGADD])),
+        ("t17", CScript([OP_0, OP_2, OP_CHECKSIGADD])),
         # 18) OP_CHECKSIGVERIFY with unknown pubkey type
-        ("t18", CScript([OP_1, OP_CHECKSIGVERIFY, OP_1])),
+        ("t18", CScript([OP_2, OP_CHECKSIGVERIFY, OP_1])),
         # 19) script longer than 10000 bytes and over 201 non-push opcodes
         ("t19", CScript([OP_0, OP_0, OP_2DROP] * 10001 + [pubs[1], OP_CHECKSIG])),
         # 20) OP_CHECKSIGVERIFY with empty key
@@ -978,7 +978,7 @@ def spenders_taproot_active():
     add_spender(spenders, "tapscript/minimalnotif", leaf="t6", **common, inputs=[getter("sign"), b'\x01'], failure={"inputs": [getter("sign"), b'\x03']}, **ERR_MINIMALIF)
     add_spender(spenders, "tapscript/minimalif", leaf="t5", **common, inputs=[getter("sign"), b'\x01'], failure={"inputs": [getter("sign"), b'\x0001']}, **ERR_MINIMALIF)
     add_spender(spenders, "tapscript/minimalnotif", leaf="t6", **common, inputs=[getter("sign"), b'\x01'], failure={"inputs": [getter("sign"), b'\x0100']}, **ERR_MINIMALIF)
-    # Test that 1-byte public keys (which are unknown) are acceptable but nonstandard with unrelated signatures, but 0-byte public keys are not valid.
+    # Test that 1-byte OP_2 public keys (which are unknown) are acceptable but nonstandard with unrelated signatures, but 0-byte public keys are not valid.
     add_spender(spenders, "tapscript/unkpk/checksig", leaf="t16", standard=False, **common, **SINGLE_SIG, failure={"leaf": "t7"}, **ERR_UNKNOWN_PUBKEY)
     add_spender(spenders, "tapscript/unkpk/checksigadd", leaf="t17", standard=False, **common, **SINGLE_SIG, failure={"leaf": "t10"}, **ERR_UNKNOWN_PUBKEY)
     add_spender(spenders, "tapscript/unkpk/checksigverify", leaf="t18", standard=False, **common, **SINGLE_SIG, failure={"leaf": "t8"}, **ERR_UNKNOWN_PUBKEY)

@@ -761,8 +761,14 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // Applications relying on first-seen mempool behavior should
                 // check all unconfirmed ancestors; otherwise an opt-in ancestor
                 // might be replaced, causing removal of this descendant.
-                if (!args.m_allow_bip125_full_replacement && !SignalsOptInRBF(*ptxConflicting)) {
-                    return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
+                if (!SignalsOptInRBF(*ptxConflicting)) {
+                    if (args.m_allow_bip125_full_replacement) {
+                        LogPrint(BCLog::MEMPOOL, "replacing tx %s with %s even without BIP125 signaling\n",
+                                ptxConflicting->GetHash().ToString(),
+                                tx.GetHash().ToString());
+                    } else {
+                        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
+                    }
                 }
 
                 ws.m_conflicts.insert(ptxConflicting->GetHash());

@@ -460,6 +460,9 @@ public:
          * any transaction spending the same inputs as a transaction in the mempool is considered
          * a conflict. */
         const bool m_allow_bip125_replacement;
+        /** Whether we allow transactions to replace mempool transactions by BIP125 rules,
+         * *excluding* opt-in signaling checks. This is a relaxation of m_allow_bip125_replacement. */
+        const bool m_allow_bip125_full_replacement;
         /** When true, the mempool will not be trimmed when individual transactions are submitted in
          * Finalize(). Instead, limits should be enforced at the end to ensure the package is not
          * partially submitted.
@@ -480,6 +483,7 @@ public:
                             /* m_coins_to_uncache */ coins_to_uncache,
                             /* m_test_accept */ test_accept,
                             /* m_allow_bip125_replacement */ true,
+                            /* m_allow_bip125_full_replacement */ gArgs.GetBoolArg("-fullrbf", DEFAULT_FULL_RBF),
                             /* m_package_submission */ false,
                             /* m_package_feerates */ false,
             };
@@ -494,6 +498,7 @@ public:
                             /* m_coins_to_uncache */ coins_to_uncache,
                             /* m_test_accept */ true,
                             /* m_allow_bip125_replacement */ false,
+                            /* m_allow_bip125__full_replacement */ false,
                             /* m_package_submission */ false, // not submitting to mempool
                             /* m_package_feerates */ false,
             };
@@ -508,6 +513,7 @@ public:
                             /* m_coins_to_uncache */ coins_to_uncache,
                             /* m_test_accept */ false,
                             /* m_allow_bip125_replacement */ false,
+                            /* m_allow_bip125__full_replacement */ false,
                             /* m_package_submission */ true,
                             /* m_package_feerates */ true,
             };
@@ -521,6 +527,7 @@ public:
                             /* m_coins_to_uncache */ package_args.m_coins_to_uncache,
                             /* m_test_accept */ package_args.m_test_accept,
                             /* m_allow_bip125_replacement */ true,
+                            /* m_allow_bip125__full_replacement */ gArgs.GetBoolArg("-fullrbf", DEFAULT_FULL_RBF),
                             /* m_package_submission */ false,
                             /* m_package_feerates */ false, // only 1 transaction
             };
@@ -535,6 +542,7 @@ public:
                  std::vector<COutPoint>& coins_to_uncache,
                  bool test_accept,
                  bool allow_bip125_replacement,
+                 bool allow_bip125_full_replacement,
                  bool package_submission,
                  bool package_feerates)
             : m_chainparams{chainparams},
@@ -543,6 +551,7 @@ public:
               m_coins_to_uncache{coins_to_uncache},
               m_test_accept{test_accept},
               m_allow_bip125_replacement{allow_bip125_replacement},
+              m_allow_bip125_full_replacement{allow_bip125_full_replacement},
               m_package_submission{package_submission},
               m_package_feerates{package_feerates}
         {
@@ -752,7 +761,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // Applications relying on first-seen mempool behavior should
                 // check all unconfirmed ancestors; otherwise an opt-in ancestor
                 // might be replaced, causing removal of this descendant.
-                if (!SignalsOptInRBF(*ptxConflicting)) {
+                if (!args.m_allow_bip125_full_replacement && !SignalsOptInRBF(*ptxConflicting)) {
                     return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
                 }
 

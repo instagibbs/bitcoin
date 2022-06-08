@@ -57,6 +57,8 @@ static const unsigned int MAX_STANDARD_SCRIPTSIG_SIZE = 1650;
 static const unsigned int DUST_RELAY_TX_FEE = 3000;
 /** Default for -minrelaytxfee, minimum relay fee for transactions */
 static const unsigned int DEFAULT_MIN_RELAY_TX_FEE = 1000;
+/** Default for opt-in RBF bypass */
+static const bool DEFAULT_FULL_RBF = false;
 /**
  * Standard script verification flags that standard transactions will comply
  * with. However scripts violating these flags may still be present in valid

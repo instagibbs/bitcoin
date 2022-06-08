@@ -32,7 +32,7 @@ from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
 MAX_REPLACEMENT_LIMIT = 100
 class ReplaceByFeeTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 2
+        self.num_nodes = 3
         self.extra_args = [
             [
                 "-acceptnonstdtxn=1",
@@ -44,6 +44,10 @@ class ReplaceByFeeTest(BitcoinTestFramework):
             ],
             # second node has default mempool parameters
             [
+            ],
+            # third node allows non-signaling replacements
+            [
+                "-fullrbf=1",
             ],
         ]
         self.supports_cli = False
@@ -93,6 +97,9 @@ class ReplaceByFeeTest(BitcoinTestFramework):
 
         self.log.info("Running test replacement relay fee...")
         self.test_replacement_relay_fee()
+
+        self.log.info("Running test for full rbf policy...")
+        self.test_full_rbf()
 
         self.log.info("Passed")
 
@@ -715,6 +722,45 @@ class ReplaceByFeeTest(BitcoinTestFramework):
         # fee conforming to node's `incrementalrelayfee` policy of 1000 sat per KB.
         tx.vout[0].nValue -= 1
         assert_raises_rpc_error(-26, "insufficient fee", self.nodes[0].sendrawtransaction, tx.serialize().hex())
+
+    def test_full_rbf(self):
+
+        # Empty mempool
+        self.generate(self.nodes[0], 1)
+
+        # Connect bip125-signal honoring and ignoring nodes
+        self.connect_nodes(0, 2)
+        self.sync_blocks((self.nodes[0], self.nodes[2]))
+        confirmed_utxo = self.wallet.get_utxo()
+
+        # Create a parent transaction that does not signal bip125 replaceability
+        optin_parent_tx = self.wallet.send_self_transfer(
+            from_node=self.nodes[0],
+            utxo_to_spend=confirmed_utxo,
+            sequence=SEQUENCE_FINAL,
+            fee_rate=Decimal('0.01'),
+        )
+
+        # BIP125 non-replaceable
+        assert_equal(False, self.nodes[0].getmempoolentry(optin_parent_tx['txid'])['bip125-replaceable'])
+        self.nodes[2].sendrawtransaction(self.nodes[0].getrawtransaction(optin_parent_tx['txid']))
+        assert_equal(False, self.nodes[2].getmempoolentry(optin_parent_tx['txid'])['bip125-replaceable'])
+
+        replacement_parent_tx = self.wallet.create_self_transfer(
+            from_node=self.nodes[2], # needs to originate from node that would accept due to check
+            utxo_to_spend=confirmed_utxo,
+            sequence=BIP125_SEQUENCE_NUMBER,
+            fee_rate=Decimal('0.02'),
+        )
+
+        # Test if parent tx can be replaced only by the full rbf node.
+        res_first_seen = self.nodes[0].testmempoolaccept(rawtxs=[replacement_parent_tx['hex']])[0]
+        res_full_rbf = self.nodes[2].testmempoolaccept(rawtxs=[replacement_parent_tx['hex']])[0]
+
+        # Parent can be replaced when full rbf is enabled.
+        assert_equal({**res_first_seen, "txid":None, "wtxid":None}, {'txid': None, 'wtxid': None, 'allowed': False, 'reject-reason': 'txn-mempool-conflict'})
+        assert_equal(res_full_rbf['allowed'], True)
+
 
 if __name__ == '__main__':
     ReplaceByFeeTest().main()

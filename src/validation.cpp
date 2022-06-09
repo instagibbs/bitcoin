@@ -763,7 +763,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // might be replaced, causing removal of this descendant.
                 if (!SignalsOptInRBF(*ptxConflicting)) {
                     if (args.m_allow_bip125_full_replacement) {
-                        LogPrint(BCLog::MEMPOOL, "replacing tx %s with %s even without BIP125 signaling\n",
+                        LogPrint(BCLog::MEMPOOL, "considering replacing tx %s with %s even without BIP125 signaling\n",
                                 ptxConflicting->GetHash().ToString(),
                                 tx.GetHash().ToString());
                     } else {

@@ -29,6 +29,7 @@
 #include <logging/timer.h>
 #include <node/blockstorage.h>
 #include <node/utxo_snapshot.h>
+#include <policy/v3_policy.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
@@ -332,7 +333,9 @@ void Chainstate::MaybeUpdateMempoolForReorg(
     // Also updates valid entries' cached LockPoints if needed.
     // If false, the tx is still valid and its lockpoints are updated.
     // If true, the tx would be invalid in the next block; remove this entry and all of its descendants.
-    const auto filter_final_and_mature = [this](CTxMemPool::txiter it)
+    // Note that v3 rules are not applied here, so reorgs may cause violations of v3 inheritance or
+    // topology restrictions.
+    const auto filter_final_and_mature = [&](CTxMemPool::txiter it)
         EXCLUSIVE_LOCKS_REQUIRED(m_mempool->cs, ::cs_main) {
         AssertLockHeld(m_mempool->cs);
         AssertLockHeld(::cs_main);
@@ -622,6 +625,14 @@ private:
         /** A temporary cache containing serialized transaction data for signature verification.
          * Reused across PolicyScriptChecks and ConsensusScriptChecks. */
         PrecomputedTransactionData m_precomputed_txdata;
+
+        /** Number of in-package ancestors, excluding itself. If applicable, populated at the start
+         * of each PreChecks iteration within AcceptMultipleTransactions. */
+        unsigned int m_num_in_package_ancestors{0};
+
+        /** The in-mempool ancestors of this transaction's in-package ancestors. If applicable,
+         * populated at the start of each PreChecks iteration within AcceptMultipleTransactions. */
+        CTxMemPool::setEntries m_ancestors_of_in_package_ancestors;
     };
 
     // Run the policy checks on a given transaction, excluding any script checks.
@@ -760,9 +771,11 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // check all unconfirmed ancestors; otherwise an opt-in ancestor
                 // might be replaced, causing removal of this descendant.
                 //
-                // If replaceability signaling is ignored due to node setting,
-                // replacement is always allowed.
-                if (!m_pool.m_full_rbf && !SignalsOptInRBF(*ptxConflicting)) {
+                // All V3 transactions are considered replaceable.
+                //
+                // Replaceability signaling of the original transactions may be
+                // ignored due to node setting.
+                if (!m_pool.m_full_rbf && !SignalsOptInRBF(*ptxConflicting) && ptxConflicting->nVersion != 3) {
                     return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "txn-mempool-conflict");
                 }
 
@@ -864,10 +877,12 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // while a tx could be package CPFP'd when entering the mempool, we do not have a DoS-resistant
     // method of ensuring the tx remains bumped. For example, the fee-bumping child could disappear
     // due to a replacement.
-    if (!bypass_limits && ws.m_modified_fees < m_pool.m_min_relay_feerate.GetFee(ws.m_vsize)) {
+    // The only exception is v3 transactions.
+    if (!bypass_limits && ws.m_ptx->nVersion != 3 && ws.m_modified_fees < m_pool.m_min_relay_feerate.GetFee(ws.m_vsize)) {
         // Even though this is a fee-related failure, this result is TX_MEMPOOL_POLICY, not
         // TX_RECONSIDERABLE, because it cannot be bypassed using package validation.
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "min relay fee not met",
+        return state.Invalid(ws.m_ptx->nVersion == 3 ? TxValidationResult::TX_RECONSIDERABLE : TxValidationResult::TX_MEMPOOL_POLICY,
+                             "min relay fee not met",
                              strprintf("%d < %d", ws.m_modified_fees, m_pool.m_min_relay_feerate.GetFee(ws.m_vsize)));
     }
     // No individual transactions are allowed below the mempool min feerate except from disconnected
@@ -946,6 +961,14 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     ws.m_ancestors = *ancestors;
+    // Even though just checking direct mempool parents for inheritance would be sufficient, we
+    // check using the full ancestor set here because it's more convenient to use what we have
+    // already calculated.
+    CTxMemPool::setEntries collective_ancestors = *ancestors;
+    collective_ancestors.merge(ws.m_ancestors_of_in_package_ancestors);
+    if (const auto err_string{ApplyV3Rules(ws.m_ptx, collective_ancestors, ws.m_num_in_package_ancestors, ws.m_conflicts, ws.m_vsize)}) {
+        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "v3-rule-violation", *err_string);
+    }
 
     // A transaction that spends outputs that would be replaced by it is invalid. Now
     // that we have the set of all ancestors we can detect this
@@ -1288,10 +1311,54 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
                    [](const auto& tx) { return Workspace(tx); });
     std::map<uint256, MempoolAcceptResult> results;
 
+    // Not a complete check of v3 rules, helps us detect failures early.
+    // Some data structures are only necessary if we are checking v3 rules; skip this work if those
+    // rules are not applicable.
+    const bool check_v3_rules{std::any_of(txns.cbegin(), txns.cend(), [](const auto& tx){ return tx->nVersion == 3; })};
+    if (check_v3_rules) {
+        if (const auto err_string{PackageV3SanityChecks(txns)}) {
+            package_state.Invalid(PackageValidationResult::PCKG_POLICY, "v3-violation", err_string.value());
+            return PackageMempoolAcceptResult(package_state, std::move(results));
+        }
+    }
+
+    // Map from txid of a transaction to its in-package ancestor set. Not MemPoolAccept-wide
+    // because ancestor sets may change between multiple calls to AcceptMultipleTransactions, i.e.
+    // due to something being accepted.
+    const auto in_package_ancestors{CalculateInPackageAncestors(txns)};
+
     LOCK(m_pool.cs);
 
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
+        // This process is O(n^2) in the number of transactions, so only do it when v3 rules are
+        // applicable. PackageV3SanityChecks helps significantly limit the computation here.
+        if (check_v3_rules) {
+            // Populate Workspace::m_num_in_package_ancestors if applicable.
+            auto ancestor_set_iter = in_package_ancestors.find(ws.m_ptx->GetHash());
+            const bool successful_calculation{ancestor_set_iter != in_package_ancestors.end() && ancestor_set_iter->second.size() >= 1};
+            Assume(successful_calculation);
+            if (successful_calculation) {
+                // If there are in-package ancestors, update m_num_in_package_ancestors.
+                // Sets in in_package_ancestors include the tx itself, so subtract 1.
+                ws.m_num_in_package_ancestors = ancestor_set_iter->second.size() - 1;
+            } else if (!txns.empty()) {
+                // If somehow CalculateInPackageAncestors failed to find this transaction's ancestor set,
+                // we use a safe (over)estimate that all of the transactions are in the ancestor set.
+                ws.m_num_in_package_ancestors = txns.size() - 1;
+            }
+
+            // If this tx is one of our ancestors, add all of its in-mempool ancestors to ours.
+            // If we are treating all transactions as our ancestor, always add.
+            for (const auto& potential_ancestor_ws : workspaces) {
+                if (!successful_calculation ||
+                    ancestor_set_iter->second.count(potential_ancestor_ws.m_ptx->GetHash()) > 0) {
+                    ws.m_ancestors_of_in_package_ancestors.insert(potential_ancestor_ws.m_ancestors.cbegin(),
+                                                                  potential_ancestor_ws.m_ancestors.cend());
+                }
+            }
+        }
+
         if (!PreChecks(args, ws)) {
             package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
             // Exit early to avoid doing pointless work. Update the failed tx result; the rest are unfinished.

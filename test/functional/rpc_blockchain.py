@@ -192,6 +192,7 @@ class BlockchainTest(BitcoinTestFramework):
             'bip65': {'type': 'buried', 'active': True, 'height': 4},
             'csv': {'type': 'buried', 'active': True, 'height': 5},
             'segwit': {'type': 'buried', 'active': True, 'height': 6},
+            'anyprevout': {'type': 'buried', 'active': True, 'height': 0},
             'testdummy': {
                 'type': 'bip9',
                 'bip9': {

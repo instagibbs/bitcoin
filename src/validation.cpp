@@ -1946,7 +1946,7 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
     }
 
     // Enforce ANYPREVOUT (BIP118/pr943)
-    if (DeploymentActiveAt(block_index, consensusparams, Consensus::DEPLOYMENT_ANYPREVOUT)) {
+    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_ANYPREVOUT)) {
         flags |= SCRIPT_VERIFY_ANYPREVOUT;
     }
 

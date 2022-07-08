@@ -314,6 +314,8 @@ class WalletTaprootTest(BitcoinTestFramework):
                         assert "taproot_merkle_root" in psbtin
                         assert "taproot_scripts" in psbtin
 
+            from pdb import set_trace
+            set_trace()
             rawtx = self.nodes[0].finalizepsbt(res['psbt'])['hex']
             txid = self.nodes[0].sendrawtransaction(rawtx)
             self.generatetoaddress(self.nodes[0], 1, self.boring.getnewaddress(), sync_fun=self.no_op)

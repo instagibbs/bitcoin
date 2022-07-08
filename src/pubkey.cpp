@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <logging.h>
 
 namespace
 {
@@ -229,6 +230,7 @@ bool XOnlyPubKey::CheckTapTweak(const XOnlyPubKey& internal, const uint256& merk
     secp256k1_xonly_pubkey internal_key;
     if (!secp256k1_xonly_pubkey_parse(secp256k1_context_verify, &internal_key, internal.data())) return false;
     uint256 tweak = internal.ComputeTapTweakHash(&merkle_root);
+    LogPrintf("TAPTWEAK: %s\n", tweak.GetHex());
     return secp256k1_xonly_pubkey_tweak_add_check(secp256k1_context_verify, m_keydata.begin(), parity, &internal_key, tweak.begin());
 }
 

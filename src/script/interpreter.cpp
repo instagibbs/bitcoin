@@ -11,6 +11,7 @@
 #include <pubkey.h>
 #include <script/script.h>
 #include <uint256.h>
+#include <logging.h>
 
 typedef std::vector<unsigned char> valtype;
 
@@ -1716,6 +1717,7 @@ bool GenericTransactionSignatureChecker<T>::CheckSchnorrSignature(Span<const uns
     if (!SignatureHashSchnorr(sighash, execdata, *txTo, nIn, hashtype, sigversion, ver_pubkey.version, *this->txdata, m_mdb)) {
         return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_HASHTYPE);
     }
+    LogPrintf("Signature hash computed: %s\n", sighash.GetHex());
     if (!VerifySchnorrSignature(sig, ver_pubkey.pubkey, sighash)) return set_error(serror, SCRIPT_ERR_SCHNORR_SIG);
     return true;
 }
@@ -1885,6 +1887,7 @@ static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, c
     const XOnlyPubKey q{program};
     // Compute the Merkle root from the leaf and the provided path.
     const uint256 merkle_root = ComputeTaprootMerkleRoot(control, tapleaf_hash);
+    LogPrintf("Tap merkle root: %s\n", merkle_root.GetHex());
     // Verify that the output pubkey matches the tweaked internal pubkey, after correcting for parity.
     return q.CheckTapTweak(p, merkle_root, control[0] & 1);
 }
@@ -1947,6 +1950,7 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
                 return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
             }
             execdata.m_tapleaf_hash = ComputeTapleafHash(control[0] & TAPROOT_LEAF_MASK, exec_script);
+            LogPrintf("TAPLEAF HASH: %s\n", execdata.m_tapleaf_hash.GetHex());
             if (!VerifyTaprootCommitment(control, program, execdata.m_tapleaf_hash, &execdata.m_internal_key)) {
                 return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
             }

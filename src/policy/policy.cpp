@@ -128,7 +128,6 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
     }
 
     unsigned int nDataOut = 0;
-    unsigned int ephemeral_output = 0;
     TxoutType whichType;
     for (const CTxOut& txout : tx.vout) {
         if (!::IsStandard(txout.scriptPubKey, whichType)) {
@@ -139,14 +138,8 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         if (whichType == TxoutType::NULL_DATA) {
             nDataOut++;
         } else if (whichType == TxoutType::TRUE) {
-            if (ephemeral_output) {
-                reason = "multi-ephemeral";
-                return false;
-            } else {
-                /* FIXME We're not checking it's actually ephemeral, need to think about interface.
-                    Maybe taking a "package" of tx is right way. */
-                ephemeral_output++;
-            }
+            // Not a real implementation, just skips later checks
+            continue;
         } else if ((whichType == TxoutType::MULTISIG) && (!permit_bare_multisig)) {
             reason = "bare-multisig";
             return false;

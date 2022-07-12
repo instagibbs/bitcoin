@@ -4,7 +4,9 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the wallet."""
 from decimal import Decimal
+from io import BytesIO
 from itertools import product
+import base64
 
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.test_framework import BitcoinTestFramework
@@ -26,10 +28,93 @@ from test_framework.messages import (
     SEQUENCE_FINAL,
     tx_from_hex,
     uint256_from_str,
+    deser_string,
+    ser_compact_size,
 )
 
-NOT_A_NUMBER_OR_STRING = "Amount is not a number or string"
-OUT_OF_RANGE = "Amount out of range"
+# like from_hex, but without the hex part
+def FromBinary(cls, stream):
+    """deserialize a binary stream (or bytes object) into an object"""
+    # handle bytes object by turning it into a stream
+    was_bytes = isinstance(stream, bytes)
+    if was_bytes:
+        stream = BytesIO(stream)
+    obj = cls()
+    obj.deserialize(stream)
+    if was_bytes:
+        assert len(stream.read()) == 0
+    return obj
+
+class PSBTMap:
+    """Class for serializing and deserializing PSBT maps"""
+
+    def __init__(self, map=None):
+        self.map = map if map is not None else {}
+
+    def deserialize(self, f):
+        m = {}
+        while True:
+            k = deser_string(f)
+            if len(k) == 0:
+                break
+            v = deser_string(f)
+            if len(k) == 1:
+                k = k[0]
+            assert k not in m
+            m[k] = v
+        self.map = m
+
+    def serialize(self):
+        m = b""
+        for k,v in self.map.items():
+#            if k == 0x07:
+#                from pdb import set_trace
+#                set_trace()
+            if isinstance(k, int) and 0 <= k and k <= 255:
+                k = bytes([k])
+            m += ser_compact_size(len(k)) + k
+            m += ser_compact_size(len(v)) + v
+        m += b"\x00"
+        return m
+
+class PSBT:
+    """Class for serializing and deserializing PSBTs"""
+
+    def __init__(self):
+        self.g = PSBTMap()
+        self.i = []
+        self.o = []
+        self.tx = None
+
+    def deserialize(self, f):
+        assert f.read(5) == b"psbt\xff"
+        self.g = FromBinary(PSBTMap, f)
+        assert 0 in self.g.map
+        self.tx = FromBinary(CTransaction, self.g.map[0])
+        self.i = [FromBinary(PSBTMap, f) for _ in self.tx.vin]
+        self.o = [FromBinary(PSBTMap, f) for _ in self.tx.vout]
+        return self
+
+    def serialize(self):
+        assert isinstance(self.g, PSBTMap)
+        assert isinstance(self.i, list) and all(isinstance(x, PSBTMap) for x in self.i)
+        assert isinstance(self.o, list) and all(isinstance(x, PSBTMap) for x in self.o)
+        assert 0 in self.g.map
+        tx = FromBinary(CTransaction, self.g.map[0])
+        assert len(tx.vin) == len(self.i)
+        assert len(tx.vout) == len(self.o)
+
+        psbt = [x.serialize() for x in [self.g] + self.i + self.o]
+        return b"psbt\xff" + b"".join(psbt)
+
+    def to_base64(self):
+        return base64.b64encode(self.serialize()).decode("utf8")
+
+    @classmethod
+    def from_base64(cls, b64psbt):
+        return FromBinary(cls, base64.b64decode(b64psbt))
+
+
 
 
 class WalletTest(BitcoinTestFramework):
@@ -112,14 +197,16 @@ class WalletTest(BitcoinTestFramework):
         funding_coin = self.nodes[0].listunspent()[0]
         anchor_spend = self.nodes[0].createpsbt(inputs=[{"txid": res[0]['txid'], "vout": 0}, {"txid":funding_coin["txid"], "vout": funding_coin["vout"]}], outputs=[{self.nodes[0].getnewaddress(): funding_coin["amount"]-Decimal('0.001')}])
 
-        # bip174.org inject 00000000000000000151 onto witness utxo and deadbeef final scriptsig(we surgically remove later), respectively
-        print(anchor_spend)
-        from pdb import set_trace
-        set_trace()
+        # Inject witness utxo data and dummy final scriptsig because empty fields are simply ignored by Core
+        anchor_psbt = PSBT.from_base64(anchor_spend)
+        anchor_psbt.i[0].map[0x01] = bytes.fromhex("00000000000000000151")
+        anchor_psbt.i[0].map[0x07] = bytes.fromhex("deadbeef")
+        anchor_spend = anchor_psbt.to_base64()
 
         # Double process due to bug in precomputed data struct
         anchor_spend = self.nodes[0].walletprocesspsbt(anchor_spend)
         anchor_spend = self.nodes[0].walletprocesspsbt(anchor_spend['psbt'])
+
         anchor_spend_hex = self.nodes[0].finalizepsbt(anchor_spend['psbt'])['hex']
         anchor_spend_hex = anchor_spend_hex.replace("04deadbeef", "00")
 

@@ -121,7 +121,7 @@ class WalletTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 4
         self.extra_args = [[
-            "-dustrelayfee=0", "-walletrejectlongchains=0"
+            "-walletrejectlongchains=0", "-trueoutputs=1"
         ]] * self.num_nodes
         self.setup_clean_chain = True
         self.supports_cli = False

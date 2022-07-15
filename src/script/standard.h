@@ -17,6 +17,7 @@
 #include <variant>
 
 static const bool DEFAULT_ACCEPT_DATACARRIER = true;
+static const bool DEFAULT_ACCEPT_TRUEOUTPUTS = false;
 
 class CKeyID;
 class CScript;
@@ -43,6 +44,13 @@ static const unsigned int MAX_OP_RETURN_RELAY = 83;
  * type is designated as TxoutType::NULL_DATA.
  */
 extern bool fAcceptDatacarrier;
+
+/**
+ * A OP_TRUE output is accepted as standard, even if otherwise considered dust.
+ * N.B. this is not a real proposal. Real proposal would require this output also
+ * be immediately spent in relay package.
+ */
+extern bool accept_true_outputs;
 
 /** Maximum size of TxoutType::NULL_DATA scripts that this node considers standard. */
 extern unsigned nMaxDatacarrierBytes;

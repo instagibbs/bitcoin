@@ -85,6 +85,8 @@ bool IsStandard(const CScript& scriptPubKey, TxoutType& whichType)
     } else if (whichType == TxoutType::NULL_DATA &&
                (!fAcceptDatacarrier || scriptPubKey.size() > nMaxDatacarrierBytes)) {
           return false;
+    } else if (whichType == TxoutType::TRUE && !accept_true_outputs){
+        return false;
     }
 
     return true;
@@ -138,7 +140,7 @@ bool IsStandardTx(const CTransaction& tx, bool permit_bare_multisig, const CFeeR
         if (whichType == TxoutType::NULL_DATA) {
             nDataOut++;
         } else if (whichType == TxoutType::TRUE) {
-            // Not a real implementation, just skips later checks
+            // Not a real implementation, just skips later dust checks
             continue;
         } else if ((whichType == TxoutType::MULTISIG) && (!permit_bare_multisig)) {
             reason = "bare-multisig";

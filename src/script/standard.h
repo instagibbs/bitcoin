@@ -18,6 +18,7 @@
 
 static const bool DEFAULT_ACCEPT_DATACARRIER = true;
 static const bool DEFAULT_ACCEPT_TRUEOUTPUTS = false;
+static const bool DEFAULT_ACCEPT_ANNEXDATA = false;
 
 class CKeyID;
 class CScript;
@@ -51,6 +52,12 @@ extern bool fAcceptDatacarrier;
  * be immediately spent in relay package.
  */
 extern bool accept_true_outputs;
+
+/**
+ * Allows up to one annex data to be embedded in a transaction, counting towards the
+ * same data carrier limit as OP_RETURN values
+ */
+extern bool accept_annex_data;
 
 /** Maximum size of TxoutType::NULL_DATA scripts that this node considers standard. */
 extern unsigned nMaxDatacarrierBytes;

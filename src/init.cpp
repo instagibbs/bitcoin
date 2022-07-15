@@ -559,6 +559,7 @@ void SetupServerArgs(ArgsManager& argsman)
     argsman.AddArg("-datacarrier", strprintf("Relay and mine data carrier transactions (default: %u)", DEFAULT_ACCEPT_DATACARRIER), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-datacarriersize", strprintf("Maximum size of data in data carrier transactions we relay and mine (default: %u)", MAX_OP_RETURN_RELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-trueoutputs", strprintf("Relay and mine transactions with OP_TRUE outputs, even at dust level (default: %u)", DEFAULT_ACCEPT_TRUEOUTPUTS), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-annexcarrier", strprintf("Relay and mine transactions with annex data, up to -datacarriersize (default: %u)", DEFAULT_ACCEPT_ANNEXDATA), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-minrelaytxfee=<amt>", strprintf("Fees (in %s/kvB) smaller than this are considered zero fee for relaying, mining and transaction creation (default: %s)",
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted inbound peers with default permissions. This will relay transactions even if the transactions were already in the mempool. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
@@ -1013,6 +1014,7 @@ bool AppInitParameterInteraction(const ArgsManager& args, bool use_syscall_sandb
     fAcceptDatacarrier = args.GetBoolArg("-datacarrier", DEFAULT_ACCEPT_DATACARRIER);
     nMaxDatacarrierBytes = args.GetIntArg("-datacarriersize", nMaxDatacarrierBytes);
     accept_true_outputs = args.GetBoolArg("-trueoutputs", DEFAULT_ACCEPT_TRUEOUTPUTS);
+    accept_annex_data = args.GetBoolArg("-annexcarrier", DEFAULT_ACCEPT_ANNEXDATA);
 
     // Option to startup with mocktime set (used for regression testing):
     SetMockTime(args.GetIntArg("-mocktime", 0)); // SetMockTime(0) is a no-op

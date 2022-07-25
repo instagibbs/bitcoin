@@ -118,7 +118,7 @@ class WalletTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 4
         self.extra_args = [[
-            "-walletrejectlongchains=0", "-trueoutputs=1"
+            "-trueoutputs=1", "-annexcarrier=1",
         ]] * self.num_nodes
         self.setup_clean_chain = True
         self.supports_cli = False
@@ -200,7 +200,6 @@ class WalletTest(BitcoinTestFramework):
         assert(decoded_update_psbt['fee'] == Decimal("0.00010000")) # Funded!
         final_update_tx = self.nodes[0].finalizepsbt(update_raw_psbt)
         update_tx = final_update_tx['hex'] # complete!
-
         update_txid = self.nodes[0].sendrawtransaction(update_tx)
 
         # Settlement PSBT is ready to go, just needs rebinding

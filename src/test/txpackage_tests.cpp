@@ -9,6 +9,7 @@
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <test/util/random.h>
+#include <test/util/script.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
@@ -76,6 +77,35 @@ BOOST_FIXTURE_TEST_CASE(package_sanitization_tests, TestChain100Setup)
     BOOST_CHECK(!CheckPackage(package_duplicate_txids_empty, state_duplicates));
     BOOST_CHECK_EQUAL(state_duplicates.GetResult(), PackageValidationResult::PCKG_POLICY);
     BOOST_CHECK_EQUAL(state_duplicates.GetRejectReason(), "package-contains-duplicates");
+    BOOST_CHECK(!IsConsistent(package_duplicate_txids_empty));
+
+    // Packages can't have transactions spending the same prevout
+    CMutableTransaction tx_zero_1;
+    CMutableTransaction tx_zero_2;
+    COutPoint same_prevout{InsecureRand256(), 0};
+    tx_zero_1.vin.emplace_back(CTxIn{same_prevout});
+    tx_zero_2.vin.emplace_back(CTxIn{same_prevout});
+    // Different vouts (not the same tx)
+    tx_zero_1.vout.emplace_back(CTxOut(CENT, P2WSH_OP_TRUE));
+    tx_zero_2.vout.emplace_back(CTxOut(2 * CENT, P2WSH_OP_TRUE));
+    Package package_conflicts{MakeTransactionRef(tx_zero_1), MakeTransactionRef(tx_zero_2)};
+    BOOST_CHECK(!IsConsistent(package_conflicts));
+    // Transactions are considered sorted when they have no dependencies.
+    BOOST_CHECK(IsSorted(package_conflicts));
+    PackageValidationState state_conflicts;
+    BOOST_CHECK(!CheckPackage(package_conflicts, state_conflicts));
+    BOOST_CHECK_EQUAL(state_conflicts.GetResult(), PackageValidationResult::PCKG_POLICY);
+    BOOST_CHECK_EQUAL(state_conflicts.GetRejectReason(), "conflict-in-package");
+
+    // IsConsistent only cares about conflicts between transactions, not about a transaction
+    // conflicting with itself (i.e. duplicate prevouts in vin).
+    CMutableTransaction dup_tx;
+    dup_tx.vin.emplace_back(CTxIn{COutPoint{uint256::ZERO, 0}});
+    dup_tx.vin.emplace_back(CTxIn{COutPoint{uint256::ZERO, 0}});
+    Package package_with_dup_tx;
+    BOOST_CHECK(IsConsistent(package_with_dup_tx));
+    package_with_dup_tx.emplace_back(create_placeholder_tx(1, 1));
+    BOOST_CHECK(IsConsistent(package_with_dup_tx));
 }
 
 BOOST_FIXTURE_TEST_CASE(package_validation_tests, TestChain100Setup)

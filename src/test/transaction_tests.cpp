@@ -781,7 +781,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     CheckIsStandard(t);
     g_dust = CFeeRate{DUST_RELAY_TX_FEE};
 
-    t.vout[0].scriptPubKey = CScript() << OP_1;
+    t.vout[0].scriptPubKey = CScript() << OP_2;
     CheckIsNotStandard(t, "scriptpubkey");
 
     // MAX_OP_RETURN_RELAY-byte TxoutType::NULL_DATA (standard)

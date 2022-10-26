@@ -128,6 +128,11 @@ BOOST_AUTO_TEST_CASE(script_standard_Solver_success)
     BOOST_CHECK(solutions[0] == std::vector<unsigned char>{16});
     BOOST_CHECK(solutions[1] == ToByteVector(uint256::ONE));
 
+    // TxoutType::ANCHOR
+    s.clear();
+    s << OP_2;
+    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::ANCHOR);
+
     // TxoutType::NONSTANDARD
     s.clear();
     s << OP_9 << OP_ADD << OP_11 << OP_EQUAL;

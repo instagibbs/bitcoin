@@ -79,11 +79,13 @@ FUZZ_TARGET_INIT(script, initialize_script)
                which_type == TxoutType::NONSTANDARD ||
                which_type == TxoutType::NULL_DATA ||
                which_type == TxoutType::TX_BARE_DEFAULT_CHECK_TEMPLATE_VERIFY_HASH ||
-               which_type == TxoutType::MULTISIG);
+               which_type == TxoutType::MULTISIG ||
+               which_type == TxoutType::ANCHOR);
     }
     if (which_type == TxoutType::NONSTANDARD ||
         which_type == TxoutType::NULL_DATA ||
-        which_type == TxoutType::MULTISIG) {
+        which_type == TxoutType::MULTISIG ||
+        which_type == TxoutType::ANCHOR) {
         assert(!extract_destination_ret);
     }
 
@@ -97,6 +99,7 @@ FUZZ_TARGET_INIT(script, initialize_script)
     (void)Solver(script, solutions);
 
     (void)script.HasValidOps();
+    (void)script.IsPayToAnchor();
     (void)script.IsPayToScriptHash();
     (void)script.IsPayToWitnessScriptHash();
     (void)script.IsPushOnly();

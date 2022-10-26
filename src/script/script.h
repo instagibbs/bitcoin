@@ -530,6 +530,11 @@ public:
      */
     unsigned int GetSigOpCount(const CScript& scriptSig) const;
 
+    /**
+     * OP_2, which is truth-y
+     */
+    bool IsTrue() const;
+
     bool IsPayToScriptHash() const;
     bool IsPayToWitnessScriptHash() const;
     bool IsWitnessProgram(int& version, std::vector<unsigned char>& program) const;

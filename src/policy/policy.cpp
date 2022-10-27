@@ -142,8 +142,12 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
             reason = "bare-multisig";
             return false;
         } else if (IsDust(txout, dust_relay_fee)) {
-            reason = "dust";
-            return false;
+            // We ensure ephemeral output is spent in the same mempool package
+            // to avoid bloating utxo set
+            if (whichType != TxoutType::ANCHOR) {
+                reason = "dust";
+                return false;
+            }
         }
     }
 
@@ -290,6 +294,17 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
         }
     }
     return true;
+}
+
+size_t CountEphemeralOutputs(const CTransaction& tx)
+{
+    size_t num_anchors = 0;
+    for (const CTxOut& txout : tx.vout) {
+        if (txout.scriptPubKey.IsTrue()) {
+            num_anchors++;
+        }
+    }
+    return num_anchors;
 }
 
 int64_t GetVirtualTransactionSize(int64_t nWeight, int64_t nSigOpCost, unsigned int bytes_per_sigop)

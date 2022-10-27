@@ -809,6 +809,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         return false; // state filled in by CheckTxInputs
     }
 
+    // We check for 0-base-fee transaction here. Contextual package checks done in CheckPackage.
+    // Base fees are used here because miners may choose to keep parents in the mempool via priority.
+    // If this isn't actually in a package, it will fail below at CheckFeeRate.
+    size_t num_anchors = CountEphemeralOutputs(tx);
+    if (num_anchors == 1) {
+        if (ws.m_base_fees != 0) {
+            return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "invalid-ephemeral-fee");
+        } else if (tx.nVersion != 3) {
+            return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "wrong-ephemeral-nversion");
+        }
+    } else if (num_anchors > 1) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "too-many-ephemeral-anchors");
+    }
+
     if (m_pool.m_require_standard && !AreInputsStandard(tx, m_view)) {
         return state.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "bad-txns-nonstandard-inputs");
     }
@@ -1088,7 +1102,7 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     if (const auto err_string{CheckMinerScores(m_total_modified_fees, m_total_vsize, m_collective_ancestors,
                                                direct_conflict_iters, m_all_conflicts)}) {
         return package_state.Invalid(PackageValidationResult::PCKG_POLICY,
-                                     "package RBF failed: insufficient fees", *err_string);
+                                     "package RBF failed: insufficient fees (miner score)", *err_string);
     }
     m_conflicting_fees = 0;
     m_conflicting_size = 0;
@@ -1099,7 +1113,7 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     if (const auto err_string{PaysForRBF(m_conflicting_fees, m_total_modified_fees, m_total_vsize,
                                          m_pool.m_incremental_relay_feerate, hash)}) {
         return package_state.Invalid(PackageValidationResult::PCKG_POLICY,
-                                     "package RBF failed: insufficient fees", *err_string);
+                                     "package RBF failed: insufficient fees (rule 3 and 4)", *err_string);
     }
 
     return true;
@@ -1358,6 +1372,16 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         }
         package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
         results.emplace(child_wtxid, MempoolAcceptResult::Failure(child_state));
+        return PackageMempoolAcceptResult(package_state, std::move(results));
+    }
+
+    if (const auto ephemeral_violation{CheckEphemeralSpends(txns)}) {
+        const auto parent_wtxid = ephemeral_violation.value();
+        TxValidationState child_state;
+        child_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "missing-ephemeral-spends",
+                      strprintf("V3 tx %s has unspent ephemeral anchor", parent_wtxid.ToString()));
+        package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+        results.emplace(parent_wtxid, MempoolAcceptResult::Failure(child_state));
         return PackageMempoolAcceptResult(package_state, std::move(results));
     }
 

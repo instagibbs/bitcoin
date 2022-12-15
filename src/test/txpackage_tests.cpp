@@ -810,7 +810,7 @@ BOOST_FIXTURE_TEST_CASE(package_cpfp_tests, TestChain100Setup)
         expected_pool_size += 1;
         BOOST_CHECK_MESSAGE(submit_rich_parent.m_state.IsInvalid(), "Package validation unexpectedly succeeded");
 
-        // The child would have been validated on its own and failed, then submitted as a "package" of 1.
+        // The child would have been validated on its own and failed.
         BOOST_CHECK_EQUAL(submit_rich_parent.m_state.GetResult(), PackageValidationResult::PCKG_TX);
         BOOST_CHECK_EQUAL(submit_rich_parent.m_state.GetRejectReason(), "transaction failed");
 

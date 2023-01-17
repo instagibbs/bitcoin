@@ -838,7 +838,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 strprintf("%d", nSigOpsCost));
 
     // No individual transactions are allowed below the min relay feerate except from disconnected blocks.
-    if (!bypass_limits && ws.m_modified_fees < m_pool.m_min_relay_feerate.GetFee(ws.m_vsize)) {
+    if (!bypass_limits && ws.m_ptx->nVersion != 3 && ws.m_modified_fees < m_pool.m_min_relay_feerate.GetFee(ws.m_vsize)) {
         return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "min relay fee not met",
                              strprintf("%d < %d", ws.m_modified_fees, m_pool.m_min_relay_feerate.GetFee(ws.m_vsize)));
     }

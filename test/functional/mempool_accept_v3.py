@@ -212,6 +212,23 @@ class MempoolAcceptV3(BitcoinTestFramework):
                 tx_v3_child_large2["hex"])
         self.check_mempool([tx_v3_parent_large2["txid"]])
 
+    @cleanup
+    def test_fee_dependency_replacements(self):
+        """
+        Since v3 introduces the possibility of 0-fee (i.e. below min relay feerate) transactions in
+        the mempool, it's possible for these transactions' sponsors to disappear due to RBF. In
+        those situations, the 0-fee transaction must be evicted along with the replacements.
+        """
+        node = self.nodes[0]
+        self.log.info("Test that below-min-relay-feerate transactions are removed in RBF")
+        tx_0fee_parent = self.wallet.create_self_transfer(fee=0, fee_rate=0, version=3)
+        utxo_confirmed = self.wallet.get_utxo()
+        tx_child_replacee = self.wallet.create_self_transfer_multi(utxos_to_spend=[tx_0fee_parent["new_utxo"], utxo_confirmed], version=3)
+        node.submitpackage([tx_0fee_parent["hex"], tx_child_replacee["hex"]])
+        self.check_mempool([tx_0fee_parent["txid"], tx_child_replacee["txid"]])
+        tx_replacer = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=utxo_confirmed, fee_rate=DEFAULT_FEE * 10)
+        self.check_mempool([tx_replacer["txid"]])
+
     def run_test(self):
         self.log.info("Generate blocks to create UTXOs")
         node = self.nodes[0]
@@ -222,6 +239,7 @@ class MempoolAcceptV3(BitcoinTestFramework):
         self.test_v3_bip125()
         self.test_v3_reorg()
         self.test_nondefault_package_limits()
+        self.test_fee_dependency_replacements()
 
 
 if __name__ == "__main__":

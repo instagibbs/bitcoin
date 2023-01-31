@@ -147,13 +147,17 @@ std::string EncodeHexTx(const CTransaction& tx, const int serializeFlags)
     return HexStr(ssTx);
 }
 
-void ScriptToUniv(const CScript& script, UniValue& out, bool include_hex, bool include_address)
+void ScriptToUniv(const CScript& script, UniValue& out, bool include_hex, bool include_address, const CScript* inner_script)
 {
     CTxDestination address;
 
     out.pushKV("asm", ScriptToAsmStr(script));
     if (include_address) {
-        out.pushKV("desc", InferDescriptor(script, DUMMY_SIGNING_PROVIDER)->ToString());
+        FillableSigningProvider provider;
+        if (inner_script) {
+            provider.AddCScript(*inner_script);
+        }
+        out.pushKV("desc", InferDescriptor(script, provider)->ToString());
     }
     if (include_hex) {
         out.pushKV("hex", HexStr(script));

@@ -200,7 +200,7 @@ unsigned int CScript::GetSigOpCount(const CScript& scriptSig) const
 
 bool CScript::IsTrue() const
 {
-    return (this->size() == 1 && (*this)[0] == OP_2);
+    return (this->size() == 1 && (*this)[0] == OP_TRUE);
 }
 
 bool CScript::IsPayToScriptHash() const

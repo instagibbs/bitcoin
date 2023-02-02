@@ -531,7 +531,7 @@ public:
     unsigned int GetSigOpCount(const CScript& scriptSig) const;
 
     /**
-     * OP_2, which is truth-y
+     * OP_TRUE
      */
     bool IsTrue() const;
 

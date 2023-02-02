@@ -409,6 +409,7 @@ public:
     std::vector<std::pair<uint256, txiter>> vTxHashes GUARDED_BY(cs); //!< All tx witness hashes/entries in mapTx, in random order
 
     typedef std::set<txiter, CompareIteratorByHash> setEntries;
+    typedef std::vector<txiter> vecEntries;
 
     using Limits = kernel::MemPoolLimits;
 
@@ -534,6 +535,15 @@ public:
      */
     void RemoveStaged(setEntries& stage, bool updateDescendants, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    /** Remove a vector of transactions from the mempool.
+     *  If a transaction is in this vec, then all in-mempool descendants must
+     *  also be in the set, unless this transaction is being removed for being
+     *  in a block.
+     *  Set updateDescendants to true when removing a tx that was in a block, so
+     *  that any in-mempool descendants have their ancestor state updated.
+     */
+    void RemoveStagedVec(vecEntries& stage, bool updateDescendants, MemPoolRemovalReason reason) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     /** UpdateTransactionsFromBlock is called when adding transactions from a
      * disconnected block back to the mempool, new mempool entries may have
      * children in the mempool (which is generally not the case when otherwise
@@ -605,6 +615,17 @@ public:
      *  Assumes that setDescendants includes all in-mempool descendants of anything
      *  already in it.  */
     void CalculateDescendants(txiter it, setEntries& setDescendants) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /** Populate descendants with all in-mempool descendants of hash.
+     *
+     *  Assumes that if descendants includes a txiter T, then all in-mempool descendants of T are
+     *  already in it and already_touched(T)
+     *
+     *  Assumes empty descendants vector. Useful when we are just going to
+     *  iterate over them and don't care about order
+     *
+     * CalculateDescendantsVec does not include self (it)*/
+    void CalculateDescendantsVec(txiter it, vecEntries& descendants) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** The minimum fee to get into the mempool, which may itself not be enough
      *  for larger-sized transactions.
@@ -751,17 +772,23 @@ private:
                               const std::set<uint256>& setExclude, std::set<uint256>& descendants_to_remove) EXCLUSIVE_LOCKS_REQUIRED(cs);
     /** Update ancestors of hash to add/remove it as a descendant transaction. */
     void UpdateAncestorsOf(bool add, txiter hash, setEntries &setAncestors) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** Update ancestors of hash to add/remove it as a descendant transaction. */
+    void UpdateAncestorsOfVec(bool add, txiter hash, vecEntries &ancestors) EXCLUSIVE_LOCKS_REQUIRED(cs);
     /** Set ancestor state for an entry */
     void UpdateEntryForAncestors(txiter it, const setEntries &setAncestors) EXCLUSIVE_LOCKS_REQUIRED(cs);
     /** For each transaction being removed, update ancestors and any direct children.
       * If updateDescendants is true, then also update in-mempool descendants'
       * ancestor state. */
     void UpdateForRemoveFromMempool(const setEntries &entriesToRemove, bool updateDescendants) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** For each transaction being removed, update ancestors and any direct children.
+      * If updateDescendants is true, then also update in-mempool descendants'
+      * ancestor state. */
+    void UpdateForRemoveFromMempoolVec(const vecEntries& entriesToRemove, bool updateDescendants) EXCLUSIVE_LOCKS_REQUIRED(cs);
     /** Sever link between specified transaction and direct children. */
     void UpdateChildrenForRemoval(txiter entry) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Before calling removeUnchecked for a given transaction,
-     *  UpdateForRemoveFromMempool must be called on the entire (dependent) set
+     *  UpdateForRemoveFromMempool(Vec) must be called on the entire (dependent) set
      *  of transactions being removed at the same time.  We use each
      *  CTxMemPoolEntry's setMemPoolParents in order to walk ancestors of a
      *  given transaction that is removed, so we can't remove intermediate

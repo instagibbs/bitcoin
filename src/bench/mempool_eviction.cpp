@@ -60,7 +60,6 @@ static void MempoolEvictionInner(benchmark::Bench& bench, size_t num_packages, s
     /* Now we're ready */
     CTxMemPool& pool = *Assert(testing_setup->m_node.mempool);
     LOCK2(cs_main, pool.cs);
-
     bench.run([&]() NO_THREAD_SAFETY_ANALYSIS {
         for (size_t i=0; i<txns.size(); i++) {
             // Monotonically decreasing fees
@@ -74,6 +73,27 @@ static void MempoolEvictionInner(benchmark::Bench& bench, size_t num_packages, s
     });
 }
 
+static void MempoolConstructionInner(benchmark::Bench& bench, size_t num_packages, size_t package_size)
+{
+    const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
+
+    std::vector<CTransactionRef> txns;
+
+    for (size_t i=0; i<num_packages; i++) {
+        add_parents_child(txns, package_size, i);
+    }
+
+    /* Now we're ready */
+    CTxMemPool& pool = *Assert(testing_setup->m_node.mempool);
+    LOCK2(cs_main, pool.cs);
+    bench.run([&]() NO_THREAD_SAFETY_ANALYSIS {
+        for (size_t i=0; i<txns.size(); i++) {
+            // Monotonically decreasing fees
+            AddTx(txns[i], (txns.size() - i)*1000LL, pool);
+        }
+    });
+}
+
 static void MempoolEviction(benchmark::Bench& bench)
 {
     size_t package_size = 25;
@@ -83,4 +103,14 @@ static void MempoolEviction(benchmark::Bench& bench)
     MempoolEvictionInner(bench, 2500 / package_size, package_size);
 }
 
+static void MempoolConstruction(benchmark::Bench& bench)
+{
+    size_t package_size = 25;
+    if (bench.complexityN() > 1) {
+        package_size = static_cast<size_t>(bench.complexityN());
+    }
+    MempoolConstructionInner(bench, 2500 / package_size, package_size);
+}
+
 BENCHMARK(MempoolEviction, benchmark::PriorityLevel::HIGH);
+BENCHMARK(MempoolConstruction, benchmark::PriorityLevel::HIGH);

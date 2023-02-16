@@ -217,8 +217,9 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
     return true;
 }
 
-bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, bool allow_annex_data)
 {
+    bool annex_data_already_found = false;
     if (tx.IsCoinBase())
         return true; // Coinbases are skipped
 
@@ -275,8 +276,14 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             // Taproot spend (non-P2SH-wrapped, version 1, witness program size 32; see BIP 341)
             Span stack{tx.vin[i].scriptWitness.stack};
             if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
-                // Annexes are nonstandard as long as no semantics are defined for them.
-                return false;
+                const std::vector<unsigned char> &annex = stack.back();
+                // For now allow 0 to MAX_ANNEX_DATA bytes push to allow drop-in replacement via BIP PR#1381
+                // But only one annex per transaction to avoid witness stuffing.
+                if (!allow_annex_data || annex_data_already_found ||
+                    annex.size() < 2 || annex.size() > 1 + 1 + MAX_ANNEX_DATA || (size_t)annex[1] != annex.size() - 2) {
+                    return false;
+                }
+                annex_data_already_found = true;
             }
             if (stack.size() >= 2) {
                 // Script path spend (2 or more stack elements after removing optional annex)

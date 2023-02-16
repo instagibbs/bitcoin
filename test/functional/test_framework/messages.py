@@ -71,6 +71,9 @@ DEFAULT_DESCENDANT_LIMIT = 25  # default max number of in-mempool descendants
 # Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN, +2 for the pushdata opcodes.
 MAX_OP_RETURN_RELAY = 83
 
+# Static max data for -annexcarrier
+MAX_ANNEX_DATA = 126
+
 DEFAULT_MEMPOOL_EXPIRY_HOURS = 336  # hours
 
 def sha256(s):

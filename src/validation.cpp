@@ -809,7 +809,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     }
 
     // Check for non-standard witnesses.
-    if (tx.HasWitness() && m_pool.m_require_standard && !IsWitnessStandard(tx, m_view)) {
+    if (tx.HasWitness() && m_pool.m_require_standard && !IsWitnessStandard(tx, m_view, m_pool.m_annex_datacarrier)) {
         return state.Invalid(TxValidationResult::TX_WITNESS_MUTATED, "bad-witness-nonstandard");
     }
 

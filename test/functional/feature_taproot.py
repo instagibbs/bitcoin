@@ -18,6 +18,7 @@ from test_framework.messages import (
     CTxIn,
     CTxInWitness,
     CTxOut,
+    MAX_ANNEX_DATA,
     SEQUENCE_FINAL,
 )
 from test_framework.script import (
@@ -680,9 +681,9 @@ def spenders_taproot_active():
 
     # == Tests for signature hashing ==
 
-    # Run all tests once with no annex, and once with a valid random annex.
-    for annex in [None, lambda _: bytes([ANNEX_TAG]) + random_bytes(random.randrange(0, 250))]:
-        # Non-empty annex is non-standard
+    # Run all tests once with no annex, and once with a valid yet non-standard random annex.
+    for annex in [None, lambda _: bytes([ANNEX_TAG, MAX_ANNEX_DATA + 1]) + random_bytes(random.randrange(0, 250))]:
+        # Non-empty annex is non-standard unless it's a specific format we avoid making in above lambda
         no_annex = annex is None
 
         # Sighash mutation tests (test all sighash combinations)

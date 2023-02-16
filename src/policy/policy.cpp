@@ -213,8 +213,15 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
     return true;
 }
 
-bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, bool allow_annex_data)
 {
+    // For now allow 0 to MAX_ANNEX_DATA bytes push to allow drop-in replacement via BIP PR#1381
+    // but we allow it spread over any number of inputs based on this budget:
+    // 1(witness stack element size) + 1(annex marker) + 1(payload len) + MAX_ANNEX_DATA(payload)
+    size_t annex_bytes_left{1 + 1 + 1 + MAX_ANNEX_DATA};
+
+    if (!allow_annex_data) annex_bytes_left = 0;
+
     if (tx.IsCoinBase())
         return true; // Coinbases are skipped
 
@@ -266,13 +273,18 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
 
         // Check policy limits for Taproot spends:
         // - MAX_STANDARD_TAPSCRIPT_STACK_ITEM_SIZE limit for stack item size
-        // - No annexes
+        // - Limited annex format
         if (witnessversion == 1 && witnessprogram.size() == WITNESS_V1_TAPROOT_SIZE && !p2sh) {
             // Taproot spend (non-P2SH-wrapped, version 1, witness program size 32; see BIP 341)
             Span stack{tx.vin[i].scriptWitness.stack};
             if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
-                // Annexes are nonstandard as long as no semantics are defined for them.
-                return false;
+                const auto& annex = stack.back();
+
+                if (annex.size() >= annex_bytes_left) return false;
+                annex_bytes_left -= annex.size() - 1; // bip141 witness stack element size included
+
+                // limit annex format to allow for future expansion
+                if (annex.size() < 2 || annex.size() != static_cast<size_t>(annex[1]) + 2) return false;
             }
             if (stack.size() >= 2) {
                 // Script path spend (2 or more stack elements after removing optional annex)

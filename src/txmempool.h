@@ -574,6 +574,7 @@ public:
     const bool m_permit_bare_multisig;
     const bool m_permit_anchors;
     const std::optional<unsigned> m_max_datacarrier_bytes;
+    const bool m_annex_datacarrier;
     const bool m_require_standard;
     const bool m_full_rbf;
 

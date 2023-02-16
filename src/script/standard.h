@@ -17,6 +17,7 @@
 #include <variant>
 
 static const bool DEFAULT_ACCEPT_DATACARRIER = true;
+static const bool DEFAULT_ACCEPT_ANNEXDATA = true;
 
 class CKeyID;
 class CScript;
@@ -37,6 +38,17 @@ public:
  * +2 for the pushdata opcodes.
  */
 static const unsigned int MAX_OP_RETURN_RELAY = 83;
+
+/**
+ * Allows up to one annex data to be embedded in a transaction, counting towards the
+ * same data carrier limit as OP_RETURN values
+ */
+extern bool accept_annex_data;
+
+/**
+ * Static maximum of annex data per transaction
+ */
+static const unsigned int MAX_ANNEX_DATA = 126;
 
 /**
  * Mandatory script verification flags that all new blocks must comply with for

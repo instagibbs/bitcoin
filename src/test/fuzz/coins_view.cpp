@@ -265,7 +265,7 @@ FUZZ_TARGET_INIT(coins_view, initialize_coins_view)
                 (void)GetTransactionSigOpCost(transaction, coins_view_cache, flags);
             },
             [&] {
-                (void)IsWitnessStandard(CTransaction{random_mutable_transaction}, coins_view_cache);
+                (void)IsWitnessStandard(CTransaction{random_mutable_transaction}, coins_view_cache, /* allow_annex_data= */ true);
             });
     }
 }

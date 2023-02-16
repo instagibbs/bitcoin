@@ -5,6 +5,7 @@
 """Test datacarrier functionality"""
 from test_framework.messages import (
     CTxOut,
+    MAX_ANNEX_DATA,
     MAX_OP_RETURN_RELAY,
 )
 from test_framework.script import (
@@ -25,7 +26,7 @@ class DataCarrierTest(BitcoinTestFramework):
         self.num_nodes = 3
         self.extra_args = [
             [],
-            ["-datacarrier=0"],
+            ["-datacarrier=0", "-annexcarrier=0"],
             ["-datacarrier=1", f"-datacarriersize={MAX_OP_RETURN_RELAY - 1}"]
         ]
 
@@ -42,6 +43,20 @@ class DataCarrierTest(BitcoinTestFramework):
         else:
             assert_raises_rpc_error(-26, "scriptpubkey", self.wallet.sendrawtransaction, from_node=node, tx_hex=tx_hex)
 
+    def test_annex_data_transaction(self, node: TestNode, data: bytes, success: bool) -> None:
+        tx = self.wallet.create_self_transfer(fee_rate=0)["tx"]
+        tx.wit.vtxinwit[0].scriptWitness.stack = tx.wit.vtxinwit[0].scriptWitness.stack + [bytes.fromhex("50") + len(data).to_bytes(1, 'little') + bytes.fromhex("ff"*len(data))]
+        tx.vout[0].nValue -= tx.get_vsize()  # simply pay 1sat/vbyte fee
+
+        tx_hex = tx.serialize().hex()
+
+        if success:
+            self.wallet.sendrawtransaction(from_node=node, tx_hex=tx_hex)
+            assert tx.rehash() in node.getrawmempool(True), f'{tx_hex} not in mempool'
+        else:
+            assert_raises_rpc_error(-26, "bad-witness-nonstandard", self.wallet.sendrawtransaction, from_node=node, tx_hex=tx_hex)
+
+
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
         self.wallet.rescan_utxos()
@@ -50,6 +65,20 @@ class DataCarrierTest(BitcoinTestFramework):
         default_size_data = random_bytes(MAX_OP_RETURN_RELAY - 3)
         too_long_data = random_bytes(MAX_OP_RETURN_RELAY - 2)
         small_data = random_bytes(MAX_OP_RETURN_RELAY - 4)
+
+        small_annex = random_bytes(0)
+        large_annex = random_bytes(MAX_ANNEX_DATA)
+        oversize_annex = random_bytes(127)
+
+        self.log.info("Testing annex data transaction with default -annexcarrier value.")
+        self.test_annex_data_transaction(node=self.nodes[0], data=small_annex, success=True)
+        self.test_annex_data_transaction(node=self.nodes[0], data=large_annex, success=True)
+        self.test_annex_data_transaction(node=self.nodes[0], data=oversize_annex, success=False)
+
+        self.log.info("Testing annex data transaction with false -annexcarrier value.")
+        self.test_annex_data_transaction(node=self.nodes[1], data=small_annex, success=False)
+        self.test_annex_data_transaction(node=self.nodes[1], data=large_annex, success=False)
+        self.test_annex_data_transaction(node=self.nodes[1], data=oversize_annex, success=False)
 
         self.log.info("Testing null data transaction with default -datacarrier and -datacarriersize values.")
         self.test_null_data_transaction(node=self.nodes[0], data=default_size_data, success=True)

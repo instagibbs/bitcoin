@@ -50,6 +50,7 @@ struct MemPoolOptions {
      * If nullopt, any size is nonstandard.
      */
     std::optional<unsigned> max_datacarrier_bytes{DEFAULT_ACCEPT_DATACARRIER ? std::optional{MAX_OP_RETURN_RELAY} : std::nullopt};
+    bool annex_datacarrier{DEFAULT_ACCEPT_ANNEXDATA};
     bool permit_bare_multisig{DEFAULT_PERMIT_BAREMULTISIG};
     bool permit_ephemeral_anchors{DEFAULT_PERMIT_EA};
     bool require_standard{true};

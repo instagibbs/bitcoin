@@ -925,6 +925,13 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
         t.vout[0].nValue = 239;
         CheckIsNotStandard(t, "dust");
     }
+
+    // Check anchor outputs allow dust
+    t.vout[0].scriptPubKey = CScript() << OP_1;
+    t.vout[0].nValue = 0;
+    CheckIsStandard(t);
+    t.vout[0].nValue = 1; // Not just 0
+    CheckIsStandard(t);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

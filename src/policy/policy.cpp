@@ -142,8 +142,12 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
             reason = "bare-multisig";
             return false;
         } else if (IsDust(txout, dust_relay_fee)) {
-            reason = "dust";
-            return false;
+            // TODO: Ensure ephemeral output is spent in the same mempool package
+            // to avoid bloating utxo set
+            if (whichType != TxoutType::ANCHOR) {
+                reason = "dust";
+                return false;
+            }
         }
     }
 

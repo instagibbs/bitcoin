@@ -183,13 +183,14 @@ void TxOrphanage::EraseForPeer(NodeId peer)
     if (!Assume(m_peer_bytes_used.count(peer) == 0)) m_peer_bytes_used.erase(peer);
 }
 
-void TxOrphanage::LimitOrphans(unsigned int max_orphans)
+std::vector<uint256> TxOrphanage::LimitOrphans(unsigned int max_orphans)
 {
     LOCK(m_mutex);
 
     unsigned int nEvicted = 0;
     static int64_t nNextSweep;
     int64_t nNow = GetTime();
+    std::vector<uint256> expired_and_evicted;
     if (nNextSweep <= nNow) {
         // Sweep out expired orphan pool entries:
         int nErased = 0;
@@ -198,8 +199,10 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphans)
         while (iter != m_orphans.end())
         {
             std::map<uint256, OrphanTx>::iterator maybeErase = iter++;
+            const auto& wtxid = maybeErase->second.tx->GetWitnessHash();
             if (maybeErase->second.nTimeExpire <= nNow) {
-                nErased += EraseTxNoLock(maybeErase->second.tx->GetWitnessHash());
+                expired_and_evicted.emplace_back(wtxid);
+                nErased += EraseTxNoLock(wtxid);
             } else {
                 nMinExpTime = std::min(maybeErase->second.nTimeExpire, nMinExpTime);
             }
@@ -213,10 +216,13 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphans)
     {
         // Evict a random orphan:
         size_t randompos = rng.randrange(m_orphan_list.size());
-        EraseTxNoLock(m_orphan_list[randompos]->second.tx->GetWitnessHash());
+        const auto& wtxid = m_orphan_list[randompos]->second.tx->GetWitnessHash();
+        expired_and_evicted.emplace_back(wtxid);
+        EraseTxNoLock(wtxid);
         ++nEvicted;
     }
     if (nEvicted > 0) LogPrint(BCLog::TXPACKAGES, "orphanage overflow, removed %u tx\n", nEvicted);
+    return expired_and_evicted;
 }
 
 void TxOrphanage::AddChildrenToWorkSet(const CTransaction& tx)
@@ -296,7 +302,7 @@ bool TxOrphanage::HaveTxToReconsider(NodeId peer)
     return false;
 }
 
-void TxOrphanage::EraseForBlock(const CBlock& block)
+std::vector<uint256> TxOrphanage::EraseForBlock(const CBlock& block)
 {
     LOCK(m_mutex);
 
@@ -325,6 +331,7 @@ void TxOrphanage::EraseForBlock(const CBlock& block)
         }
         LogPrint(BCLog::TXPACKAGES, "Erased %d orphan tx included or conflicted by block\n", nErased);
     }
+    return vOrphanErase;
 }
 void TxOrphanage::EraseOrphanOfPeer(const uint256& wtxid, NodeId peer)
 {

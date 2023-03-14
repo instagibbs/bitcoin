@@ -81,6 +81,8 @@ std::optional<bilingual_str> ApplyArgsManOptions(const ArgsManager& argsman, con
 
     mempool_opts.permit_bare_multisig = argsman.GetBoolArg("-permitbaremultisig", DEFAULT_PERMIT_BAREMULTISIG);
 
+    mempool_opts.permit_ephemeral_anchors = argsman.GetBoolArg("-ephemeralanchors", DEFAULT_PERMIT_EA);
+
     if (argsman.GetBoolArg("-datacarrier", DEFAULT_ACCEPT_DATACARRIER)) {
         mempool_opts.max_datacarrier_bytes = argsman.GetIntArg("-datacarriersize", MAX_OP_RETURN_RELAY);
     } else {

@@ -432,6 +432,7 @@ CTxMemPool::CTxMemPool(const Options& opts)
       m_min_relay_feerate{opts.min_relay_feerate},
       m_dust_relay_feerate{opts.dust_relay_feerate},
       m_permit_bare_multisig{opts.permit_bare_multisig},
+      m_permit_anchors{opts.permit_ephemeral_anchors},
       m_max_datacarrier_bytes{opts.max_datacarrier_bytes},
       m_annex_datacarrier{opts.annex_datacarrier},
       m_require_standard{opts.require_standard},

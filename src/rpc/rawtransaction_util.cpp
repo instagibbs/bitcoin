@@ -104,6 +104,7 @@ CMutableTransaction ConstructTransaction(const UniValue& inputs_in, const UniVal
     // Duplicate checking
     std::set<CTxDestination> destinations;
     bool has_data{false};
+    bool has_anchor{false};
 
     for (const std::string& name_ : outputs.getKeys()) {
         if (name_ == "data") {
@@ -114,6 +115,15 @@ CMutableTransaction ConstructTransaction(const UniValue& inputs_in, const UniVal
             std::vector<unsigned char> data = ParseHexV(outputs[name_].getValStr(), "Data");
 
             CTxOut out(0, CScript() << OP_RETURN << data);
+            rawTx.vout.push_back(out);
+        } else if (name_ == "anchor") {
+            if (has_anchor) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, duplicate key: anchor");
+            }
+            has_anchor = true;
+            CAmount nAmount = AmountFromValue(outputs[name_]);
+
+            CTxOut out(nAmount, CScript() << OP_TRUE);
             rawTx.vout.push_back(out);
         } else {
             CTxDestination destination = DecodeDestination(name_);

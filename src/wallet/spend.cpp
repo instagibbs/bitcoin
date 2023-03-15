@@ -889,9 +889,14 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
             coin_selection_params.tx_noinputs_size += ::GetSerializeSize(txout, PROTOCOL_VERSION);
         }
 
-        if (IsDust(txout, wallet.chain().relayDustFee())) {
+        if (!recipient.scriptPubKey.IsPayToAnchor() && IsDust(txout, wallet.chain().relayDustFee())) {
             return util::Error{_("Transaction amount too small")};
         }
+
+        if (recipient.scriptPubKey.IsPayToAnchor() && !wallet.chain().allowsEphemeralAnchors()) {
+            return util::Error{_("Anchor outputs are not allowed for relay: check -ephemeralanchors option")};
+        }
+
         txNew.vout.push_back(txout);
     }
 

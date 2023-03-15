@@ -18,6 +18,7 @@ from test_framework.messages import (
     MAX_BIP125_RBF_SEQUENCE,
     WITNESS_SCALE_FACTOR,
     ser_compact_size,
+    tx_from_hex,
 )
 from test_framework.psbt import (
     PSBT,
@@ -29,6 +30,7 @@ from test_framework.psbt import (
     PSBT_IN_HASH256,
     PSBT_OUT_TAP_TREE,
 )
+from test_framework.script import OP_TRUE
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_approx,
@@ -854,6 +856,33 @@ class PSBTTest(BitcoinTestFramework):
 
         self.log.info("Test we don't crash when making a 0-value funded transaction at 0 fee without forcing an input selection")
         assert_raises_rpc_error(-4, "Transaction requires one destination of non-0 value, a non-0 feerate, or a pre-selected input", self.nodes[0].walletcreatefundedpsbt, [], [{"data": "deadbeef"}], 0, {"fee_rate": "0"})
+
+
+        self.log.info("Test that PSBT can have ephemeral anchor added in rpc")
+        # Fake input to avoid tripping up segwit deserialization error
+        raw_anchor = self.nodes[0].createrawtransaction([{"txid": "ff"*32, "vout": 0}], [{"anchor":"0.00000001"}])
+        anchor_tx = tx_from_hex(raw_anchor)
+
+        # Is not restricted to V3 like Ephemeral Anchors BIP
+        assert_equal(anchor_tx.nVersion, 2)
+        assert_equal(len(anchor_tx.vout), 1)
+        assert_equal(anchor_tx.vout[0].nValue, 1)
+        assert_equal(anchor_tx.vout[0].scriptPubKey, bytes([OP_TRUE]))
+
+        psbt_anchor = self.nodes[0].createpsbt([{"txid": "ff"*32, "vout": 0}], [{"anchor":"0.00000001"}])
+        anchor = PSBT.from_base64(psbt_anchor)
+
+        assert_equal(anchor.g.map[0], anchor_tx.serialize())
+
+        # Make 1 satoshi anchor to allow coin selection to happen and still only make two outputs
+        funded_anchor = self.nodes[0].walletcreatefundedpsbt([], [{"anchor": "0.00000001"}], 0, {"fee_rate": "0"})
+        funded_decoded = self.nodes[0].decodepsbt(funded_anchor["psbt"])["tx"]
+        anchor_idx = 0 if funded_decoded["vout"][0]["scriptPubKey"]["hex"] == "51" else 1
+        assert_equal(funded_decoded["vout"][anchor_idx]["scriptPubKey"]["hex"], "51")
+        assert_equal(funded_decoded["vout"][anchor_idx]["scriptPubKey"]["type"], "anchor")
+        assert_equal(funded_decoded["vout"][anchor_idx]["value"], Decimal("0.00000001"))
+
+        anchor_tx = self.nodes[0].finalizepsbt(self.nodes[0].walletprocesspsbt(psbt=funded_anchor["psbt"])["psbt"])["hex"]
 
 
 if __name__ == '__main__':

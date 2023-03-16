@@ -834,6 +834,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             fSpendsCoinbase, nSigOpsCost, lp));
     ws.m_vsize = entry->GetTxSize();
 
+    // Remove after package relay deployed: Apply ephemeral anchor delta now that we have entry initialized
+    m_pool.ApplyEphemeralDelta(*entry, ws.m_modified_fees);
+
     if (nSigOpsCost > MAX_STANDARD_TX_SIGOPS_COST)
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-too-many-sigops",
                 strprintf("%d", nSigOpsCost));

@@ -884,6 +884,11 @@ class PSBTTest(BitcoinTestFramework):
 
         anchor_tx = self.nodes[0].finalizepsbt(self.nodes[0].walletprocesspsbt(psbt=funded_anchor["psbt"])["psbt"])["hex"]
 
+        # Modified fees equal 1 sat/vbyte
+        anchor_txid = self.nodes[0].sendrawtransaction(anchor_tx)
+        anchor_entry = self.nodes[0].getmempoolentry(anchor_txid)
+        assert_equal(Decimal(anchor_entry["ancestorsize"])/Decimal(10**8), anchor_entry["fees"]["modified"])
+
 
 if __name__ == '__main__':
     PSBTTest().main()

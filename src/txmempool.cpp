@@ -458,6 +458,22 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
     nTransactionsUpdated += n;
 }
 
+/* Inquisition cheat to get around lack of package relay. Will only work
+ * with default minrelayfee, with non-full mempools.
+ */
+static const CFeeRate EPHEMERAL_DELTA{1000};
+void CTxMemPool::ApplyEphemeralDelta(const CTxMemPoolEntry& entry, CAmount& delta) const
+{
+    if (delta != 0) return; // don't apply if a delta has been already applied
+    if (entry.GetFee() > 0) return; // only adjust for 0 fee
+    for (const auto& out : entry.GetTx().vout) {
+        if (out.scriptPubKey.IsPayToAnchor()) {
+            delta = EPHEMERAL_DELTA.GetFee(entry.GetTxSize());
+            return;
+        }
+    }
+}
+
 void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAncestors, bool validFeeEstimate)
 {
     // Add to memory pool without checking anything.
@@ -468,6 +484,7 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     // Update transaction for any feeDelta created by PrioritiseTransaction
     CAmount delta{0};
     ApplyDelta(entry.GetTx().GetHash(), delta);
+    ApplyEphemeralDelta(entry, delta);
     // The following call to UpdateModifiedFee assumes no previous fee modifications
     Assume(entry.GetFee() == entry.GetModifiedFee());
     if (delta) {

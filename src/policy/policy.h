@@ -39,6 +39,8 @@ static constexpr unsigned int DEFAULT_BYTES_PER_SIGOP{20};
 static constexpr bool DEFAULT_PERMIT_BAREMULTISIG{true};
 /** Default for -ephemeralanchors */
 static constexpr bool DEFAULT_PERMIT_EA{true};
+/** Default for -ephemeradelta */
+static constexpr unsigned int DEFAULT_EPHEMERAL_DELTA{1000};
 /** The maximum number of witness stack items in a standard P2WSH script */
 static constexpr unsigned int MAX_STANDARD_P2WSH_STACK_ITEMS{100};
 /** The maximum size in bytes of each witness stack item in a standard P2WSH script */

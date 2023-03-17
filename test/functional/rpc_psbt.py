@@ -55,7 +55,7 @@ class PSBTTest(BitcoinTestFramework):
         self.extra_args = [
             ["-walletrbf=1", "-addresstype=bech32", "-changetype=bech32"], #TODO: Remove address type restrictions once taproot has psbt extensions
             ["-walletrbf=0", "-changetype=legacy"],
-            []
+            ["-ephemeraldelta=0.00010000"] # 10x higher than default
         ]
         self.supports_cli = False
 
@@ -888,6 +888,11 @@ class PSBTTest(BitcoinTestFramework):
         anchor_txid = self.nodes[0].sendrawtransaction(anchor_tx)
         anchor_entry = self.nodes[0].getmempoolentry(anchor_txid)
         assert_equal(Decimal(anchor_entry["ancestorsize"])/Decimal(10**8), anchor_entry["fees"]["modified"])
+
+        # Check modified fee on node with -ephemeraldelta set
+        self.nodes[2].sendrawtransaction(anchor_tx)
+        anchor_entry_2 = self.nodes[2].getmempoolentry(anchor_txid)
+        assert_equal(anchor_entry["fees"]["modified"] * 10, anchor_entry_2["fees"]["modified"])
 
 
 if __name__ == '__main__':

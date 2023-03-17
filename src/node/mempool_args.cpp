@@ -83,6 +83,14 @@ std::optional<bilingual_str> ApplyArgsManOptions(const ArgsManager& argsman, con
 
     mempool_opts.permit_ephemeral_anchors = argsman.GetBoolArg("-ephemeralanchors", DEFAULT_PERMIT_EA);
 
+    if (argsman.IsArgSet("-ephemeraldelta")) {
+        if (std::optional<CAmount> ephemeral_delta_feerate = ParseMoney(argsman.GetArg("-ephemeraldelta", ""))) {
+            mempool_opts.ephemeral_delta = CFeeRate{ephemeral_delta_feerate.value()};
+        } else {
+            return AmountErrMsg("ephemeraldelta", argsman.GetArg("-ephemeraldelta", ""));
+        }
+    }
+
     if (argsman.GetBoolArg("-datacarrier", DEFAULT_ACCEPT_DATACARRIER)) {
         mempool_opts.max_datacarrier_bytes = argsman.GetIntArg("-datacarriersize", MAX_OP_RETURN_RELAY);
     } else {

@@ -573,6 +573,7 @@ public:
     const CFeeRate m_dust_relay_feerate;
     const bool m_permit_bare_multisig;
     const bool m_permit_anchors;
+    const CFeeRate m_ephemeral_delta;
     const std::optional<unsigned> m_max_datacarrier_bytes;
     const bool m_annex_datacarrier;
     const bool m_require_standard;

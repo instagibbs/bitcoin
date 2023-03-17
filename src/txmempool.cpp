@@ -433,6 +433,7 @@ CTxMemPool::CTxMemPool(const Options& opts)
       m_dust_relay_feerate{opts.dust_relay_feerate},
       m_permit_bare_multisig{opts.permit_bare_multisig},
       m_permit_anchors{opts.permit_ephemeral_anchors},
+      m_ephemeral_delta{opts.ephemeral_delta},
       m_max_datacarrier_bytes{opts.max_datacarrier_bytes},
       m_annex_datacarrier{opts.annex_datacarrier},
       m_require_standard{opts.require_standard},
@@ -461,14 +462,13 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 /* Inquisition cheat to get around lack of package relay. Will only work
  * with default minrelayfee, with non-full mempools.
  */
-static const CFeeRate EPHEMERAL_DELTA{1000};
 void CTxMemPool::ApplyEphemeralDelta(const CTxMemPoolEntry& entry, CAmount& delta) const
 {
     if (delta != 0) return; // don't apply if a delta has been already applied
     if (entry.GetFee() > 0) return; // only adjust for 0 fee
     for (const auto& out : entry.GetTx().vout) {
         if (out.scriptPubKey.IsPayToAnchor()) {
-            delta = EPHEMERAL_DELTA.GetFee(entry.GetTxSize());
+            delta = m_ephemeral_delta.GetFee(entry.GetTxSize());
             return;
         }
     }

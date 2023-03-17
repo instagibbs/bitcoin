@@ -889,6 +889,18 @@ class PSBTTest(BitcoinTestFramework):
         anchor_entry = self.nodes[0].getmempoolentry(anchor_txid)
         assert_equal(Decimal(anchor_entry["ancestorsize"])/Decimal(10**8), anchor_entry["fees"]["modified"])
 
+        # Let's bump it using the wallet via CPFP
+        anchor_decoded = self.nodes[0].getrawtransaction(anchor_txid, 1)
+        anchor_index = 0 if anchor_decoded["vout"][0]["value"] == Decimal("0.00000001") else 1
+        assert self.nodes[0].getbalance() > 0
+        # 165WU is exactly the size of the input, and the minimum argument value
+        bump = self.nodes[0].walletcreatefundedpsbt([{"txid": anchor_txid, "vout": anchor_index, "weight": 165}], [{self.nodes[0].getnewaddress(): 1}], 0, {"fee_rate": "10", "add_inputs": True})
+        bump_signed = self.nodes[0].walletprocesspsbt(bump["psbt"])
+        bump_final = self.nodes[0].finalizepsbt(bump_signed["psbt"])
+        cpfp_txid = self.nodes[0].sendrawtransaction(bump_final["hex"])
+        cpfp_details = self.nodes[0].getmempoolentry(cpfp_txid)
+        assert_equal(cpfp_details["fees"]["ancestor"], cpfp_details["fees"]["base"] + anchor_entry["fees"]["modified"])
+
         # Check modified fee on node with -ephemeraldelta set
         self.nodes[2].sendrawtransaction(anchor_tx)
         anchor_entry_2 = self.nodes[2].getmempoolentry(anchor_txid)

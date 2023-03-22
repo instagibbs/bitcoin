@@ -889,7 +889,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
             coin_selection_params.tx_noinputs_size += ::GetSerializeSize(txout, PROTOCOL_VERSION);
         }
 
-        if (!recipient.scriptPubKey.IsPayToAnchor() && IsDust(txout, wallet.chain().relayDustFee())) {
+        if (IsDust(txout, wallet.chain().relayDustFee())) {
             return util::Error{_("Transaction amount too small")};
         }
 

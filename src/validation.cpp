@@ -378,6 +378,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         // Transaction is still valid and cached LockPoints are updated.
         auto ancestors{m_mempool->AssumeCalculateMemPoolAncestors(__func__, *it, CTxMemPool::Limits::NoLimits(),
                                                                   /*fSearchForParents=*/false)};
+        if (auto err{CheckEphemeralSpends(MakeTransactionRef(it->GetTx()), ancestors)}) return true;
         // This check succeeds for any non-V3 transaction
         if (auto err{ApplyV3Rules(MakeTransactionRef(it->GetTx()), ancestors, {})}) return true;
         // Also check V3 inheritance rules if this entry is non-V3
@@ -994,6 +995,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "non-v3-tx-spends-v3", *err_string);
         }
     }
+    if (auto err_string{CheckEphemeralSpends(ws.m_ptx, ws.m_ancestors)}) {
+        return state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "ephemeral-anchor-unspent", *err_string);
+    }
     if (const auto err_string{ApplyV3Rules(ws.m_ptx, ws.m_ancestors, ws.m_conflicts)}) {
         return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "v3-tx-nonstandard", *err_string);
     }
@@ -1425,6 +1429,16 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         }
         package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
         results.emplace(child_wtxid, MempoolAcceptResult::Failure(child_state));
+        return PackageMempoolAcceptResult(package_state, std::move(results));
+    }
+
+    if (const auto ephemeral_violation{CheckEphemeralSpends(txns)}) {
+        const auto parent_wtxid = ephemeral_violation.value();
+        TxValidationState child_state;
+        child_state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "missing-ephemeral-spends",
+                      strprintf("V3 tx %s has unspent ephemeral anchor", parent_wtxid.ToString()));
+        package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+        results.emplace(parent_wtxid, MempoolAcceptResult::Failure(child_state));
         return PackageMempoolAcceptResult(package_state, std::move(results));
     }
 

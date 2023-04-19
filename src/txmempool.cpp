@@ -1025,3 +1025,24 @@ bool CTxMemPool::ChangeSet::CheckMemPoolPolicyLimits()
 
     return !m_pool->m_txgraph->IsOversized();
 }
+
+std::vector<FeeFrac> CTxMemPool::GetFeerateDiagram() const
+{
+    FeeFrac zero{};
+    std::vector<FeeFrac> ret;
+
+    ret.emplace_back(zero);
+
+    StartBlockBuilding();
+
+    std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> dummy;
+
+    FeeFrac last_selection = GetBlockBuilderChunk(dummy);
+    while (last_selection != zero) {
+        ret.emplace_back(ret.back() + last_selection);
+        IncludeBuilderChunk();
+        last_selection = GetBlockBuilderChunk(dummy);
+    }
+    StopBlockBuilding();
+    return ret;
+}

@@ -126,6 +126,36 @@ std::optional<std::string> CheckEphemeralSpends(const CTransactionRef& ptx,
     return std::nullopt;
 }
 
+bool CheckValidEphemeralTx(const CTransaction& tx, TxValidationState& state, const CCoinsViewCache& inputs, CAmount& txfee)
+{
+    // No anchor; it's ok
+    if (!HasPayToAnchor(tx)) {
+        return true;
+    }
+
+    if (tx.nVersion != 3) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "wrong-ephemeral-nversion");
+    } else if (txfee != 0) {
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "invalid-ephemeral-fee");
+    }
+
+    // Inputs are available(must have called Consensus::CheckTxInputs), check the input values for zeroes
+    for (unsigned int i = 0; i < tx.vin.size(); ++i) {
+        const COutPoint &prevout = tx.vin[i].prevout;
+        const Coin& coin = inputs.AccessCoin(prevout);
+
+        // For ANYONECANPAY-like signatures over ephemeral anchor transactions, we need to avoid input-stuffing
+        // for the cases where the txfee could still be zero. Since this transaction is the parent
+        // it means it cannot have ephemeral anchor spends itself. If we want to clean up dust,
+        // don't do it via ephemeral anchor transactions.
+        if (coin.out.nValue == 0) {
+            return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "ephemeral-parent-pin");
+        }
+    }
+
+    return true;
+}
+
 std::optional<std::string> ApplyV3Rules(const CTransactionRef& ptx,
                                         const CTxMemPool::setEntries& ancestors,
                                         const std::set<uint256>& direct_conflicts)

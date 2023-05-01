@@ -6,14 +6,23 @@
 import copy
 from decimal import Decimal
 
+from test_framework.blocktools import (
+    add_witness_commitment,
+    create_block,
+    create_coinbase,
+)
 from test_framework.messages import (
     COIN,
+    COutPoint,
+    CTransaction,
+    CTxIn,
     CTxInWitness,
     CTxOut,
     MAX_BIP125_RBF_SEQUENCE,
 )
 from test_framework.script import (
     CScript,
+    OP_RETURN,
     OP_TRUE,
 )
 from test_framework.test_framework import BitcoinTestFramework
@@ -117,6 +126,18 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         package_txns = [parent_result["tx"], child_result["tx"]]
         return package_hex, package_txns
 
+    def add_zero_value_input(self):
+        # Add single 0-value output to wallet
+        node = self.nodes[0]
+        block = create_block(int(node.getbestblockhash(), 16), create_coinbase(node.getblockcount()+1, extra_output_script=CScript(self.wallet.get_scriptPubKey())))
+        add_witness_commitment(block)
+        block.solve()
+        assert_equal(node.submitblock(block.serialize().hex()), None)
+
+        coinbase = node.getrawtransaction(node.getblock(node.getbestblockhash())["tx"][0], 1, node.getbestblockhash())
+        assert_equal(coinbase["vout"][1]["scriptPubKey"]["hex"], self.wallet.get_scriptPubKey().hex())
+        assert_equal(coinbase["vout"][1]["value"], Decimal(0))
+
     def run_test(self):
         # Counter used to count the number of times we constructed packages. Since we're constructing parent transactions with the same
         # coins (to create conflicts), and giving them the same fee (i.e. 0, since their respective children are paying), we might
@@ -127,11 +148,16 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
         self.generate(self.wallet, 160)
-        self.coins = self.wallet.get_utxos(mark_as_spent=False)
+
+        # Wallet gets single 0-value utxo
+        self.add_zero_value_input()
+
         # Mature coinbase transactions
         self.generate(self.wallet, 100)
-        self.address = self.wallet.get_address()
 
+        self.coins = self.wallet.get_utxos(mark_as_spent=False)
+
+        self.test_zero_value_input()
         self.test_node_restart()
         self.test_fee_having_parent()
         self.test_multianchor()
@@ -140,6 +166,21 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         self.test_non_v3()
         self.test_unspent_ephemeral()
         self.test_xor_rbf()
+
+    def test_zero_value_input(self):
+        self.log.info("Test that an ephemeral transaction cannot include a 0-value input")
+        node = self.nodes[0]
+        pin_coin = [utxo for utxo in self.coins if utxo["value"] == Decimal(0)][0]
+        del self.coins[self.coins.index(pin_coin)]
+
+        # Bogus spend; rejected before script evaluation
+        txn = CTransaction()
+        txn.nVersion = 3
+        txn.vin.append(CTxIn(COutPoint(int(pin_coin["txid"], 16), pin_coin["vout"]), b"", 0))
+        txn.vout.append(CTxOut(0, CScript([OP_TRUE])))
+        txn.vout.append(CTxOut(0, CScript([OP_RETURN]))) # pad out non-wit serialized size to avoid "tx-size-small"
+        txn_hex = txn.serialize().hex()
+        assert_equal(node.testmempoolaccept([txn_hex])[0]["reject-reason"], "ephemeral-parent-pin")
 
     def test_node_restart(self):
         self.log.info("Test that an ephemeral package is accepted on restart due to bypass_limits load")

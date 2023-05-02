@@ -173,14 +173,22 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         pin_coin = [utxo for utxo in self.coins if utxo["value"] == Decimal(0)][0]
         del self.coins[self.coins.index(pin_coin)]
 
-        # Bogus spend; rejected before script evaluation
         txn = CTransaction()
         txn.nVersion = 3
         txn.vin.append(CTxIn(COutPoint(int(pin_coin["txid"], 16), pin_coin["vout"]), b"", 0))
         txn.vout.append(CTxOut(0, CScript([OP_TRUE])))
         txn.vout.append(CTxOut(0, CScript([OP_RETURN]))) # pad out non-wit serialized size to avoid "tx-size-small"
+        txn.rehash()
         txn_hex = txn.serialize().hex()
-        assert_equal(node.testmempoolaccept([txn_hex])[0]["reject-reason"], "ephemeral-parent-pin")
+
+        child_tx = CTransaction()
+        child_tx.nVersion = 3
+        child_tx.vin.append(CTxIn(COutPoint(txn.sha256, 0), b"", 0))
+        child_tx.vout.append(CTxOut(0, CScript([OP_TRUE])))
+        child_tx.vout.append(CTxOut(0, CScript([OP_RETURN]))) # pad out non-wit serialized size to avoid "tx-size-small"
+        child_tx_hex = child_tx.serialize().hex()
+
+        assert_raises_rpc_error(-26, "ephemeral-parent-pin", node.submitpackage, [txn_hex, child_tx_hex])
 
     def test_node_restart(self):
         self.log.info("Test that an ephemeral package is accepted on restart due to bypass_limits load")
@@ -193,21 +201,9 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         node.submitpackage(package_hex1)
         self.assert_mempool_contents(expected=package_txns1, unexpected=[])
 
-        # Raise minrelay fee to orphan the child, with parent prioritised to safety
+        # Node restarts; doesn't allow allow ephemeral tranasction back in due to individual submission
         self.restart_node(0)
-
-        self.assert_mempool_contents(expected=package_txns1, unexpected=[])
-
-        # Raise minrelay fee to orphan the child, with parent prioritised to safety
-        node.prioritisetransaction(node.decoderawtransaction(package_hex1[0])["txid"], 0, COIN)
-        self.restart_node(0, extra_args=["-minrelaytxfee=0.01"])
-
-        self.assert_mempool_contents(expected=[package_txns1[0]], unexpected=[package_txns1[1]])
-
-        self.generate(node, 1)
-
-        # Set node back to default settings
-        self.restart_node(0)
+        assert_equal(node.getrawmempool(), [])
 
     def test_fee_having_parent(self):
         self.log.info("Test that a transaction with ephemeral anchor may not have base fee")
@@ -307,7 +303,11 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         assert_raises_rpc_error(-26, "missing-ephemeral-spends", node.submitpackage, package_hex0)
         assert_equal(node.getrawmempool(), [])
 
-        # One more time, correct nversion
+        # Individual submission also fails
+        assert_raises_rpc_error(-26, "missing-ephemeral-spends", node.sendrawtransaction, package_hex0[0])
+        assert_equal(node.getrawmempool(), [])
+
+        # One more time
         package_hex3, package_txns3 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE)
         node.submitpackage(package_hex3)
         self.assert_mempool_contents(expected=package_txns3, unexpected=[])

@@ -53,6 +53,7 @@ enum class TxValidationResult {
      */
     TX_CONFLICT,
     TX_MEMPOOL_POLICY,        //!< violated mempool's fee/size/descendant/RBF/etc limits
+    TX_MEMPOOL_POLICY_SOFT,   //!< violated mempool's fee/size/descendant/RBF/etc limits, but result may differ when in different package
     TX_NO_MEMPOOL,            //!< this node does not have a mempool so can't validate the transaction
 };
 

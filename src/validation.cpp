@@ -667,11 +667,11 @@ private:
         AssertLockHeld(m_pool.cs);
         CAmount mempoolRejectFee = m_pool.GetMinFee().GetFee(package_size);
         if (mempoolRejectFee > 0 && package_fee < mempoolRejectFee) {
-            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool min fee not met", strprintf("%d < %d", package_fee, mempoolRejectFee));
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY_SOFT, "mempool min fee not met", strprintf("%d < %d", package_fee, mempoolRejectFee));
         }
 
         if (package_fee < m_pool.m_min_relay_feerate.GetFee(package_size)) {
-            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "min relay fee not met",
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY_SOFT, "min relay fee not met",
                                  strprintf("%d < %d", package_fee, m_pool.m_min_relay_feerate.GetFee(package_size)));
         }
         return true;
@@ -1211,7 +1211,7 @@ bool MemPoolAccept::SubmitPackage(const ATMPArgs& args, std::vector<Workspace>& 
             GetMainSignals().TransactionAddedToMempool(ws.m_ptx, m_pool.GetAndIncrementSequence());
         } else {
             all_submitted = false;
-            ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "mempool full");
+            ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY_SOFT, "mempool full");
             package_state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
             results.emplace(ws.m_ptx->GetWitnessHash(), MempoolAcceptResult::Failure(ws.m_state));
         }
@@ -1292,17 +1292,23 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
     const auto m_total_modified_fees = std::accumulate(workspaces.cbegin(), workspaces.cend(), CAmount{0},
         [](CAmount sum, auto& ws) { return sum + ws.m_modified_fees; });
     const CFeeRate package_feerate(m_total_modified_fees, m_total_vsize);
-    TxValidationState placeholder_state;
+    TxValidationState tx_state;
     if (args.m_package_feerates &&
-        !CheckFeeRate(m_total_vsize, m_total_modified_fees, placeholder_state)) {
+        !CheckFeeRate(m_total_vsize, m_total_modified_fees, tx_state)) {
+        std::map<const uint256, const MempoolAcceptResult> m_tx_results;
+        m_tx_results.emplace(txns.back()->GetWitnessHash(), MempoolAcceptResult::Failure(tx_state));
         package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package-fee-too-low");
-        return PackageMempoolAcceptResult(package_state, {});
+        return PackageMempoolAcceptResult(package_state, std::move(m_tx_results));
     } else if (args.m_package_feerates &&
                workspaces.back().m_modified_fees * m_total_vsize < m_total_modified_fees * workspaces.back().m_vsize) {
         // The package feerate is high enough, but the child's feerate is lower than the package
         // feerate. This should fail, otherwise we're allowing "parent pay for child."
+        TxValidationState tx_state;
+        tx_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY_SOFT, "not-cpfp");
+        std::map<const uint256, const MempoolAcceptResult> m_tx_results;
+        m_tx_results.emplace(txns.back()->GetWitnessHash(), MempoolAcceptResult::Failure(tx_state));
         package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package-not-cpfp");
-        return PackageMempoolAcceptResult(package_state, {});
+        return PackageMempoolAcceptResult(package_state, std::move(m_tx_results));
     }
 
     // Apply package mempool ancestor/descendant limits. Skip if there is only one transaction,
@@ -1485,8 +1491,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptAncestorPackage(const Package& p
             const auto single_res_it = subpackage_result.m_tx_results.find(wtxid);
             if (single_res_it != subpackage_result.m_tx_results.end()) {
                 const auto single_res = single_res_it->second;
-                if (single_res.m_state.GetResult() != TxValidationResult::TX_MEMPOOL_POLICY &&
-                    single_res.m_state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
+                if (single_res.m_state.GetResult() != TxValidationResult::TX_MEMPOOL_POLICY_SOFT) {
                     // Package validation policy only differs from individual policy in its evaluation
                     // of feerate. For example, if a transaction fails here due to violation of a
                     // consensus rule, the result will not change when it is submitted as part of a

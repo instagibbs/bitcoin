@@ -168,7 +168,7 @@ struct MempoolAcceptResult {
     const std::optional<uint256> m_other_wtxid;
 
     static MempoolAcceptResult Failure(TxValidationState state) {
-        return MempoolAcceptResult(state);
+        return MempoolAcceptResult(ResultType::INVALID, state);
     }
 
     static MempoolAcceptResult FeeFailure(TxValidationState state,
@@ -197,8 +197,8 @@ struct MempoolAcceptResult {
 // Private constructors. Use static methods MempoolAcceptResult::Success, etc. to construct.
 private:
     /** Constructor for failure case */
-    explicit MempoolAcceptResult(TxValidationState state)
-        : m_result_type(ResultType::INVALID), m_state(state) {
+    explicit MempoolAcceptResult(ResultType result, TxValidationState state)
+        : m_result_type(result), m_state(state) {
             Assume(!state.IsValid()); // Can be invalid or error
         }
 

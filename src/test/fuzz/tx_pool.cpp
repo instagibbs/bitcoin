@@ -179,7 +179,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
 
         // Make up to N transactions per package
         std::vector<CTransactionRef> txs;
-        while (txs.size() < 1 && fuzzed_data_provider.ConsumeBool()) {
+        while (txs.empty() || (txs.size() < 4 && fuzzed_data_provider.ConsumeBool())) {
             // Create transaction to add to the mempool
             const CTransactionRef tx = [&] {
                 CMutableTransaction tx_mut;
@@ -282,6 +282,20 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
             }
         } else {
             // FIXME define assertions for package submission, right now looking for crashes only
+            if (result_package.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
+                // This results in no results
+                Assert(result_package.m_tx_results.empty());
+                for (const auto& tx : txs) {
+                    removed.erase(tx);
+                }
+            } else {
+                Assert(false);
+                for (const auto& [k, v] : result_package.m_tx_results) {
+                    if (v.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+//                        removed.erase(tx);
+                    }
+                }
+            }
         }
 
         // Helper to insert spent and created outpoints of a tx into collections

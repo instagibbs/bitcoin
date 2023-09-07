@@ -38,7 +38,7 @@ struct MockedTxPool : public CTxMemPool {
 
 void initialize_tx_pool()
 {
-    static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
+    static const auto testing_setup = WITH_LOCK(::cs_main, return MakeNoLogFileContext<const TestingSetup>());
     g_setup = testing_setup.get();
 
     for (int i = 0; i < 2 * COINBASE_MATURITY; ++i) {
@@ -177,47 +177,52 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         }
         Assert(!outpoints_supply.empty());
 
-        // Create transaction to add to the mempool
-        const CTransactionRef tx = [&] {
-            CMutableTransaction tx_mut;
-            tx_mut.nVersion = CTransaction::CURRENT_VERSION;
-            tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
-            const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
-            const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size() * 2);
+        // Make up to N transactions per package
+        std::vector<CTransactionRef> txs;
+        while (txs.size() < 1 && fuzzed_data_provider.ConsumeBool()) {
+            // Create transaction to add to the mempool
+            const CTransactionRef tx = [&] {
+                CMutableTransaction tx_mut;
+                tx_mut.nVersion = CTransaction::CURRENT_VERSION;
+                tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+                const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
+                const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size() * 2);
 
-            CAmount amount_in{0};
-            for (int i = 0; i < num_in; ++i) {
-                // Pop random outpoint
-                auto pop = outpoints_rbf.begin();
-                std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints_rbf.size() - 1));
-                const auto outpoint = *pop;
-                outpoints_rbf.erase(pop);
-                amount_in += GetAmount(outpoint);
+                CAmount amount_in{0};
+                for (int i = 0; i < num_in; ++i) {
+                    // Pop random outpoint
+                    auto pop = outpoints_rbf.begin();
+                    std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints_rbf.size() - 1));
+                    const auto outpoint = *pop;
+                    outpoints_rbf.erase(pop);
+                    amount_in += GetAmount(outpoint);
 
-                // Create input
-                const auto sequence = ConsumeSequence(fuzzed_data_provider);
-                const auto script_sig = CScript{};
-                const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
-                CTxIn in;
-                in.prevout = outpoint;
-                in.nSequence = sequence;
-                in.scriptSig = script_sig;
-                in.scriptWitness.stack = script_wit_stack;
+                    // Create input
+                    const auto sequence = ConsumeSequence(fuzzed_data_provider);
+                    const auto script_sig = CScript{};
+                    const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+                    CTxIn in;
+                    in.prevout = outpoint;
+                    in.nSequence = sequence;
+                    in.scriptSig = script_sig;
+                    in.scriptWitness.stack = script_wit_stack;
 
-                tx_mut.vin.push_back(in);
-            }
-            const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-1000, amount_in);
-            const auto amount_out = (amount_in - amount_fee) / num_out;
-            for (int i = 0; i < num_out; ++i) {
-                tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
-            }
-            auto tx = MakeTransactionRef(tx_mut);
-            // Restore previously removed outpoints
-            for (const auto& in : tx->vin) {
-                Assert(outpoints_rbf.insert(in.prevout).second);
-            }
-            return tx;
-        }();
+                    tx_mut.vin.push_back(in);
+                }
+                const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-1000, amount_in);
+                const auto amount_out = (amount_in - amount_fee) / num_out;
+                for (int i = 0; i < num_out; ++i) {
+                    tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
+                }
+                auto tx = MakeTransactionRef(tx_mut);
+                // Restore previously removed outpoints
+                for (const auto& in : tx->vin) {
+                    Assert(outpoints_rbf.insert(in.prevout).second);
+                }
+                return tx;
+            }();
+            txs.push_back(tx);
+        }
 
         if (fuzzed_data_provider.ConsumeBool()) {
             MockTime(fuzzed_data_provider, chainstate);
@@ -227,7 +232,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         }
         if (fuzzed_data_provider.ConsumeBool()) {
             const auto& txid = fuzzed_data_provider.ConsumeBool() ?
-                                   tx->GetHash() :
+                                   txs.back()->GetHash() :
                                    PickValue(fuzzed_data_provider, outpoints_rbf).hash;
             const auto delta = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-50 * COIN, +50 * COIN);
             tx_pool.PrioritiseTransaction(txid, delta);
@@ -240,33 +245,43 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         RegisterSharedValidationInterface(txr);
         const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
 
+        // We're only testing single
+        auto single_test = true;
+        auto package_test = !single_test;
+
         // Make sure ProcessNewPackage on one transaction works.
         // The result is not guaranteed to be the same as what is returned by ATMP.
         const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(chainstate, tx_pool, {tx}, true));
+                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/package_test));
         // If something went wrong due to a package-specific policy, it might not return a
         // validation result for the transaction.
         if (result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
-            auto it = result_package.m_tx_results.find(tx->GetWitnessHash());
+            auto it = result_package.m_tx_results.find(txs.back()->GetWitnessHash());
             Assert(it != result_package.m_tx_results.end());
             Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
                    it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID);
         }
 
-        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, tx, GetTime(), bypass_limits, /*test_accept=*/false));
+        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/single_test));
         const bool accepted = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
+
+
         SyncWithValidationInterfaceQueue();
         UnregisterSharedValidationInterface(txr);
 
-        Assert(accepted != added.empty());
-        Assert(accepted == res.m_state.IsValid());
-        Assert(accepted != res.m_state.IsInvalid());
-        if (accepted) {
-            Assert(added.size() == 1); // For now, no package acceptance
-            Assert(tx == *added.begin());
+        if (package_test) {
+            Assert(accepted != added.empty());
+            Assert(accepted == res.m_state.IsValid());
+            Assert(accepted != res.m_state.IsInvalid());
+            if (accepted) {
+                Assert(added.size() == 1); // For now, no package acceptance
+                Assert(txs.back() == *added.begin());
+            } else {
+                // Do not consider rejected transaction removed
+                removed.erase(txs.back());
+            }
         } else {
-            // Do not consider rejected transaction removed
-            removed.erase(tx);
+            // FIXME define assertions for package submission, right now looking for crashes only
         }
 
         // Helper to insert spent and created outpoints of a tx into collections

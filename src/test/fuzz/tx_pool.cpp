@@ -139,12 +139,14 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
 
     MockTime(fuzzed_data_provider, chainstate);
 
-    // All RBF-spendable outpoints
+    // All RBF-spendable outpoints outside of the immediate package
     std::set<COutPoint> outpoints_rbf;
     // All outpoints counting toward the total supply (subset of outpoints_rbf)
     std::set<COutPoint> outpoints_supply;
+    std::map<COutPoint, CAmount> outpoints_value;
     for (const auto& outpoint : g_outpoints_coinbase_init_mature) {
         Assert(outpoints_supply.insert(outpoint).second);
+        outpoints_value[outpoint] = 50 * COIN;
     }
     outpoints_rbf = outpoints_supply;
 
@@ -171,7 +173,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
             // Total supply is the mempool fee + all outpoints
             CAmount supply_now{WITH_LOCK(tx_pool.cs, return tx_pool.GetTotalFee())};
             for (const auto& op : outpoints_supply) {
-                supply_now += GetAmount(op);
+                supply_now += outpoints_value.at(op);
             }
             Assert(supply_now == SUPPLY_TOTAL);
         }
@@ -179,23 +181,29 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
 
         // Make up to N transactions per package
         std::vector<CTransactionRef> txs;
-        while (txs.empty() || (txs.size() < 4 && fuzzed_data_provider.ConsumeBool())) {
+        // Last transaction in a package needs to be a child of parents to get further in validation
+        const auto num_txs = fuzzed_data_provider.ConsumeIntegralInRange<int>(2, 2);
+        std::set<COutPoint> package_outpoints;
+        while (txs.size() < num_txs) {
+            bool last_tx = num_txs > 1 && txs.size() == num_txs - 1;
             // Create transaction to add to the mempool
             const CTransactionRef tx = [&] {
                 CMutableTransaction tx_mut;
                 tx_mut.nVersion = CTransaction::CURRENT_VERSION;
                 tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
-                const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
+                // Last tx will sweep all outpoints in package
+                const auto num_in = last_tx ? package_outpoints.size()  : fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
                 const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size() * 2);
 
                 CAmount amount_in{0};
                 for (int i = 0; i < num_in; ++i) {
+                    auto& outpoints = last_tx ? package_outpoints : outpoints_rbf;
                     // Pop random outpoint
-                    auto pop = outpoints_rbf.begin();
-                    std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints_rbf.size() - 1));
+                    auto pop = outpoints.begin();
+                    std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints.size() - 1));
                     const auto outpoint = *pop;
-                    outpoints_rbf.erase(pop);
-                    amount_in += GetAmount(outpoint);
+                    outpoints.erase(pop);
+                    amount_in += outpoints_value.at(outpoint);
 
                     // Create input
                     const auto sequence = ConsumeSequence(fuzzed_data_provider);
@@ -218,6 +226,11 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
                 // Restore previously removed outpoints
                 for (const auto& in : tx->vin) {
                     Assert(outpoints_rbf.insert(in.prevout).second);
+                }
+                // Cache the in-package outpoints being made
+                for (int i = 0; i < tx->vout.size(); ++i) {
+                    package_outpoints.emplace(tx->GetHash(), i);
+                    outpoints_value[COutPoint(tx->GetHash(), i)] = tx->vout[i].nValue;
                 }
                 return tx;
             }();

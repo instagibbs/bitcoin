@@ -179,7 +179,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         std::vector<CTransactionRef> txs;
         std::map<uint256, CTransactionRef> wtxid_to_tx;
         // Last transaction in a package needs to be a child of parents to get further in validation
-        const auto num_txs = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 5);
+        const auto num_txs = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 26);
         std::set<COutPoint> package_outpoints;
         while (txs.size() < num_txs) {
             bool last_tx = num_txs > 1 && txs.size() == num_txs - 1;

@@ -38,7 +38,7 @@ struct MockedTxPool : public CTxMemPool {
 
 void initialize_tx_pool()
 {
-    static const auto testing_setup = WITH_LOCK(::cs_main, return MakeNoLogFileContext<const TestingSetup>());
+    static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
     g_setup = testing_setup.get();
 
     for (int i = 0; i < 2 * COINBASE_MATURITY; ++i) {
@@ -61,12 +61,14 @@ struct TransactionsDelta final : public CValidationInterface {
 
     void TransactionAddedToMempool(const CTransactionRef& tx, uint64_t /* mempool_sequence */) override
     {
-        Assert(m_added.insert(tx).second);
+        // Transactions may be entered and booted any number of times
+        m_added.insert(tx);
     }
 
     void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t /* mempool_sequence */) override
     {
-        Assert(m_removed.insert(tx).second);
+        // Transactions may be entered and booted any number of times
+        m_removed.insert(tx);
     }
 };
 
@@ -161,12 +163,6 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
 
     // Helper to query an amount
     const CCoinsViewMemPool amount_view{WITH_LOCK(::cs_main, return &chainstate.CoinsTip()), tx_pool};
-    const auto GetAmount = [&](const COutPoint& outpoint) {
-        Coin c;
-        Assert(amount_view.GetCoin(outpoint, c));
-        return c.out.nValue;
-    };
-
     LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300)
     {
         {
@@ -181,11 +177,13 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
 
         // Make up to N transactions per package
         std::vector<CTransactionRef> txs;
+        std::map<uint256, CTransactionRef> wtxid_to_tx;
         // Last transaction in a package needs to be a child of parents to get further in validation
-        const auto num_txs = fuzzed_data_provider.ConsumeIntegralInRange<int>(2, 2);
+        const auto num_txs = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 5);
         std::set<COutPoint> package_outpoints;
         while (txs.size() < num_txs) {
             bool last_tx = num_txs > 1 && txs.size() == num_txs - 1;
+            //if (last_tx) break; // FIXME testing if its last tx failing things
             // Create transaction to add to the mempool
             const CTransactionRef tx = [&] {
                 CMutableTransaction tx_mut;
@@ -195,9 +193,10 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
                 const auto num_in = last_tx ? package_outpoints.size()  : fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
                 const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size() * 2);
 
+                auto& outpoints = last_tx ? package_outpoints : outpoints_rbf;
+
                 CAmount amount_in{0};
                 for (int i = 0; i < num_in; ++i) {
-                    auto& outpoints = last_tx ? package_outpoints : outpoints_rbf;
                     // Pop random outpoint
                     auto pop = outpoints.begin();
                     std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints.size() - 1));
@@ -217,15 +216,16 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
 
                     tx_mut.vin.push_back(in);
                 }
-                const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-1000, amount_in);
+                const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
                 const auto amount_out = (amount_in - amount_fee) / num_out;
                 for (int i = 0; i < num_out; ++i) {
                     tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
                 }
+                // FIXME make datacarrier limit gigantic, inflate tx sizes randomly to get more limts coverage
                 auto tx = MakeTransactionRef(tx_mut);
                 // Restore previously removed outpoints
                 for (const auto& in : tx->vin) {
-                    Assert(outpoints_rbf.insert(in.prevout).second);
+                    Assert(outpoints.insert(in.prevout).second);
                 }
                 // Cache the in-package outpoints being made
                 for (int i = 0; i < tx->vout.size(); ++i) {
@@ -235,6 +235,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
                 return tx;
             }();
             txs.push_back(tx);
+            wtxid_to_tx[tx->GetWitnessHash()] = tx;
         }
 
         if (fuzzed_data_provider.ConsumeBool()) {
@@ -302,10 +303,11 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
                     removed.erase(tx);
                 }
             } else {
-                Assert(false);
                 for (const auto& [k, v] : result_package.m_tx_results) {
                     if (v.m_result_type == MempoolAcceptResult::ResultType::VALID) {
-//                        removed.erase(tx);
+                        Assert(true);
+                    } else {
+                        removed.erase(wtxid_to_tx[k]);
                     }
                 }
             }

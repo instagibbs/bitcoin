@@ -179,6 +179,7 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         std::vector<CTransactionRef> txs;
         std::map<uint256, CTransactionRef> wtxid_to_tx;
         // Last transaction in a package needs to be a child of parents to get further in validation
+        // we allow it to not be, but need to give it a way to
         const auto num_txs = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 26);
         std::set<COutPoint> package_outpoints;
         while (txs.size() < num_txs) {
@@ -273,7 +274,8 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
             auto it = result_package.m_tx_results.find(txs.back()->GetWitnessHash());
             Assert(it != result_package.m_tx_results.end());
             Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+                   it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID ||
+                   it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY);
         }
 
         const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/single_test));

@@ -260,14 +260,14 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
         RegisterSharedValidationInterface(txr);
         const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
 
-        // We're only testing single
-        auto single_test = true;
-        auto package_test = !single_test;
+        // We'll actually do single submission sometimes, if we only have the one
+        auto single_submit = txs.size() == 1 && fuzzed_data_provider.ConsumeBool();
+        auto package_submit = !single_submit;
 
         // Make sure ProcessNewPackage on one transaction works.
         // The result is not guaranteed to be the same as what is returned by ATMP.
         const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/package_test));
+                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/!package_submit));
         // If something went wrong due to a package-specific policy, it might not return a
         // validation result for the transaction.
         if (result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
@@ -278,14 +278,14 @@ FUZZ_TARGET(tx_pool_standard, .init = initialize_tx_pool)
                    it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY);
         }
 
-        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/single_test));
+        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/!single_submit));
         const bool accepted = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
 
 
         SyncWithValidationInterfaceQueue();
         UnregisterSharedValidationInterface(txr);
 
-        if (package_test) {
+        if (single_submit) {
             Assert(accepted != added.empty());
             Assert(accepted == res.m_state.IsValid());
             Assert(accepted != res.m_state.IsInvalid());

@@ -86,6 +86,8 @@ void SetMempoolConstraints(ArgsManager& args, FuzzedDataProvider& fuzzed_data_pr
                      ToString(fuzzed_data_provider.ConsumeIntegralInRange<unsigned>(0, 200)));
     args.ForceSetArg("-mempoolexpiry",
                      ToString(fuzzed_data_provider.ConsumeIntegralInRange<unsigned>(0, 999)));
+    args.ForceSetArg("-bytespersigop",
+                     ToString(fuzzed_data_provider.ConsumeIntegralInRange<unsigned>(1, 999)));
 }
 
 void Finish(FuzzedDataProvider& fuzzed_data_provider, MockedTxPool& tx_pool, Chainstate& chainstate)

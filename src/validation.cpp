@@ -902,7 +902,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         assert(ws.m_iters_conflicting.size() == 1);
         CTxMemPool::txiter conflict = *ws.m_iters_conflicting.begin();
 
-        m_limits.descendant_count += 1;
+        m_limits.descendant_count += 1; // FIXME these mutated for *every* tx in a package, even if ultimately rejected
         m_limits.descendant_size_vbytes += conflict->GetSizeWithDescendants();
     }
 

@@ -33,8 +33,8 @@ class AncestorPackage
 
     struct PackageEntry {
         /** Whether this transaction should be skipped in FilteredAncestorSet() and linearization by
-         * fees, i.e. because it is already in the mempool.
-         * This value can be set to true by calling Skip(). */
+         * fees, i.e. because it is already in the mempool, or inputs are missing for whatever reason.
+         * This value can be set to true by calling Skip() or SkipWithDescendants(). */
         bool skip{false};
         /** Whether this transaction "dangles," i.e. we know nothing about it it because it is
          * missing inputs or depends on another transaction that is missing inputs.

@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <core_io.h> // only for debugging
 #include <consensus/validation.h>
 #include <node/context.h>
 #include <node/mempool_args.h>
@@ -47,6 +48,7 @@ void initialize_tx_pool()
         auto& outpoints = i < COINBASE_MATURITY ?
                               g_outpoints_coinbase_init_mature :
                               g_outpoints_coinbase_init_immature;
+        printf("Coinbase: %s\n", prevout.hash.GetHex().c_str());
         outpoints.push_back(prevout);
     }
     SyncWithValidationInterfaceQueue();
@@ -251,6 +253,11 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             tx_pool.PrioritiseTransaction(txid, delta);
         }
 
+        printf("\nTransactions:\n");
+        for (const auto& tx : txs) {
+            printf("%s:%s\n", tx->GetHash().GetHex().c_str(), EncodeHexTx(*tx, 0).c_str());
+        }
+
         // Remember all removed and added transactions
         std::set<CTransactionRef> removed;
         std::set<CTransactionRef> added;
@@ -267,13 +274,19 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                                     return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/!package_submit));
         // If something went wrong due to a package-specific policy, it might not return a
         // validation result for the transaction.
+        size_t num_valid = 0;
         if (result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
-            auto it = result_package.m_tx_results.find(txs.back()->GetWitnessHash());
-            Assert(it != result_package.m_tx_results.end());
-            Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY);
+            for (const auto& tx : txs) {
+                auto it = result_package.m_tx_results.find(tx->GetWitnessHash());
+                Assert(it != result_package.m_tx_results.end());
+                Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
+                       it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID ||
+                       it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY);
+                if (it->second.m_result_type == MempoolAcceptResult::ResultType::VALID) num_valid++;
+            }
         }
+
+        printf("Num valid: %zu/%zu\n", num_valid, txs.size());
 
         const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/!single_submit));
         const bool accepted = res.m_result_type == MempoolAcceptResult::ResultType::VALID;

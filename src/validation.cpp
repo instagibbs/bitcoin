@@ -395,6 +395,7 @@ static bool CheckInputsFromMempoolAndCache(const CTransaction& tx, TxValidationS
     AssertLockHeld(pool.cs);
 
     assert(!tx.IsCoinBase());
+    size_t index_num = 0;
     for (const CTxIn& txin : tx.vin) {
         const Coin& coin = view.AccessCoin(txin.prevout);
 
@@ -417,6 +418,7 @@ static bool CheckInputsFromMempoolAndCache(const CTransaction& tx, TxValidationS
             assert(!coinFromUTXOSet.IsSpent());
             assert(coinFromUTXOSet.out == coin.out);
         }
+        index_num++;
     }
 
     // Call CheckInputScripts() to cache signature and script validity against current tip consensus rules.

@@ -181,10 +181,15 @@ bool AncestorPackage::LinearizeWithFees()
     // Clear any previously-calculated mining sequences for all transactions.
     for (auto& [_, entry] : m_txid_to_entry) entry.mining_sequence = std::nullopt;
     std::vector<node::MiniMinerMempoolEntry> miniminer_info;
-    std::map<uint256, std::set<uint256>> descendant_caches;
+    std::map<uint256, std::set<uint256>> txid_to_descendants_cache;
     // For each non-skipped transaction, calculate their ancestor fee and vsize.
+    std::set<uint256> skipped_entries;
+    std::set<uint256> all_descendant_entries;
     for (const auto& [txid, entry] : m_txid_to_entry) {
-        if (entry.skip) continue;
+        if (entry.skip) {
+            skipped_entries.insert(txid);
+            continue; // Could this be in some entry.descendant_subset but skipped, thus not entered?
+        }
         // FilteredAncestorSet() is different from ancestor_subset because it filters out skipped transactions
         // and will return std::nullopt if this transaction should be skipped.
         const auto filtered_ancestor_subset = FilteredAncestorSet(entry.tx);
@@ -194,11 +199,22 @@ bool AncestorPackage::LinearizeWithFees()
         int64_t ancestor_subset_vsize = std::accumulate(filtered_ancestor_subset->cbegin(), filtered_ancestor_subset->cend(),
             int64_t{0}, [&](int64_t sum, const auto& anc) { return sum + *m_txid_to_entry.at(anc->GetHash()).vsize; });
         miniminer_info.push_back(node::MiniMinerMempoolEntry{*entry.fee, ancestor_subset_fees, *entry.vsize, ancestor_subset_vsize, entry.tx});
-        descendant_caches.emplace(txid, entry.descendant_subset);
+        // Does entry.descendant_subset have to be filtered by skipped?
+        txid_to_descendants_cache.emplace(txid, entry.descendant_subset); // FIXME not all desc appear in m_txid_to_entry key themselves?
+        for (const auto& desc : entry.descendant_subset) all_descendant_entries.insert(desc);
+    }
+
+    // If we skip an entry above aka not in miniminer_info, it *can't* be in the descendant lists anywhere
+    // This could happen if descendant has missing ancestor!!!
+    for (const auto& skipped : skipped_entries) {
+//        Assume(all_descendant_entries.find(skipped) == all_descendant_entries.end());
+        if (all_descendant_entries.find(skipped) == all_descendant_entries.end()) {
+            Assume(true); // try to break here and figure out if it stumbles along without asserts properly
+        }
     }
 
     // Use MiniMiner to calculate the order in which these transactions would be selected for mining.
-    node::MiniMiner miniminer(miniminer_info, descendant_caches);
+    node::MiniMiner miniminer(miniminer_info, txid_to_descendants_cache); // FIXME FIXME do we fall back gracefully to topo sort on errors?
     if (!miniminer.IsReadyToCalculate()) return false;
     for (const auto& [txid, mining_sequence] : miniminer.Linearize()) {
         m_txid_to_entry.at(txid).mining_sequence = mining_sequence;

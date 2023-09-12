@@ -125,7 +125,7 @@ MiniMiner::MiniMiner(const CTxMemPool& mempool, const std::vector<COutPoint>& ou
 }
 
 MiniMiner::MiniMiner(const std::vector<MiniMinerMempoolEntry>& manual_entries,
-                     const std::map<uint256, std::set<uint256>>& descendant_caches)
+                     const std::map<uint256, std::set<uint256>>& txid_to_descendants_cache)
 {
     for (const auto& entry : manual_entries) {
         const auto& txid = entry.GetTx().GetHash();
@@ -134,7 +134,7 @@ MiniMiner::MiniMiner(const std::vector<MiniMinerMempoolEntry>& manual_entries,
         m_entries.push_back(mapiter);
     }
     // Descendant cache is already built, but we need to translate them to m_entries_by_txid iters.
-    for (const auto& [txid, desc_txids] : descendant_caches) {
+    for (const auto& [txid, desc_txids] : txid_to_descendants_cache) {
         Assume(!desc_txids.empty());
         std::vector<MockEntryMap::iterator> cached_descendants;
         for (const auto& desc_txid : desc_txids) {

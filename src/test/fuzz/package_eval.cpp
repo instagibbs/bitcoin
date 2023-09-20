@@ -17,6 +17,7 @@
 #include <util/rbf.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <core_io.h>
 
 using node::BlockAssembler;
 using node::NodeContext;
@@ -26,6 +27,9 @@ namespace {
 const TestingSetup* g_setup;
 std::vector<COutPoint> g_outpoints_coinbase_init_mature;
 std::vector<COutPoint> g_outpoints_coinbase_init_immature;
+
+size_t g_max_submitted_package = 0;
+size_t g_max_successful_package = 0;
 
 struct MockedTxPool : public CTxMemPool {
     void RollingFeeUpdate() EXCLUSIVE_LOCKS_REQUIRED(!cs)
@@ -135,8 +139,8 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
     MockTime(fuzzed_data_provider, chainstate);
 
     // All RBF-spendable outpoints outside of the immediate package
-    std::set<COutPoint> outpoints_rbf;
-    // All outpoints counting toward the total supply (subset of outpoints_rbf)
+    std::set<COutPoint> confirmed_outpoints;
+    // All outpoints counting toward the total supply (subset of confirmed_outpoints)
     std::set<COutPoint> outpoints_supply;
     std::map<COutPoint, CAmount> outpoints_value;
     for (const auto& outpoint : g_outpoints_coinbase_init_mature) {
@@ -145,7 +149,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
     }
 
     // Seeded by coinbase outputs first
-    outpoints_rbf = outpoints_supply;
+    confirmed_outpoints = outpoints_supply;
 
     CTxMemPool tx_pool_{MakeMempool(fuzzed_data_provider, node)};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(&tx_pool_);
@@ -162,29 +166,39 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
 
         // Make packages of 1-to-26 transactions
-        const auto num_txs = (size_t) fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 26);
+        const auto num_txs = (size_t) fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 10);
         std::set<COutPoint> package_outpoints;
         while (txs.size() < num_txs) {
 
             // Last transaction in a package needs to be a child of parents to get further in validation
             // so the last transaction to be generated(in a >1 package) must spend all package-made outputs
             // Note that this test currently only spends unconfirmed outputs in last transaction.
-            bool last_tx = num_txs > 1 && txs.size() == num_txs - 1;
+            //bool last_tx = num_txs > 1 && txs.size() == num_txs - 1;
 
             // Create transaction to add to the mempool
             const CTransactionRef tx = [&] {
                 CMutableTransaction tx_mut;
                 tx_mut.nVersion = CTransaction::CURRENT_VERSION;
                 tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
-                // Last tx will sweep all outpoints in package
-                const auto num_in = last_tx ? package_outpoints.size()  : fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
-                const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size() * 2);
 
-                auto& outpoints = last_tx ? package_outpoints : outpoints_rbf;
+                size_t total_outpoints = confirmed_outpoints.size() + package_outpoints.size();
+
+                const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints / 2);
+                const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints * 2);
+
+                // We want to allow double-spends
+                std::vector<COutPoint> outpoints_to_restore;
+                std::vector<COutPoint> package_outpoints_to_restore;
 
                 CAmount amount_in{0};
-                for (size_t i = 0; i < num_in; ++i) {
+                for (size_t i = 0; i < (size_t) num_in; ++i) {
+                    // Grab arbitrary outpoint set
+                    bool is_package_outpoint = confirmed_outpoints.empty() ||
+                        (!package_outpoints.empty() && fuzzed_data_provider.ConsumeBool());
+                    auto& outpoints = is_package_outpoint ? package_outpoints : confirmed_outpoints;
+
                     // Pop random outpoint
+                    assert(!outpoints.empty());
                     auto pop = outpoints.begin();
                     std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints.size() - 1));
                     const auto outpoint = *pop;
@@ -202,6 +216,12 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                     in.scriptWitness.stack = script_wit_stack;
 
                     tx_mut.vin.push_back(in);
+
+                    if (!is_package_outpoint) {
+                        outpoints_to_restore.emplace_back(outpoint);
+                    } else {
+                        package_outpoints_to_restore.emplace_back(outpoint);
+                    }
                 }
                 const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
                 const auto amount_out = (amount_in - amount_fee) / num_out;
@@ -211,10 +231,17 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 // TODO vary transaction sizes to catch size-related issues
                 auto tx = MakeTransactionRef(tx_mut);
                 // Restore previously removed outpoints, except in-package outpoints
-                if (!last_tx) {
+/*                if (!last_tx) {
                     for (const auto& in : tx->vin) {
                         Assert(outpoints.insert(in.prevout).second);
                     }
+                }*/
+                // Restore all spent outpoints to their spots to allow RBF attempts
+                for (const auto& out : outpoints_to_restore) {
+                    Assert(confirmed_outpoints.insert(out).second);
+                }
+                for (const auto& out : package_outpoints_to_restore) {
+                    Assert(package_outpoints.insert(out).second);
                 }
                 // Cache the in-package outpoints being made
                 for (size_t i = 0; i < tx->vout.size(); ++i) {
@@ -236,7 +263,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
         if (fuzzed_data_provider.ConsumeBool()) {
             const auto& txid = fuzzed_data_provider.ConsumeBool() ?
                                    txs.back()->GetHash() :
-                                   PickValue(fuzzed_data_provider, outpoints_rbf).hash;
+                                   PickValue(fuzzed_data_provider, confirmed_outpoints).hash;
             const auto delta = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-50 * COIN, +50 * COIN);
             tx_pool.PrioritiseTransaction(txid, delta);
         }
@@ -271,6 +298,8 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
         SyncWithValidationInterfaceQueue();
         UnregisterSharedValidationInterface(txr);
 
+        size_t num_successful = 0;
+
         if (single_submit) {
             Assert(accepted != added.empty());
             Assert(accepted == res.m_state.IsValid());
@@ -292,12 +321,27 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             } else {
                 for (const auto& [k, v] : result_package.m_tx_results) {
                     if (v.m_result_type != MempoolAcceptResult::ResultType::INVALID) {
-                        Assert(true);
+                        //Check things are actually happening Assert(false);
+                        num_successful++;
                     } else {
                         removed.erase(wtxid_to_tx[k]);
                     }
                 }
             }
+        }
+
+        if (num_successful > g_max_successful_package) {
+            g_max_successful_package = num_successful;
+
+            printf("-------------------------------------\n");
+            for (const auto& tx : txs) {
+                printf("%s\n", EncodeHexTx(*tx, 0).c_str());
+            }
+            printf("\nMax successful txs in single package: %zu\n", g_max_successful_package);
+        }
+        if (txs.size() > g_max_submitted_package) {
+            g_max_submitted_package = txs.size();
+            printf("\nMax submitted txs in single package: %zu\n", g_max_submitted_package);
         }
 
         // Helper to insert spent and created outpoints of a tx into collections
@@ -325,11 +369,11 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 insert_tx(/*created_by_tx=*/{consumed_erased}, /*consumed_by_tx=*/{outpoints_supply}, /*tx=*/*removed_tx);
             }
             for (const auto& added_tx : added) {
-                insert_tx(/*created_by_tx=*/{outpoints_supply, outpoints_rbf}, /*consumed_by_tx=*/{consumed_supply}, /*tx=*/*added_tx);
+                insert_tx(/*created_by_tx=*/{outpoints_supply, confirmed_outpoints}, /*consumed_by_tx=*/{consumed_supply}, /*tx=*/*added_tx);
             }
             for (const auto& p : consumed_erased) {
                 outpoints_supply.erase(p);
-                outpoints_rbf.erase(p);
+                confirmed_outpoints.erase(p);
             }
             for (const auto& p : consumed_supply) {
                 outpoints_supply.erase(p);

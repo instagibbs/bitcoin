@@ -442,7 +442,8 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             Assert(it != result_package.m_tx_results.end());
             Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
                    it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY);
+                   it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY ||
+                   it->second.m_result_type == MempoolAcceptResult::ResultType::DIFFERENT_WITNESS);
         }
 
         const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/!single_submit));

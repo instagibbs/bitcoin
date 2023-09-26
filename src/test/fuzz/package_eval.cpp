@@ -17,11 +17,15 @@
 #include <util/rbf.h>
 #include <validation.h>
 #include <validationinterface.h>
+#include <core_io.h> // FIXME debugging only
 
 using node::BlockAssembler;
 using node::NodeContext;
 
 namespace {
+
+size_t g_max_submitted_package = 0; // FIXME debugging only
+size_t g_max_successful_package = 0; // FIXME debugging only
 
 const TestingSetup* g_setup;
 std::vector<COutPoint> g_outpoints_coinbase_init_mature;
@@ -412,6 +416,8 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
         SyncWithValidationInterfaceQueue();
         UnregisterSharedValidationInterface(txr);
 
+        size_t num_successful = 0;
+
         // There is only 1 transaction in the package. We did a test-package-accept and a ATMP
         if (single_submit) {
             Assert(accepted != added.empty());
@@ -435,11 +441,27 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                     if (v.m_result_type == MempoolAcceptResult::ResultType::INVALID) {
                         removed.erase(wtxid_to_tx[k]);
                     } else {
-//                        Assume(false);
+                        num_successful++;
                     }
                 }
             }
         }
+
+        // FIXME remove debugging helpers
+        if (num_successful > g_max_successful_package) {
+            g_max_successful_package = num_successful;
+
+            printf("-------------------------------------\n");
+            for (const auto& tx : txs) {
+                printf("%s\n", EncodeHexTx(*tx, 0).c_str());
+            }
+            printf("\nMax successful txs in single package: %zu\n", g_max_successful_package);
+        }
+        if (txs.size() > g_max_submitted_package) {
+            g_max_submitted_package = txs.size();
+            printf("\nMax submitted txs in single package: %zu\n", g_max_submitted_package);
+        }
+        // FIXME debugging only
     }
 
     UnregisterSharedValidationInterface(outpoints_updater);

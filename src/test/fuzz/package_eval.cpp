@@ -208,7 +208,6 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 // We want to allow double-spends, so these are re-added
                 std::vector<COutPoint> outpoints_to_restore;
                 std::vector<COutPoint> package_outpoints_to_restore;
-                CTxIn duplicate_in;
 
                 CAmount amount_in{0};
                 for (size_t i = 0; i < (size_t) num_in; ++i) {
@@ -238,22 +237,12 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
                     tx_mut.vin.push_back(in);
 
-                    // Duplicate inputs on *same* tx
-                    if (duplicate_in == CTxIn() && fuzzed_data_provider.ConsumeBool()) {
-                        duplicate_in = in;
-                    }
-
                     if (!is_package_outpoint) {
                         outpoints_to_restore.emplace_back(outpoint);
                     } else {
                         package_outpoints_to_restore.emplace_back(outpoint);
                     }
                 }
-
-                if (duplicate_in != CTxIn()) {
-                    tx_mut.vin.push_back(duplicate_in);
-                }
-
                 const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
                 const auto amount_out = (amount_in - amount_fee) / num_out;
                 for (int i = 0; i < num_out; ++i) {

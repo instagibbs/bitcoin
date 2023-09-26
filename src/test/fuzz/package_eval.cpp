@@ -46,7 +46,7 @@ void initialize_tx_pool()
     g_setup = testing_setup.get();
 
     for (int i = 0; i < 2 * COINBASE_MATURITY; ++i) {
-        COutPoint prevout{MineBlock(g_setup->m_node, P2WSH_OP_TRUE)};
+        COutPoint prevout{MineBlock(g_setup->m_node, P2WSH_EMPTY)};
         // Remember the txids to avoid expensive disk access later on
         auto& outpoints = i < COINBASE_MATURITY ?
                               g_outpoints_coinbase_init_mature :
@@ -195,7 +195,8 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
         // Create input
         const auto sequence = ConsumeSequence(fuzzed_data_provider);
         const auto script_sig = CScript{};
-        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+        const enum opcodetype op = fuzzed_data_provider.ConsumeBool() ? OP_TRUE : OP_2;
+        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{{static_cast<uint8_t>(op)}, EMPTY};
         CTxIn in;
         in.prevout = outpoint;
         in.nSequence = sequence;
@@ -226,7 +227,7 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
     const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
     const auto amount_out = (amount_in - amount_fee) / num_out;
     for (int i = 0; i < num_out; ++i) {
-        tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
+        tx_mut.vout.emplace_back(amount_out, P2WSH_EMPTY);
     }
     // TODO vary transaction sizes to catch size-related issues
     auto tx = MakeTransactionRef(tx_mut);
@@ -280,7 +281,9 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
         // Create input
         const auto sequence = ConsumeSequence(fuzzed_data_provider);
         const auto script_sig = CScript{};
-        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+        const enum opcodetype op = fuzzed_data_provider.ConsumeBool() ? OP_TRUE : OP_2;
+        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{{static_cast<uint8_t>(op)}, EMPTY};
+
         CTxIn in;
         in.prevout = outpoint;
         in.nSequence = sequence;
@@ -307,7 +310,8 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
         // Create input
         const auto sequence = ConsumeSequence(fuzzed_data_provider);
         const auto script_sig = CScript{};
-        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+        const enum opcodetype op = fuzzed_data_provider.ConsumeBool() ? OP_TRUE : OP_2;
+        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{{static_cast<uint8_t>(op)}, EMPTY};
         CTxIn in;
         in.prevout = outpoint;
         in.nSequence = sequence;
@@ -320,7 +324,7 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
     const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
     const auto amount_out = (amount_in - amount_fee) / num_out;
     for (int i = 0; i < num_out; ++i) {
-        tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
+        tx_mut.vout.emplace_back(amount_out, P2WSH_EMPTY);
     }
     // TODO vary transaction sizes to catch size-related issues
     auto tx = MakeTransactionRef(tx_mut);

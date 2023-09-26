@@ -42,7 +42,8 @@ void initialize_tx_pool()
     g_setup = testing_setup.get();
 
     for (int i = 0; i < 2 * COINBASE_MATURITY; ++i) {
-        COutPoint prevout{MineBlock(g_setup->m_node, P2WSH_OP_TRUE)};
+        // We use an empty script to allow trivial wtxid malleability
+        COutPoint prevout{MineBlock(g_setup->m_node, P2WSH_EMPTY)};
         // Remember the txids to avoid expensive disk access later on
         auto& outpoints = i < COINBASE_MATURITY ?
                               g_outpoints_coinbase_init_mature :
@@ -226,10 +227,11 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                     // no need to update or erase from outpoints_value
                     amount_in += outpoints_value.at(outpoint);
 
-                    // Create input
+                    // Create input with varying details, including wtxid-twiddling via witness
                     const auto sequence = ConsumeSequence(fuzzed_data_provider);
                     const auto script_sig = CScript{};
-                    const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+                    const enum opcodetype op = fuzzed_data_provider.ConsumeBool() ? OP_TRUE : OP_2;
+                    const auto script_wit_stack = std::vector<std::vector<uint8_t>>{{static_cast<uint8_t>(op)}, EMPTY};
                     CTxIn in;
                     in.prevout = outpoint;
                     in.nSequence = sequence;
@@ -257,7 +259,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
                 const auto amount_out = (amount_in - amount_fee) / num_out;
                 for (int i = 0; i < num_out; ++i) {
-                    tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
+                    tx_mut.vout.emplace_back(amount_out, P2WSH_EMPTY);
                 }
                 // TODO vary transaction sizes to catch size-related issues
                 auto tx = MakeTransactionRef(tx_mut);
@@ -345,6 +347,8 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 for (const auto& [k, v] : result_package.m_tx_results) {
                     if (v.m_result_type == MempoolAcceptResult::ResultType::INVALID) {
                         removed.erase(wtxid_to_tx[k]);
+                    } else {
+                        Assume(false);
                     }
                 }
             }

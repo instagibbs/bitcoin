@@ -9,6 +9,7 @@
 #include <script/script.h>
 
 static const std::vector<uint8_t> WITNESS_STACK_ELEM_OP_TRUE{uint8_t{OP_TRUE}};
+static const std::vector<uint8_t> EMPTY{};
 static const CScript P2WSH_OP_TRUE{
     CScript{}
     << OP_0
@@ -17,6 +18,15 @@ static const CScript P2WSH_OP_TRUE{
            CSHA256().Write(WITNESS_STACK_ELEM_OP_TRUE.data(), WITNESS_STACK_ELEM_OP_TRUE.size()).Finalize(hash.begin());
            return hash;
        }())};
+static const CScript P2WSH_EMPTY{
+    CScript{}
+    << OP_0
+    << ToByteVector([] {
+           uint256 hash;
+           CSHA256().Write(EMPTY.data(), EMPTY.size()).Finalize(hash.begin());
+           return hash;
+       }())};
+
 
 /** Flags that are not forbidden by an assert in script validation */
 bool IsValidFlagCombination(unsigned flags);

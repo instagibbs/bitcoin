@@ -365,7 +365,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
 
         // Make packages of 1-to-26 transactions
-        const auto num_txs = (size_t) fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 26);
+        const auto num_txs = fuzzed_data_provider.ConsumeBool() ? (size_t) fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 6) : 26;
         std::set<COutPoint> package_outpoints;
         std::set<uint256> txids_to_spend;
         while (txs.size() < num_txs) {

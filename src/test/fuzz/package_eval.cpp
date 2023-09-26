@@ -344,6 +344,11 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
     // TODO vary transaction sizes to catch size-related issues
     auto tx = MakeTransactionRef(tx_mut);
 
+    // Restore all spent outpoints to their spots to allow RBF attempts and in case of rejection
+    for (const auto& out : outpoints_to_restore) {
+        Assert(mempool_outpoints.insert(out).second);
+    }
+
     // We need newly-created values for the duration of this run
     for (size_t i = 0; i < tx->vout.size(); ++i) {
         outpoints_value[COutPoint(tx->GetHash(), i)] = tx->vout[i].nValue;

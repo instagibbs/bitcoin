@@ -169,7 +169,9 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
 
     size_t total_outpoints = mempool_outpoints.size() + package_outpoints.size();
 
-    const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints / 2);
+    Assume(total_outpoints > 0);
+
+    const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints);
     const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints * 2);
 
     // We want to allow double-spends, so these are re-added

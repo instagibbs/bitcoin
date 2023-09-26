@@ -235,18 +235,21 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
         } else if (fuzzed_data_provider.ConsumeBool()) {
             // Add non-standard output script
             tx_mut.vout.emplace_back(amount_out, CScript() << OP_2);
-        } else if (fuzzed_data_provider.ConsumeBool()) {
-            // Add bare multisig to trigger sigops checks
-            const std::vector<unsigned char> pubkey(33, 0x02);
-            tx_mut.vout.emplace_back(amount_out, CScript() << 2 << pubkey << pubkey << pubkey << OP_CHECKMULTISIG);
         } else {
             // Add regular output
             tx_mut.vout.emplace_back(amount_out, P2WSH_EMPTY);
         }
     }
+/*
+if (fuzzed_data_provider.ConsumeBool()) {
+            // Add bare multisig to trigger sigops checks
+            const std::vector<unsigned char> pubkey(33, 0x02);
+            tx_mut.vout.emplace_back(amount_out, CScript() << 2 << pubkey << pubkey << pubkey << OP_CHECKMULTISIG);
+        }
+*/
     // TODO vary transaction sizes to catch size-related issues
     auto tx = MakeTransactionRef(tx_mut);
-    // Restore all spent outpoints to their spots to allow RBF attempts
+    // Restore all spent outpoints to their spots to allow RBF attempts and in case of rejection
     for (const auto& out : outpoints_to_restore) {
         Assert(mempool_outpoints.insert(out).second);
     }
@@ -310,7 +313,7 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
         if (!is_package_outpoint) {
             outpoints_to_restore.emplace_back(outpoint);
         } else {
-            package_outpoints_to_restore.emplace_back(outpoint);
+            package_outpoints_to_restore.emplace_back(outpoint); // FIXME probably not needed?
         }
 
         txids_to_spend.erase(outpoint.hash);

@@ -212,6 +212,17 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
 
         txids_to_spend.erase(outpoint.hash);
     }
+
+    // Duplicate an input
+    if (fuzzed_data_provider.ConsumeBool()) {
+        tx_mut.vin.push_back(tx_mut.vin.back());
+    }
+
+    // Refer to a non-existant input
+    if (fuzzed_data_provider.ConsumeBool()) {
+        tx_mut.vin.emplace_back();
+    }
+
     const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
     const auto amount_out = (amount_in - amount_fee) / num_out;
     for (int i = 0; i < num_out; ++i) {

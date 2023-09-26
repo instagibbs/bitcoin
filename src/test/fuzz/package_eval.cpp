@@ -229,7 +229,20 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
     const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
     const auto amount_out = (amount_in - amount_fee) / num_out;
     for (int i = 0; i < num_out; ++i) {
-        tx_mut.vout.emplace_back(amount_out, P2WSH_EMPTY);
+        if (fuzzed_data_provider.ConsumeBool()) {
+            // Add dust (more to fees)
+            tx_mut.vout.emplace_back(0, P2WSH_EMPTY);
+        } else if (fuzzed_data_provider.ConsumeBool()) {
+            // Add non-standard output script
+            tx_mut.vout.emplace_back(amount_out, CScript() << OP_2);
+        } else if (fuzzed_data_provider.ConsumeBool()) {
+            // Add bare multisig to trigger sigops checks
+            const std::vector<unsigned char> pubkey(33, 0x02);
+            tx_mut.vout.emplace_back(amount_out, CScript() << 2 << pubkey << pubkey << pubkey << OP_CHECKMULTISIG);
+        } else {
+            // Add regular output
+            tx_mut.vout.emplace_back(amount_out, P2WSH_EMPTY);
+        }
     }
     // TODO vary transaction sizes to catch size-related issues
     auto tx = MakeTransactionRef(tx_mut);
@@ -257,7 +270,7 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
     size_t total_outpoints = mempool_outpoints.size() + package_outpoints.size();
 
     // We will add more inputs later from txids_to_spend
-    const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints / 2);
+    const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints);
     const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints * 2);
 
     // We want to allow double-spends, so these are re-added

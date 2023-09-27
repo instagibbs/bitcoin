@@ -6,6 +6,7 @@
 #include <node/context.h>
 #include <node/mempool_args.h>
 #include <node/miner.h>
+#include <policy/rbf.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -26,6 +27,7 @@ namespace {
 const TestingSetup* g_setup;
 std::vector<COutPoint> g_outpoints_coinbase_init_mature;
 std::vector<COutPoint> g_outpoints_coinbase_init_immature;
+bool g_bypass_limits;
 
 struct MockedTxPool : public CTxMemPool {
     void RollingFeeUpdate() EXCLUSIVE_LOCKS_REQUIRED(!cs)
@@ -94,6 +96,92 @@ struct OutpointsUpdater final : public CValidationInterface {
         }
     }
 };
+
+static void CheckPackageMempoolAcceptResult(const std::vector<CTransactionRef>& txns, const PackageMempoolAcceptResult& result, const CTxMemPool* mempool)
+{
+
+    // PCKG_POLICY gives very little back; early exit
+    if (result.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
+        Assume(result.m_tx_results.empty());
+        return;
+    }
+
+    Assume(txns.size() <= MAX_PACKAGE_COUNT);
+
+    Assume(txns.size() == result.m_tx_results.size());
+
+    for (const auto& tx : txns) {
+        const auto& wtxid = tx->GetWitnessHash();
+        Assume(result.m_tx_results.count(wtxid) > 0);
+
+        const auto& atmp_result = result.m_tx_results.at(wtxid);
+        const bool valid{atmp_result.m_result_type == MempoolAcceptResult::ResultType::VALID};
+
+        // m_replaced_transactions should exist iff the result was VALID
+        if (atmp_result.m_replaced_transactions.has_value()) {
+            Assume(valid);
+            Assume(atmp_result.m_replaced_transactions->size() <= MAX_REPLACEMENT_CANDIDATES);
+        } else {
+            Assume(!valid);
+        }
+
+        // m_vsize and m_base_fees should exist iff the result was VALID or MEMPOOL_ENTRY
+        const bool mempool_entry{atmp_result.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY};
+        const bool in_mempool = valid || mempool_entry;
+        Assume(atmp_result.m_base_fees.has_value() == in_mempool);
+        Assume(atmp_result.m_vsize.has_value() == in_mempool);
+
+        // m_other_wtxid should exist iff the result was DIFFERENT_WITNESS
+        const bool diff_witness{atmp_result.m_result_type == MempoolAcceptResult::ResultType::DIFFERENT_WITNESS};
+        Assume(atmp_result.m_other_wtxid.has_value() == diff_witness);
+
+        // m_effective_feerate and m_wtxids_fee_calculations should exist iff the result was valid or
+        // the failure was TX_SINGLE_FAILURE
+        const bool valid_or_single_failure{atmp_result.m_result_type == MempoolAcceptResult::ResultType::VALID ||
+            atmp_result.m_state.GetResult() == TxValidationResult::TX_SINGLE_FAILURE};
+        Assume(atmp_result.m_effective_feerate.has_value() == valid_or_single_failure);
+        Assume(atmp_result.m_wtxids_fee_calculations.has_value() == valid_or_single_failure);
+
+        if (mempool) {
+            // The tx by txid should be in the mempool iff the result was not INVALID.
+            const bool txid_in_mempool{atmp_result.m_result_type != MempoolAcceptResult::ResultType::INVALID};
+            Assume(mempool->exists(GenTxid::Txid(tx->GetHash())) == txid_in_mempool);
+            // Additionally, if the result was DIFFERENT_WITNESS, we shouldn't be able to find the tx in mempool by wtxid.
+            if (tx->HasWitness() && atmp_result.m_result_type == MempoolAcceptResult::ResultType::DIFFERENT_WITNESS) {
+                Assume(!mempool->exists(GenTxid::Wtxid(wtxid)));
+            }
+            {
+                LOCK(mempool->cs);
+
+                // mapDeltas entry should match CTxMemPoolEntry delta, if it is in the mempool
+                const CAmount delta_amt = mempool->mapDeltas.find(tx->GetHash()) != mempool->mapDeltas.end() ? mempool->mapDeltas.at(tx->GetHash()) : 0;
+                const TxMempoolInfo tx_info = mempool->info(GenTxid::Wtxid(wtxid));
+                Assume((in_mempool == !!tx_info.tx.get()) && (!in_mempool || delta_amt == tx_info.nFeeDelta));
+
+                // It made it, and is currently in the mempool
+                const auto tx = tx_info.tx.get();
+                if (in_mempool) {
+
+                    // Note: Won't catch sigops adjusted vsize issues
+                    Assume(GetTransactionWeight(*tx) <= MAX_STANDARD_TX_WEIGHT);
+
+                    // Not expired
+                    Assume(tx_info.m_time >= GetTime<std::chrono::seconds>() - mempool->m_expiry);
+
+                    // Nothing can be below mintxrelay fee, even in packages, unless bypass_limits is set
+                    Assume(g_bypass_limits ||
+                        tx_info.fee + tx_info.nFeeDelta >= mempool->m_min_relay_feerate.GetFee(GetVirtualTransactionSize(*tx, 0, 0)));
+                } else {
+                    Assume(tx == nullptr);
+                }
+            }
+        }
+    }
+
+
+    // max mempool size is respected by end of evaluation if any transactions are left
+    WITH_LOCK(mempool->cs, Assume(mempool->mapTx.empty() || (int64_t) mempool->DynamicMemoryUsage() <= mempool->m_max_size_bytes));
+}
 
 struct TransactionsDelta final : public CValidationInterface {
     std::set<CTransactionRef>& m_removed;
@@ -165,6 +253,8 @@ CTxMemPool MakeMempool(FuzzedDataProvider& fuzzed_data_provider, const NodeConte
     mempool_opts.estimator = nullptr;
     mempool_opts.check_ratio = 1;
     mempool_opts.require_standard = fuzzed_data_provider.ConsumeBool();
+
+    g_bypass_limits = fuzzed_data_provider.ConsumeBool();
 
     // ...and construct a CTxMemPool from it
     return CTxMemPool{mempool_opts};
@@ -420,7 +510,6 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
         std::set<CTransactionRef> added;
         auto txr = std::make_shared<TransactionsDelta>(removed, added);
         RegisterSharedValidationInterface(txr);
-        const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
 
         // When there are multiple transactions in the package, we call ProcessNewPackage(txs, test_accept=false)
         // and AcceptToMemoryPool(txs.back(), test_accept=true). When there is only 1 transaction, we might flip it
@@ -430,18 +519,8 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
         const auto result_package = WITH_LOCK(::cs_main,
                                     return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/!package_submit));
-        // If something went wrong due to a package-specific policy, it might not return a
-        // validation result for the transaction.
-        if (result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
-            auto it = result_package.m_tx_results.find(txs.back()->GetWitnessHash());
-            Assert(it != result_package.m_tx_results.end());
-            Assert(it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY ||
-                   it->second.m_result_type == MempoolAcceptResult::ResultType::DIFFERENT_WITNESS);
-        }
 
-        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/!single_submit));
+        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), g_bypass_limits, /*test_accept=*/!single_submit));
         const bool accepted = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
 
         SyncWithValidationInterfaceQueue();
@@ -459,8 +538,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 removed.erase(txs.back());
             }
         } else {
-            // This is empty if it fails early checks, or "full" if transactions are looked at deeper
-            Assert(result_package.m_tx_results.size() == txs.size() || result_package.m_tx_results.empty());
+            CheckPackageMempoolAcceptResult(txs, result_package, &tx_pool);
             if (result_package.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
                 for (const auto& tx : txs) {
                     removed.erase(tx);

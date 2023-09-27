@@ -171,9 +171,25 @@ static void CheckPackageMempoolAcceptResult(const std::vector<CTransactionRef>& 
                     // Nothing can be below mintxrelay fee, even in packages, unless bypass_limits is set
                     Assume(g_bypass_limits ||
                         tx_info.fee + tx_info.nFeeDelta >= mempool->m_min_relay_feerate.GetFee(GetVirtualTransactionSize(*tx, 0, 0)));
+
+                    // Check that mempool chains aren't too deep to be possible, with carveout wiggle room
+                    MockedTxPool::txiter entry_it = mempool->mapTx.find(tx->GetHash());
+                    MockedTxPool::setEntries descendants;
+                    mempool->CalculateDescendants(entry_it, descendants);
+                    Assume(descendants.size() <= (size_t) mempool->m_limits.descendant_count + 1);
+
+                    MockedTxPool::Limits carveout_limits = mempool->m_limits;
+                    // Transaction is already in chain, it's being double-counted; account for that in both count and size
+                    // This is not a tight bound.
+                    carveout_limits.descendant_count += 2;
+                    carveout_limits.descendant_size_vbytes += entry_it->GetTxSize() + EXTRA_DESCENDANT_TX_SIZE_LIMIT;
+                    if (carveout_limits.ancestor_count < 2) carveout_limits.ancestor_count = 2;
+                    const auto result{mempool->CalculateMemPoolAncestors(*entry_it, carveout_limits, true)};
+                    Assume(result);
                 } else {
                     Assume(tx == nullptr);
                 }
+
             }
         }
     }

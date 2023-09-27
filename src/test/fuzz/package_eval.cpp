@@ -129,6 +129,185 @@ CTxMemPool MakeMempool(FuzzedDataProvider& fuzzed_data_provider, const NodeConte
     return CTxMemPool{mempool_opts};
 }
 
+CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::set<COutPoint>& mempool_outpoints, std::set<COutPoint>& package_outpoints, std::map<COutPoint, CAmount>& outpoints_value, std::set<uint256>& txids_to_spend)
+{
+    CMutableTransaction tx_mut;
+    tx_mut.nVersion = CTransaction::CURRENT_VERSION;
+    tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+
+    size_t total_outpoints = mempool_outpoints.size() + package_outpoints.size();
+
+    Assume(total_outpoints > 0);
+
+    const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints);
+    const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints * 2);
+
+    // We want to allow double-spends, so these are re-added
+    std::vector<COutPoint> outpoints_to_restore;
+    std::vector<COutPoint> package_outpoints_to_restore;
+
+    CAmount amount_in{0};
+    for (size_t i = 0; i < (size_t) num_in; ++i) {
+        // Grab arbitrary outpoint set that is non-empty
+        bool is_package_outpoint = mempool_outpoints.empty() ||
+            (!package_outpoints.empty() && fuzzed_data_provider.ConsumeBool());
+        auto& outpoints = is_package_outpoint ? package_outpoints : mempool_outpoints;
+        assert(!outpoints.empty());
+
+        // Pop random outpoint
+        auto pop = outpoints.begin();
+        std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints.size() - 1));
+        const auto outpoint = *pop;
+        outpoints.erase(pop);
+        // no need to update or erase from outpoints_value
+        amount_in += outpoints_value.at(outpoint);
+
+        // Create input
+        const auto sequence = ConsumeSequence(fuzzed_data_provider);
+        const auto script_sig = CScript{};
+        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+        CTxIn in;
+        in.prevout = outpoint;
+        in.nSequence = sequence;
+        in.scriptSig = script_sig;
+        in.scriptWitness.stack = script_wit_stack;
+
+        tx_mut.vin.push_back(in);
+
+        if (!is_package_outpoint) {
+            outpoints_to_restore.emplace_back(outpoint);
+        } else {
+            package_outpoints_to_restore.emplace_back(outpoint);
+        }
+
+        txids_to_spend.erase(outpoint.hash);
+    }
+
+    // Duplicate an input
+    if (fuzzed_data_provider.ConsumeBool()) {
+        tx_mut.vin.push_back(tx_mut.vin.back());
+    }
+
+    // Refer to a non-existant input
+    if (fuzzed_data_provider.ConsumeBool()) {
+        tx_mut.vin.emplace_back();
+    }
+
+    const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
+    const auto amount_out = (amount_in - amount_fee) / num_out;
+    for (int i = 0; i < num_out; ++i) {
+        tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
+    }
+
+    // TODO vary transaction sizes to catch size-related issues
+    auto tx = MakeTransactionRef(tx_mut);
+    // Restore all spent outpoints to their spots to allow RBF attempts and in case of rejection
+    for (const auto& out : outpoints_to_restore) {
+        Assert(mempool_outpoints.insert(out).second);
+    }
+    for (const auto& out : package_outpoints_to_restore) {
+        Assert(package_outpoints.insert(out).second);
+    }
+    // We need newly-created values for the duration of this run
+    for (size_t i = 0; i < tx->vout.size(); ++i) {
+        outpoints_value[COutPoint(tx->GetHash(), i)] = tx->vout[i].nValue;
+    }
+    txids_to_spend.insert(tx->GetHash());
+    return tx;
+}
+
+CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::set<COutPoint>& mempool_outpoints, std::set<COutPoint>& package_outpoints, std::map<COutPoint, CAmount>& outpoints_value, std::set<uint256>& txids_to_spend)
+{
+    CMutableTransaction tx_mut;
+    tx_mut.nVersion = CTransaction::CURRENT_VERSION;
+    tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+
+    size_t total_outpoints = mempool_outpoints.size() + package_outpoints.size();
+
+    // We will add more inputs later from txids_to_spend
+    const auto num_in = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints);
+    const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, total_outpoints * 2);
+
+    // We want to allow double-spends, so these are re-added
+    std::vector<COutPoint> outpoints_to_restore;
+    std::vector<COutPoint> package_outpoints_to_restore;
+
+    CAmount amount_in{0};
+    for (size_t i = 0; i < (size_t) num_in; ++i) {
+        // Grab arbitrary outpoint set that is non-empty
+        bool is_package_outpoint = mempool_outpoints.empty() ||
+            (!package_outpoints.empty() && fuzzed_data_provider.ConsumeBool());
+        auto& outpoints = is_package_outpoint ? package_outpoints : mempool_outpoints;
+        assert(!outpoints.empty());
+
+        // Pop random outpoint
+        auto pop = outpoints.begin();
+        std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints.size() - 1));
+        const auto outpoint = *pop;
+        outpoints.erase(pop);
+        // no need to update or erase from outpoints_value
+        amount_in += outpoints_value.at(outpoint);
+
+        // Create input
+        const auto sequence = ConsumeSequence(fuzzed_data_provider);
+        const auto script_sig = CScript{};
+        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+
+        CTxIn in;
+        in.prevout = outpoint;
+        in.nSequence = sequence;
+        in.scriptSig = script_sig;
+        in.scriptWitness.stack = script_wit_stack;
+
+        tx_mut.vin.push_back(in);
+
+        if (!is_package_outpoint) {
+            outpoints_to_restore.emplace_back(outpoint);
+        }
+
+        txids_to_spend.erase(outpoint.hash);
+    }
+
+    // Now try to ensure this is a child tx
+    for (const auto txid_to_spend : txids_to_spend) {
+
+        // We know these transactions have no spends yet, so just spend index 0
+        const auto outpoint = COutPoint(txid_to_spend, 0);
+
+        // Create input
+        const auto sequence = ConsumeSequence(fuzzed_data_provider);
+        const auto script_sig = CScript{};
+        const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+        CTxIn in;
+        in.prevout = outpoint;
+        in.nSequence = sequence;
+        in.scriptSig = script_sig;
+        in.scriptWitness.stack = script_wit_stack;
+
+        tx_mut.vin.push_back(in);
+    }
+
+    const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
+    const auto amount_out = (amount_in - amount_fee) / num_out;
+    for (int i = 0; i < num_out; ++i) {
+        tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
+    }
+    // TODO vary transaction sizes to catch size-related issues
+    auto tx = MakeTransactionRef(tx_mut);
+
+    // Restore all spent outpoints to their spots to allow RBF attempts and in case of rejection
+    for (const auto& out : outpoints_to_restore) {
+        Assert(mempool_outpoints.insert(out).second);
+    }
+
+    // We need newly-created values for the duration of this run
+    for (size_t i = 0; i < tx->vout.size(); ++i) {
+        outpoints_value[COutPoint(tx->GetHash(), i)] = tx->vout[i].nValue;
+    }
+    return tx;
+}
+
+
 FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 {
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
@@ -162,71 +341,17 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
         // Make packages of 1-to-26 transactions
         const auto num_txs = (size_t) fuzzed_data_provider.ConsumeIntegralInRange<int>(1, 26);
         std::set<COutPoint> package_outpoints;
+        std::set<uint256> txids_to_spend;
         while (txs.size() < num_txs) {
 
-            // Last transaction in a package needs to be a child of parents to get further in validation
-            // so the last transaction to be generated(in a >1 package) must spend all package-made outputs
-            // Note that this test currently only spends package outputs in last transaction.
-            bool last_tx = num_txs > 1 && txs.size() == num_txs - 1;
+            // Last transaction in a package needs to be a descendant of ancestors to get further in validation
+            // so the last transaction to be generated(in a >1 package) must spend additional outputs potentially.
+            // We will make sure of this by making sure each non-child transaction has at least one spent output.
+            bool child_tx = fuzzed_data_provider.ConsumeBool() && num_txs > 1 && txs.size() == num_txs - 1;
 
-            // Create transaction to add to the mempool
-            const CTransactionRef tx = [&] {
-                CMutableTransaction tx_mut;
-                tx_mut.nVersion = CTransaction::CURRENT_VERSION;
-                tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
-                // Last tx will sweep all outpoints in package
-                const auto num_in = last_tx ? package_outpoints.size()  : fuzzed_data_provider.ConsumeIntegralInRange<int>(1, mempool_outpoints.size());
-                const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, mempool_outpoints.size() * 2);
+            const CTransactionRef tx = child_tx ? CreateChildTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend) :
+                CreatePackageTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend);
 
-                auto& outpoints = last_tx ? package_outpoints : mempool_outpoints;
-
-                Assert(!outpoints.empty());
-
-                CAmount amount_in{0};
-                for (size_t i = 0; i < num_in; ++i) {
-                    // Pop random outpoint
-                    auto pop = outpoints.begin();
-                    std::advance(pop, fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, outpoints.size() - 1));
-                    const auto outpoint = *pop;
-                    outpoints.erase(pop);
-                    // no need to update or erase from outpoints_value
-                    amount_in += outpoints_value.at(outpoint);
-
-                    // Create input
-                    const auto sequence = ConsumeSequence(fuzzed_data_provider);
-                    const auto script_sig = CScript{};
-                    const auto script_wit_stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
-                    CTxIn in;
-                    in.prevout = outpoint;
-                    in.nSequence = sequence;
-                    in.scriptSig = script_sig;
-                    in.scriptWitness.stack = script_wit_stack;
-
-                    tx_mut.vin.push_back(in);
-                }
-                const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
-                const auto amount_out = (amount_in - amount_fee) / num_out;
-                for (int i = 0; i < num_out; ++i) {
-                    tx_mut.vout.emplace_back(amount_out, P2WSH_OP_TRUE);
-                }
-                // TODO vary transaction sizes to catch size-related issues
-                auto tx = MakeTransactionRef(tx_mut);
-                // Restore previously removed outpoints, except in-package outpoints
-                if (!last_tx) {
-                    for (const auto& in : tx->vin) {
-                        Assert(outpoints.insert(in.prevout).second);
-                    }
-                    // Cache the in-package outpoints being made
-                    for (size_t i = 0; i < tx->vout.size(); ++i) {
-                        package_outpoints.emplace(tx->GetHash(), i);
-                    }
-                }
-                // We need newly-created values for the duration of this run
-                for (size_t i = 0; i < tx->vout.size(); ++i) {
-                    outpoints_value[COutPoint(tx->GetHash(), i)] = tx->vout[i].nValue;
-                }
-                return tx;
-            }();
             txs.push_back(tx);
         }
 

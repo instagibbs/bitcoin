@@ -53,10 +53,10 @@ void initialize_tx_pool()
 }
 
 struct OutpointsUpdater final : public CValidationInterface {
-    std::set<COutPoint>& m_outpoints_rbf;
+    std::set<COutPoint>& m_mempool_outpoints;
 
     explicit OutpointsUpdater(std::set<COutPoint>& r)
-        : m_outpoints_rbf{r} {}
+        : m_mempool_outpoints{r} {}
 
     void TransactionAddedToMempool(const CTransactionRef& tx, uint64_t /* mempool_sequence */) override
     {
@@ -64,7 +64,7 @@ struct OutpointsUpdater final : public CValidationInterface {
 
         // outputs from this tx can now be spent
         for (uint32_t index{0}; index < tx->vout.size(); ++index) {
-            m_outpoints_rbf.insert(COutPoint{tx->GetHash(), index});
+            m_mempool_outpoints.insert(COutPoint{tx->GetHash(), index});
         }
     }
 
@@ -73,11 +73,11 @@ struct OutpointsUpdater final : public CValidationInterface {
         // outpoints spent by this tx are now available
         for (const auto& input : tx->vin) {
             // Could already exist if this was a replacement
-            m_outpoints_rbf.insert(input.prevout);
+            m_mempool_outpoints.insert(input.prevout);
         }
         // outpoints created by this tx no longer exist
         for (uint32_t index{0}; index < tx->vout.size(); ++index) {
-            m_outpoints_rbf.erase(COutPoint{tx->GetHash(), index});
+            m_mempool_outpoints.erase(COutPoint{tx->GetHash(), index});
         }
     }
 };
@@ -166,14 +166,14 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
     MockTime(fuzzed_data_provider, chainstate);
 
     // All RBF-spendable outpoints outside of the unsubmitted package
-    std::set<COutPoint> outpoints_rbf;
+    std::set<COutPoint> mempool_outpoints;
     std::map<COutPoint, CAmount> outpoints_value;
     for (const auto& outpoint : g_outpoints_coinbase_init_mature) {
-        Assert(outpoints_rbf.insert(outpoint).second);
+        Assert(mempool_outpoints.insert(outpoint).second);
         outpoints_value[outpoint] = 50 * COIN;
     }
 
-    auto outpoints_updater = std::make_shared<OutpointsUpdater>(outpoints_rbf);
+    auto outpoints_updater = std::make_shared<OutpointsUpdater>(mempool_outpoints);
     RegisterSharedValidationInterface(outpoints_updater);
 
     CTxMemPool tx_pool_{MakeMempool(fuzzed_data_provider, node)};
@@ -183,7 +183,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
     LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300)
     {
-        Assert(!outpoints_rbf.empty());
+        Assert(!mempool_outpoints.empty());
 
         std::vector<CTransactionRef> txs;
         std::map<uint256, CTransactionRef> wtxid_to_tx;
@@ -205,10 +205,10 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 tx_mut.nVersion = CTransaction::CURRENT_VERSION;
                 tx_mut.nLockTime = fuzzed_data_provider.ConsumeBool() ? 0 : fuzzed_data_provider.ConsumeIntegral<uint32_t>();
                 // Last tx will sweep all outpoints in package
-                const auto num_in = last_tx ? package_outpoints.size()  : fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size());
-                const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, outpoints_rbf.size() * 2);
+                const auto num_in = last_tx ? package_outpoints.size()  : fuzzed_data_provider.ConsumeIntegralInRange<int>(1, mempool_outpoints.size());
+                const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<int>(1, mempool_outpoints.size() * 2);
 
-                auto& outpoints = last_tx ? package_outpoints : outpoints_rbf;
+                auto& outpoints = last_tx ? package_outpoints : mempool_outpoints;
 
                 Assert(!outpoints.empty());
 
@@ -270,7 +270,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
         if (fuzzed_data_provider.ConsumeBool()) {
             const auto& txid = fuzzed_data_provider.ConsumeBool() ?
                                    txs.back()->GetHash() :
-                                   PickValue(fuzzed_data_provider, outpoints_rbf).hash;
+                                   PickValue(fuzzed_data_provider, mempool_outpoints).hash;
             const auto delta = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-50 * COIN, +50 * COIN);
             tx_pool.PrioritiseTransaction(txid, delta);
         }

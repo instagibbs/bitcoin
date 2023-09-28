@@ -97,7 +97,7 @@ struct OutpointsUpdater final : public CValidationInterface {
     }
 };
 
-static void CheckPackageMempoolAcceptResult(const std::vector<CTransactionRef>& txns, const PackageMempoolAcceptResult& result, const CTxMemPool* mempool)
+static void CheckPackageMempoolAcceptResult(const std::vector<CTransactionRef>& txns, const std::set<uint256> prio_set, const PackageMempoolAcceptResult& result, const CTxMemPool* mempool)
 {
 
     // PCKG_POLICY gives very little back; early exit
@@ -168,8 +168,9 @@ static void CheckPackageMempoolAcceptResult(const std::vector<CTransactionRef>& 
                     // Not expired
                     Assume(tx_info.m_time >= GetTime<std::chrono::seconds>() - mempool->m_expiry);
 
-                    // Nothing can be below mintxrelay fee, even in packages, unless bypass_limits is set
-                    Assume(g_bypass_limits ||
+                    // Nothing can be below mintxrelay fee, even in packages, unless bypass_limits is set, or it has been prioritised
+                    // at some point (may have entered prioritised then deprioritised)
+                    Assume(g_bypass_limits || prio_set.count(tx->GetHash()) > 0 ||
                         tx_info.fee + tx_info.nFeeDelta >= mempool->m_min_relay_feerate.GetFee(GetVirtualTransactionSize(*tx, 0, 0)));
 
                     // Check that mempool chains aren't too deep to be possible, with carveout wiggle room
@@ -481,6 +482,9 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
     chainstate.SetMempool(&tx_pool);
 
+    // If something is ever prioritised, we cannot reason as much about it during invariant checks
+    std::set<uint256> prio_set;
+
     LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300)
     {
         Assert(!mempool_outpoints.empty());
@@ -518,6 +522,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                                    txs.back()->GetHash() :
                                    PickValue(fuzzed_data_provider, mempool_outpoints).hash;
             const auto delta = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-50 * COIN, +50 * COIN);
+            prio_set.insert(txid);
             tx_pool.PrioritiseTransaction(txid, delta);
         }
 
@@ -554,7 +559,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 removed.erase(txs.back());
             }
         } else {
-            CheckPackageMempoolAcceptResult(txs, result_package, &tx_pool);
+            CheckPackageMempoolAcceptResult(txs, prio_set, result_package, &tx_pool);
             if (result_package.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
                 for (const auto& tx : txs) {
                     removed.erase(tx);

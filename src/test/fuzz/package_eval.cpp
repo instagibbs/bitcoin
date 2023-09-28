@@ -330,6 +330,11 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 
     MockTime(fuzzed_data_provider, chainstate);
 
+    const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
+
+    // If something is ever prioritised, we cannot reason as much about it during invariant checks
+    std::set<uint256> prio_set;
+
     // All RBF-spendable outpoints outside of the unsubmitted package
     std::set<COutPoint> mempool_outpoints;
     std::map<COutPoint, CAmount> outpoints_value;
@@ -381,13 +386,13 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                                    PickValue(fuzzed_data_provider, mempool_outpoints).hash;
             const auto delta = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-50 * COIN, +50 * COIN);
             tx_pool.PrioritiseTransaction(txid, delta);
+            prio_set.insert(txid);
         }
 
         // Remember all added transactions
         std::set<CTransactionRef> added;
         auto txr = std::make_shared<TransactionsDelta>(added);
         RegisterSharedValidationInterface(txr);
-        const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
 
         // When there are multiple transactions in the package, we call ProcessNewPackage(txs, test_accept=false)
         // and AcceptToMemoryPool(txs.back(), test_accept=true). When there is only 1 transaction, we might flip it
@@ -421,6 +426,21 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
                 const bool expect_valid{result_package.m_state.IsValid()};
                 std::string placeholder_str;
                 Assert(CheckPackageMempoolAcceptResult(txs, result_package, expect_valid, nullptr, placeholder_str));
+
+                // This check requires more context, given separately
+                for (const auto& tx : txs) {
+                    const auto txid = tx->GetHash();
+                    const TxMempoolInfo tx_info = tx_pool.info(GenTxid::Txid(txid));
+                    const bool in_mempool = tx_pool.exists(GenTxid::Txid(txid));
+                    // Nothing can be below mintxrelay fee, even in packages, unless bypass_limits is set
+                    // or it had been prioritised earlier, entered into the mempool, then deprioritised.
+                    // We disallow ever prioritising for this check for now.
+                    if (in_mempool && !bypass_limits && prio_set.count(txid) == 0 &&
+                        tx_info.fee < tx_pool.m_min_relay_feerate.GetFee(GetVirtualTransactionSize(*tx, 0, 0))) {
+                        Assert(tx_info.nFeeDelta == 0);
+                        Assert(false);
+                    }
+                }
             }
         }
     }

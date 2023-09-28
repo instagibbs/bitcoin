@@ -107,9 +107,10 @@ bool CheckPackageMempoolAcceptResult(const Package& txns, const PackageMempoolAc
         }
 
         if (mempool) {
+            const bool in_mempool = mempool->exists(GenTxid::Txid(tx->GetHash()));
             // The tx by txid should be in the mempool iff the result was not INVALID.
             const bool txid_in_mempool{atmp_result.m_result_type != MempoolAcceptResult::ResultType::INVALID};
-            if (mempool->exists(GenTxid::Txid(tx->GetHash())) != txid_in_mempool) {
+            if (in_mempool != txid_in_mempool) {
                 return Err(s, strprintf("tx %s should %sbe in mempool", wtxid.ToString(), txid_in_mempool ? "" : "not "));
             }
             // Additionally, if the result was DIFFERENT_WITNESS, we shouldn't be able to find the tx in mempool by wtxid.
@@ -117,6 +118,54 @@ bool CheckPackageMempoolAcceptResult(const Package& txns, const PackageMempoolAc
                 if (mempool->exists(GenTxid::Wtxid(wtxid))) {
                     return Err(s, strprintf("wtxid %s should not be in mempool", wtxid.ToString()));
                 }
+            }
+
+            const CAmount delta_amt = WITH_LOCK(mempool->cs, return mempool->mapDeltas.find(tx->GetHash()) != mempool->mapDeltas.end() ? mempool->mapDeltas.at(tx->GetHash()) : 0);
+            const TxMempoolInfo tx_info = mempool->info(GenTxid::Wtxid(wtxid));
+
+            // Currently in the mempool
+            const auto tx = tx_info.tx.get();
+            if (in_mempool) {
+
+                if (!tx) {
+                    return Err(s, strprintf("transaction %s is missing from info when in mempool", wtxid.ToString()));
+                }
+
+                if (delta_amt != tx_info.nFeeDelta) {
+                    return Err(s, strprintf("transaction %s nFeeDelta doesn't match mapDeltas", wtxid.ToString()));
+                }
+
+                // Note: Won't catch sigops adjusted vsize issues
+                if (GetTransactionWeight(*tx) > MAX_STANDARD_TX_WEIGHT) {
+                    return Err(s, strprintf("transaction %s too large in weight to relay", wtxid.ToString()));
+                }
+
+                // Not expired
+                if(tx_info.m_time < GetTime<std::chrono::seconds>() - mempool->m_expiry) {
+                    return Err(s, strprintf("transaction %s is expired yet still in mempool", wtxid.ToString()));
+                }
+
+                // Check that mempool chains aren't too deep to be possible, with carveout wiggle room
+                CTxMemPool::txiter entry_it = WITH_LOCK(mempool->cs, return mempool->mapTx.find(tx->GetHash()));
+                CTxMemPool::setEntries descendants;
+                WITH_LOCK(mempool->cs, mempool->CalculateDescendants(entry_it, descendants));
+                if (descendants.size() > (size_t) mempool->m_limits.descendant_count + 1) {
+                    return Err(s, strprintf("transaction chain has too many descendants", wtxid.ToString()));
+                }
+
+                CTxMemPool::Limits carveout_limits = mempool->m_limits;
+                // Transaction is already in chain, it's being double-counted; account for that in both count and size
+                // This is not a tight bound.
+                carveout_limits.descendant_count += 2;
+                carveout_limits.descendant_size_vbytes += entry_it->GetTxSize() + EXTRA_DESCENDANT_TX_SIZE_LIMIT;
+                if (carveout_limits.ancestor_count < 2) carveout_limits.ancestor_count = 2;
+                const auto result{WITH_LOCK(mempool->cs, return mempool->CalculateMemPoolAncestors(*entry_it, carveout_limits, true))};
+                if (!result) {
+                    return Err(s, strprintf("transaction chain has too many ancestors", wtxid.ToString()));
+                }
+
+            } else if (tx != nullptr) {
+                return Err(s, strprintf("transaction %s information available even though not in mempool", wtxid.ToString()));
             }
         }
     }

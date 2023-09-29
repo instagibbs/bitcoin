@@ -95,7 +95,7 @@ Package AncestorPackage::FilteredTxns() const
 {
     Package result;
     for (const auto entryref : m_txns) {
-        if (!entryref.get().skip && !entryref.get().dangles) result.push_back(entryref.get().tx);
+        if (!entryref.get().skip) result.push_back(entryref.get().tx);
     }
     return result;
 }
@@ -105,12 +105,11 @@ std::optional<std::vector<CTransactionRef>> AncestorPackage::FilteredAncestorSet
     const auto& entry_it = m_txid_to_entry.find(tx->GetHash());
     if (entry_it == m_txid_to_entry.end()) return std::nullopt;
     const auto& entry = entry_it->second;
-    if (entry.dangles) return std::nullopt;
+    if (entry.skip) return std::nullopt;
     std::vector<CTransactionRef> result;
     result.reserve(entry.ancestor_subset.size());
     for (const auto entryref : m_txns) {
         if (!entryref.get().skip && entry.ancestor_subset.count(entryref.get().tx->GetHash()) > 0) {
-            Assume(!entryref.get().dangles);
             result.push_back(entryref.get().tx);
         }
     }
@@ -131,13 +130,12 @@ std::optional<std::pair<CAmount, int64_t>> AncestorPackage::FilteredAncestorFeeA
     const auto& entry_it = m_txid_to_entry.find(tx->GetHash());
     if (entry_it == m_txid_to_entry.end()) return std::nullopt;
     const auto& entry = entry_it->second;
-    if (entry.dangles || !entry.fee.has_value() || !entry.vsize.has_value()) return std::nullopt;
+    if (entry.skip || !entry.fee.has_value() || !entry.vsize.has_value()) return std::nullopt;
     CAmount total_fee{0};
     int64_t total_vsize{0};
     for (const auto& txid : entry.ancestor_subset) {
         const auto& anc_entry = m_txid_to_entry.at(txid);
-        Assume(!anc_entry.dangles);
-        if (!anc_entry.skip && !anc_entry.dangles) {
+        if (!anc_entry.skip) {
             // If tx has fee and vsize, then any of its non-skipped ancestors should too.
             if (anc_entry.fee.has_value() && anc_entry.vsize.has_value()) {
                 total_fee += anc_entry.fee.value();
@@ -162,7 +160,6 @@ void AncestorPackage::SkipWithDescendants(const CTransactionRef& transaction)
     m_txid_to_entry.at(transaction->GetHash()).skip = true;
     for (const auto& descendant_txid : m_txid_to_entry.at(transaction->GetHash()).descendant_subset) {
         m_txid_to_entry.at(descendant_txid).skip = true;
-        m_txid_to_entry.at(descendant_txid).dangles = true;
     }
 }
 
@@ -178,7 +175,7 @@ bool AncestorPackage::LinearizeWithFees()
     if (!m_ancestor_package_shaped) return false;
     // All fee and vsize information for non-skipped transactions must be available, otherwise linearization cannot be done.
     if (!std::all_of(m_txid_to_entry.cbegin(), m_txid_to_entry.cend(),
-        [](const auto& entry) { return entry.second.skip || entry.second.dangles ||
+        [](const auto& entry) { return entry.second.skip ||
                                  (entry.second.fee.has_value() && entry.second.vsize.has_value()); })) {
         return false;
     }
@@ -199,12 +196,12 @@ bool AncestorPackage::LinearizeWithFees()
             int64_t{0}, [&](int64_t sum, const auto& anc) { return sum + *m_txid_to_entry.at(anc->GetHash()).vsize; });
         miniminer_info.push_back(node::MiniMinerMempoolEntry{*entry.fee, ancestor_subset_fees, *entry.vsize, ancestor_subset_vsize, entry.tx});
 
-        // Provide descendant cache, but filter for any transactions that dangle or skip
+        // Provide descendant cache, but filter for any transactions that skip
         std::set<uint256>& descendant_cache_to_populate = descendant_caches.try_emplace(txid).first->second;
         for (const auto& txid : entry.descendant_subset) {
             if (!Assume(m_txid_to_entry.count(txid) > 0)) continue;
             const auto& entry = m_txid_to_entry.at(txid);
-            if (!entry.dangles && !entry.skip) {
+            if (!entry.skip) {
                 descendant_cache_to_populate.insert(txid);
             }
         }
@@ -220,7 +217,7 @@ bool AncestorPackage::LinearizeWithFees()
     std::vector<std::reference_wrapper<PackageEntry>> txns_copy(m_txns);
     std::sort(m_txns.begin(), m_txns.end(), CompareEntry());
     Assume(std::all_of(m_txid_to_entry.cbegin(), m_txid_to_entry.cend(), [](const auto& entry) {
-        bool should_have_sequence = !entry.second.skip && !entry.second.dangles;
+        bool should_have_sequence = !entry.second.skip;
         return entry.second.mining_sequence.has_value() == should_have_sequence;
     }));
     if (!Assume(IsSorted(Txns()))) {

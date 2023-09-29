@@ -33,13 +33,9 @@ class AncestorPackage
 
     struct PackageEntry {
         /** Whether this transaction should be skipped in FilteredAncestorSet() and linearization by
-         * fees, i.e. because it is already in the mempool.
-         * This value can be set to true by calling Skip(). */
+         * fees, e.g., because it is already in the mempool, or has been rejected for un-retryable reasons.
+         * This value can be set to true by calling Skip() or SkipWithDescendants(). */
         bool skip{false};
-        /** Whether this transaction "dangles," i.e. we know nothing about it it because it is
-         * missing inputs or depends on another transaction that is missing inputs.
-         * This value can be set to true by calling SkipWithDescendants(). */
-        bool dangles{false};
         /** This value starts as std::nullopt when we don't have any fee information yet. It can be
          * updated by calling LinearizeWithFees() if this entry isn't being skipped. */
         std::optional<uint32_t> mining_sequence;
@@ -119,11 +115,11 @@ public:
     Package FilteredTxns() const;
 
     /** Get the sorted, filtered ancestor subpackage for a tx. Includes the tx. Does not
-     * include skipped ancestors. If this transaction dangles, returns std::nullopt. */
+     * include skipped ancestors. If this transaction itself is skipped, returns std::nullopt. */
     std::optional<std::vector<CTransactionRef>> FilteredAncestorSet(const CTransactionRef& tx) const;
 
     /** Get the total fee and vsize of the ancestor subpackage for a tx. Includes the tx. Does not
-     * include skipped ancestors. If this transaction dangles or fee and vsize are
+     * include skipped ancestors. If this transaction is skipped or fee and vsize are
      * unavailable, returns std::nullopt. This result is always consistent with FilteredAncestorSet(). */
     std::optional<std::pair<CAmount, int64_t>> FilteredAncestorFeeAndVsize(const CTransactionRef& tx) const;
 

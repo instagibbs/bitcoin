@@ -229,8 +229,14 @@ BOOST_FIXTURE_TEST_CASE(ancestorpackage, TestChain100Setup)
     m_node.mempool->CalculateDescendants(m_node.mempool->GetIter(tx_20->GetHash()).value(), descendants_20);
     packageified.Skip(tx_20);
     for (const auto& desc_iter : descendants_20) {
-        BOOST_CHECK_EQUAL(packageified.FilteredAncestorSet(m_node.mempool->info(GenTxid::Txid(desc_iter->GetTx().GetHash())).tx)->size(),
-                          desc_iter->GetCountWithAncestors() - 1);
+        const auto filtered_set = packageified.FilteredAncestorSet(m_node.mempool->info(GenTxid::Txid(desc_iter->GetTx().GetHash())).tx);
+        if (!filtered_set) {
+            // If it's itself, it returns nullopt because we marked it as skipped
+            BOOST_CHECK_EQUAL(desc_iter->GetTx().GetHash(), tx_20->GetHash());
+        } else {
+            BOOST_CHECK_EQUAL(filtered_set->size(),
+                              desc_iter->GetCountWithAncestors() - 1);
+        }
     }
     // SkipWithDescendants the 40th transaction. FilteredAncestorSet() for all of its descendants should return std::nullopt.
     const auto& tx_40{sorted_transactions[40]};

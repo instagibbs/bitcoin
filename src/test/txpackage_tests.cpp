@@ -109,6 +109,92 @@ BOOST_FIXTURE_TEST_CASE(package_sanitization_tests, TestChain100Setup)
     package_with_dup_tx.emplace_back(create_placeholder_tx(1, 1));
     BOOST_CHECK(IsConsistentPackage(package_with_dup_tx));
 }
+BOOST_FIXTURE_TEST_CASE(calculate_package_ancestors, TestChain100Setup)
+{
+    CKey placeholder_key;
+    placeholder_key.MakeNewKey(true);
+    CScript spk = GetScriptForDestination(PKHash(placeholder_key.GetPubKey()));
+    FastRandomContext det_rand{true};
+    // Basic chain of 25 transactions
+    {
+        Package package;
+        CTransactionRef last_tx = m_coinbase_txns[0];
+        CKey signing_key = coinbaseKey;
+        for (int i{0}; i < 24; ++i) {
+            auto tx = MakeTransactionRef(CreateValidMempoolTransaction(last_tx, 0, 0, signing_key, spk, CAmount((49-i) * COIN), false));
+            package.emplace_back(tx);
+            last_tx = tx;
+            if (i == 0) signing_key = placeholder_key;
+        }
+
+        Package package_copy = package;
+        Shuffle(package_copy.begin(), package_copy.end(), det_rand);
+
+        const auto ancestor_map{CalculateInPackageAncestors(package_copy)};
+
+        BOOST_CHECK_EQUAL(ancestor_map.size(), package.size());
+        std::set<Txid> txids_of_chain_so_far;
+        for (unsigned int i{0}; i < package.size(); ++i) {
+            const auto& tx = package.at(i);
+            txids_of_chain_so_far.insert(tx->GetHash());
+            BOOST_CHECK(ancestor_map.count(tx->GetHash()) > 0);
+            BOOST_CHECK(ancestor_map.at(tx->GetHash()) == txids_of_chain_so_far);
+        }
+    }
+
+    // 24 Parents and 1 Child
+    {
+        Package package;
+        CMutableTransaction child;
+        for (int parent_idx{0}; parent_idx < 24; ++parent_idx) {
+            auto parent = MakeTransactionRef(CreateValidMempoolTransaction(m_coinbase_txns[parent_idx + 1],
+                                             0, 0, coinbaseKey, spk, CAmount(49 * COIN), false));
+            package.emplace_back(parent);
+            child.vin.emplace_back(parent->GetHash(), 0);
+        }
+        child.vout.emplace_back(49 * COIN * 24, spk);
+        package.emplace_back(MakeTransactionRef(child));
+
+        Package package_copy(package);
+        Shuffle(package_copy.begin(), package_copy.end(), det_rand);
+
+        const auto ancestor_map{CalculateInPackageAncestors(package_copy)};
+
+        std::set<Txid> txids_all;
+        for (unsigned int i{0}; i < package.size() - 1; ++i) {
+            std::set<Txid> txid_self;
+            const auto& tx = package.at(i);
+            txid_self.insert(tx->GetHash());
+            txids_all.insert(tx->GetHash());
+            BOOST_CHECK(ancestor_map.at(tx->GetHash()) == txid_self);
+        }
+        txids_all.insert(package.back()->GetHash());
+        BOOST_CHECK(ancestor_map.at(package.back()->GetHash()) == txids_all);
+    }
+
+    // Empty package
+    {
+        Package package_empty;
+        BOOST_CHECK(CalculateInPackageAncestors(package_empty).empty());
+    }
+
+    // Package with duplicate transactions.
+    {
+        Package package_duplicates({m_coinbase_txns.at(0), m_coinbase_txns.at(0)});
+        BOOST_CHECK(CalculateInPackageAncestors(package_duplicates).empty());
+    }
+
+    // Package with conflicts.
+    {
+        Package package_conflicts;
+        // Both package txns spend the output of coinbase tx 0, so they conflict with each other.
+        package_conflicts.emplace_back(MakeTransactionRef(CreateValidMempoolTransaction(m_coinbase_txns.at(0),
+                                         0, 0, coinbaseKey, spk, CAmount(49 * COIN), false)));
+        package_conflicts.emplace_back(MakeTransactionRef(CreateValidMempoolTransaction(m_coinbase_txns.at(0),
+                                         0, 0, coinbaseKey, spk, CAmount(40 * COIN), false)));
+        BOOST_CHECK(CalculateInPackageAncestors(package_conflicts).empty());
+    }
+}
 
 BOOST_FIXTURE_TEST_CASE(package_validation_tests, TestChain100Setup)
 {

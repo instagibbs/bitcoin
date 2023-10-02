@@ -88,4 +88,8 @@ bool IsChildWithParents(const Package& package);
  * other (the package is a "tree").
  */
 bool IsChildWithParentsTree(const Package& package);
+
+/** Construct a map from the txid of a transaction to the txids of its in-package ancestor set,
+ * including itself. Input must be IsConsistentPackage, otherwise this returns an empty map. */
+std::map<Txid, std::set<Txid>> CalculateInPackageAncestors(const Package& package);
 #endif // BITCOIN_POLICY_PACKAGES_H

@@ -147,3 +147,78 @@ bool IsChildWithParentsTree(const Package& package)
         return true;
     });
 }
+
+// Calculates curr_tx's in-package ancestor set. If the tx spends another tx in the package, calls
+// visit() for that transaction first, since any transaction's ancestor set includes its parents'
+// ancestor sets. Transaction dependency cycles are not possible without breaking sha256 and
+// duplicate transactions were already checked, so this won't recurse infinitely.  After this
+// function returns, curr_tx's entry in ancestor_set_map is guaranteed to contain a non-empty
+// ancestor_subset.
+void visit(const CTransactionRef& curr_tx,
+           const std::map<Txid, CTransactionRef>& txid_to_tx,
+           std::map<Txid, std::set<Txid>>& ancestor_set_map)
+{
+    const Txid& curr_txid = curr_tx->GetHash();
+    // Already visited? Return now.
+    auto curr_result_iter = ancestor_set_map.find(curr_txid);
+    if (curr_result_iter == ancestor_set_map.end()) return;
+
+    std::set<Txid> my_ancestors;
+    my_ancestors.insert(curr_txid);
+
+    // Look up in-package parents via prevouts.
+    for (const auto& input : curr_tx->vin) {
+        const auto& parent_txid = Txid::FromUint256(input.prevout.hash);
+
+        // Not a package tx? Skip.
+        auto iter_parent_in_map = ancestor_set_map.find(parent_txid);
+        if (iter_parent_in_map == ancestor_set_map.end()) continue;
+
+        // Recursively populate the parent first.
+        if (iter_parent_in_map->second.empty()) {
+            visit(txid_to_tx.at(parent_txid), txid_to_tx, ancestor_set_map);
+        }
+
+        // The ancestors of my parents are also my ancestors.
+        const auto& parent_ancestor_set = ancestor_set_map.at(parent_txid);
+        Assume(!parent_ancestor_set.empty());
+        // This recursive call should not have included ourselves; it should be impossible for this
+        // tx to be both an ancestor and a descendant of us.
+        Assume(ancestor_set_map.at(curr_txid).empty());
+        my_ancestors.insert(parent_ancestor_set.cbegin(), parent_ancestor_set.cend());
+    }
+    curr_result_iter->second = std::move(my_ancestors);
+}
+
+std::map<Txid, std::set<Txid>> CalculateInPackageAncestors(const Package& package)
+{
+    // Txid to tx for quick lookup
+    std::map<Txid, CTransactionRef> txid_to_tx;
+    // Results we will return
+    std::map<Txid, std::set<Txid>> result;
+
+    // We cannot deal with duplicates and conflicts. Return an empty map.
+    if (!IsConsistentPackage(package)) return result;
+
+    // Populate m_txid_to_entry for quick lookup.
+    for (const auto& tx : package) {
+        // If duplicate Txids exist, we cannot continue. Just return an empty map.
+        if (!Assume(txid_to_tx.emplace(tx->GetHash(), tx).second)) return result;
+    }
+
+    // Add an empty set for each transaction to the results map.
+    for (const auto& tx : package) {
+        std::set<Txid> empty;
+        result.emplace(tx->GetHash(), empty);
+    }
+
+    // For each tx from beginning to end, populate the ancestor set map. This does a recursive DFS
+    // by tracing input prevouts; best-case runtime is when the list is already sorted.
+    for (const auto& tx : package) {
+        if (result.at(tx->GetHash()).empty()) {
+            visit(tx, txid_to_tx, result);
+        }
+    }
+
+    return result;
+}

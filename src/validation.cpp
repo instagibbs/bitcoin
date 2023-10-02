@@ -1490,7 +1490,10 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
                         MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), {tx->GetWitnessHash()}));
                     break;
                 }
-                case TxValidationResult::TX_MISSING_INPUTS: case TxValidationResult::TX_CONFLICT:
+                case TxValidationResult::TX_MISSING_INPUTS:
+                case TxValidationResult::TX_CONFLICT:
+                case TxValidationResult::TX_PREMATURE_SPEND:
+                case TxValidationResult::TX_MEMPOOL_POLICY:
                 {
                     // If there is a conflict that we won't be able to resolve, or we have no
                     // in-package dependencies but are still missing inputs, we know all of the
@@ -1499,6 +1502,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
                     // - a package parent already confirmed for us (txn-already-known),
                     // - a package parent already confirmed for our peer so they didn't include it
                     //   in the ancestor package (bad-txns-inputs-missingorspent).
+                    // - a timelock doesn't appear mature to us, but is to peer
                     linearized_package.SkipWithDescendants(tx);
                     individual_results_nonfinal.emplace(wtxid, MempoolAcceptResult::Failure(ws.m_state));
                     break;

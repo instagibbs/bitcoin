@@ -183,6 +183,22 @@ void TxOrphanage::EraseForPeer(NodeId peer)
     if (!Assume(m_peer_bytes_used.count(peer) == 0)) m_peer_bytes_used.erase(peer);
 }
 
+void TxOrphanage::remove_work_from_all_sets_nolock(const uint256& txid)
+{
+    AssertLockHeld(m_mutex);
+    for (auto& [nodeid, work_set]: m_peer_work_set) {
+        if (work_set.count(txid) > 0) {
+            work_set.erase(txid);
+        }
+    }
+}
+
+void TxOrphanage::remove_work_from_all_sets(const uint256& txid)
+{
+    LOCK(m_mutex);
+    remove_work_from_all_sets_nolock(txid);
+}
+
 std::vector<uint256> TxOrphanage::LimitOrphans(unsigned int max_orphans, unsigned int max_total_size)
 {
     LOCK(m_mutex);
@@ -202,7 +218,8 @@ std::vector<uint256> TxOrphanage::LimitOrphans(unsigned int max_orphans, unsigne
             const auto& wtxid = maybeErase->second.tx->GetWitnessHash();
             if (maybeErase->second.nTimeExpire <= nNow) {
                 expired_and_evicted.emplace_back(wtxid);
-                nErased += EraseTxNoLock(wtxid);
+                remove_work_from_all_sets_nolock(maybeErase->second.tx->GetHash());
+                nErased += EraseTxNoLock(wtxid); // FIXME m_peer_work_set still persisted?
             } else {
                 nMinExpTime = std::min(maybeErase->second.nTimeExpire, nMinExpTime);
             }
@@ -218,7 +235,8 @@ std::vector<uint256> TxOrphanage::LimitOrphans(unsigned int max_orphans, unsigne
         size_t randompos = rng.randrange(m_orphan_list.size());
         const auto& wtxid = m_orphan_list[randompos]->second.tx->GetWitnessHash();
         expired_and_evicted.emplace_back(wtxid);
-        EraseTxNoLock(wtxid);
+        remove_work_from_all_sets_nolock(m_orphan_list[randompos]->second.tx->GetHash());
+        EraseTxNoLock(wtxid); // FIXME m_peer_work_set still persisted?
         ++nEvicted;
     }
     if (nEvicted > 0) LogPrint(BCLog::TXPACKAGES, "orphanage overflow, removed %u tx\n", nEvicted);
@@ -283,6 +301,7 @@ CTransactionRef TxOrphanage::GetTxToReconsider(NodeId peer)
 
             const auto orphan_it = m_orphans.find(txid);
             if (orphan_it != m_orphans.end()) {
+                Assume(orphan_it->second.announcers.count(peer) > 0);
                 return orphan_it->second.tx;
             }
         }
@@ -307,6 +326,8 @@ std::vector<uint256> TxOrphanage::EraseForBlock(const CBlock& block)
     LOCK(m_mutex);
 
     std::vector<uint256> vOrphanErase;
+    std::vector<uint256> vOrphanErase_txid;
+    size_t index = 0;
 
     for (const CTransactionRef& ptx : block.vtx) {
         const CTransaction& tx = *ptx;
@@ -319,6 +340,7 @@ std::vector<uint256> TxOrphanage::EraseForBlock(const CBlock& block)
                 const CTransaction& orphanTx = *(*mi)->second.tx;
                 const uint256& orphan_wtxid = orphanTx.GetWitnessHash();
                 vOrphanErase.push_back(orphan_wtxid);
+                vOrphanErase_txid.push_back(orphanTx.GetHash());
             }
         }
     }
@@ -327,7 +349,8 @@ std::vector<uint256> TxOrphanage::EraseForBlock(const CBlock& block)
     if (vOrphanErase.size()) {
         int nErased = 0;
         for (const uint256& orphan_wtxid : vOrphanErase) {
-            nErased += EraseTxNoLock(orphan_wtxid);
+            remove_work_from_all_sets_nolock(vOrphanErase_txid[index]);
+            nErased += EraseTxNoLock(orphan_wtxid); // FIXME m_peer_work_set still persisted?
         }
         LogPrint(BCLog::TXPACKAGES, "Erased %d orphan tx included or conflicted by block\n", nErased);
     }

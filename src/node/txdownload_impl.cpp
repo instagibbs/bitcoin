@@ -96,6 +96,7 @@ void TxDownloadImpl::MempoolAcceptedTx(const CTransactionRef& tx)
     m_txrequest.ForgetTxHash(tx->GetHash());
     m_txrequest.ForgetTxHash(tx->GetWitnessHash());
     // If it came from the orphanage, remove it. No-op if the tx is not in txorphanage.
+    m_orphanage.remove_work_from_all_sets(tx->GetHash());
     m_orphanage.EraseTx(tx->GetWitnessHash());
     m_orphan_resolution_tracker.ForgetTxHash(tx->GetWitnessHash());
 }
@@ -182,6 +183,7 @@ bool TxDownloadImpl::MempoolRejectedTx(const CTransactionRef& tx, const TxValida
     m_txrequest.ForgetTxHash(tx->GetWitnessHash());
     // If it came from the orphanage, remove it (this doesn't happen if the transaction was missing
     // inputs). No-op if the tx is not in the orphanage.
+    m_orphanage.remove_work_from_all_sets(tx->GetHash());
     m_orphanage.EraseTx(tx->GetWitnessHash());
     m_orphan_resolution_tracker.ForgetTxHash(tx->GetWitnessHash());
     return false;
@@ -272,6 +274,7 @@ std::vector<GenTxid> TxDownloadImpl::GetRequestsToSend(NodeId nodeid, std::chron
                 // Schedule with no delay instead of using ReceivedTxInv. This means it's scheduled
                 // for request immediately unless there is already a request out for the same txhash
                 // (e.g. if there is another orphan that needs this parent).
+                if (m_orphanage.HaveTxAndPeer(GenTxid::Txid(txid), nodeid)) continue;
                 m_txrequest.ReceivedInv(nodeid, GenTxid::Txid(txid), info.m_preferred, current_time);
                 LogPrint(BCLog::TXPACKAGES, "scheduled parent request %s from peer=%d for orphan %s\n",
                          txid.ToString(), nodeid, orphan_gtxid.GetHash().ToString());

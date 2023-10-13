@@ -94,15 +94,15 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                         CTransactionRef ref = orphanage.GetTxToReconsider(peer_id);
                         if (ref) {
                             Assert(orphanage.HaveTx(GenTxid::Txid(ref->GetHash())) ||
-                                   orphanage.HaveTx(GenTxid::Wtxid(ref->GetHash())));
+                                   orphanage.HaveTx(GenTxid::Wtxid(ref->GetWitnessHash())));
                             Assert(orphanage.HaveTxAndPeer(GenTxid::Txid(ref->GetHash()), peer_id) ||
-                                   orphanage.HaveTxAndPeer(GenTxid::Wtxid(ref->GetHash()), peer_id));
+                                   orphanage.HaveTxAndPeer(GenTxid::Wtxid(ref->GetWitnessHash()), peer_id));
                             Assert(orphanage.BytesFromPeer(peer_id) >= ref->GetTotalSize());
                         }
                     }
                 },
                 [&] {
-                    bool have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetHash()));
+                    bool have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetWitnessHash()));
                     // AddTx should return false if tx is too big or already have it
                     // tx weight is unknown, we only check when tx is already in orphanage
                     {
@@ -116,7 +116,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                             Assert(orphanage.TotalOrphanBytes() == total_bytes_before + tx->GetTotalSize());
                         }
                     }
-                    have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetHash()));
+                    have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetWitnessHash()));
                     {
                         bool add_tx = orphanage.AddTx(tx, peer_id, {});
                         // if have_tx is still false, it must be too big
@@ -125,12 +125,12 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     }
                 },
                 [&] {
-                    bool have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetHash()));
+                    bool have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetWitnessHash()));
                     // EraseTx should return 0 if m_orphans doesn't have the tx
                     {
                         Assert(have_tx == orphanage.EraseTx(tx->GetWitnessHash()));
                     }
-                    have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetHash()));
+                    have_tx = orphanage.HaveTx(GenTxid::Txid(tx->GetHash())) || orphanage.HaveTx(GenTxid::Wtxid(tx->GetWitnessHash()));
                     // have_tx should be false and EraseTx should fail
                     {
                         Assert(!have_tx && !orphanage.EraseTx(tx->GetWitnessHash()));

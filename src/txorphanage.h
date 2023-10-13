@@ -24,6 +24,9 @@ static constexpr unsigned int DEFAULT_MAX_ORPHAN_TOTAL_SIZE{100 * MAX_STANDARD_T
  */
 class TxOrphanage {
 public:
+    void remove_work_from_all_sets_nolock(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void remove_work_from_all_sets(const uint256& txid) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Add a new orphan transaction. If the tx already exists, add this peer to its list of announcers.
      * parent_txids should contain a (de-duplicated) list of txids of this transaction's missing parents.
       @returns true if the transaction was added as a new orphan. */

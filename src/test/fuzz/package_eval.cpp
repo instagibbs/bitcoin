@@ -6,6 +6,7 @@
 #include <node/context.h>
 #include <node/mempool_args.h>
 #include <node/miner.h>
+#include <policy/ancestor_packages.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -94,9 +95,10 @@ struct OutpointsUpdater final : public CValidationInterface {
 
 struct TransactionsDelta final : public CValidationInterface {
     std::set<CTransactionRef>& m_added;
+    std::set<CTransactionRef>& m_removed;
 
-    explicit TransactionsDelta(std::set<CTransactionRef>& a)
-        : m_added{a} {}
+    explicit TransactionsDelta(std::set<CTransactionRef>& a, std::set<CTransactionRef>& r)
+        : m_added{a}, m_removed{r} {}
 
     void TransactionAddedToMempool(const CTransactionRef& tx, uint64_t /* mempool_sequence */) override
     {
@@ -107,7 +109,7 @@ struct TransactionsDelta final : public CValidationInterface {
     void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t /* mempool_sequence */) override
     {
         // Transactions may be entered and booted any number of times
-         m_added.erase(tx);
+         m_removed.insert(tx);
     }
 };
 
@@ -119,7 +121,7 @@ void MockTime(FuzzedDataProvider& fuzzed_data_provider, const Chainstate& chains
     SetMockTime(time);
 }
 
-CTxMemPool MakeMempool(FuzzedDataProvider& fuzzed_data_provider, const NodeContext& node)
+CTxMemPool::Options MakeMempoolOpts(FuzzedDataProvider& fuzzed_data_provider, const NodeContext& node)
 {
     // Take the default options for tests...
     CTxMemPool::Options mempool_opts{MemPoolOptionsForTest(node)};
@@ -138,11 +140,10 @@ CTxMemPool MakeMempool(FuzzedDataProvider& fuzzed_data_provider, const NodeConte
     mempool_opts.check_ratio = 1;
     mempool_opts.require_standard = fuzzed_data_provider.ConsumeBool();
 
-    // ...and construct a CTxMemPool from it
-    return CTxMemPool{mempool_opts};
+    return mempool_opts;
 }
 
-CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::set<COutPoint>& mempool_outpoints, std::set<COutPoint>& package_outpoints, std::map<COutPoint, CAmount>& outpoints_value, std::set<uint256>& txids_to_spend)
+CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::set<COutPoint>& mempool_outpoints, std::set<COutPoint>& package_outpoints, std::map<COutPoint, CAmount>& outpoints_value, std::set<uint256>& txids_to_spend, bool consensus_valid = true)
 {
     CMutableTransaction tx_mut;
     tx_mut.nVersion = CTransaction::CURRENT_VERSION;
@@ -196,14 +197,16 @@ CTransactionRef CreatePackageTxn(FuzzedDataProvider& fuzzed_data_provider, std::
         txids_to_spend.erase(outpoint.hash);
     }
 
-    // Duplicate an input
-    if (fuzzed_data_provider.ConsumeBool()) {
-        tx_mut.vin.push_back(tx_mut.vin.back());
-    }
+    if (!consensus_valid) {
+        // Duplicate an input
+        if (fuzzed_data_provider.ConsumeBool()) {
+            tx_mut.vin.push_back(tx_mut.vin.back());
+        }
 
-    // Refer to a non-existant input
-    if (fuzzed_data_provider.ConsumeBool()) {
-        tx_mut.vin.emplace_back();
+        // Refer to a non-existant input
+        if (fuzzed_data_provider.ConsumeBool()) {
+            tx_mut.vin.emplace_back();
+        }
     }
 
     const auto amount_fee = fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, amount_in);
@@ -321,6 +324,111 @@ CTransactionRef CreateChildTxn(FuzzedDataProvider& fuzzed_data_provider, std::se
     return tx;
 }
 
+FUZZ_TARGET(tx_single_to_package, .init = initialize_tx_pool)
+{
+    // Test that if we would have accepted a package as individual transactions,
+    // we should accept them as a package (to not cause censorship risk)
+
+    FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+    const auto& node = g_setup->m_node;
+    auto& chainstate{static_cast<DummyChainState&>(node.chainman->ActiveChainstate())};
+
+    MockTime(fuzzed_data_provider, chainstate);
+
+
+    // All RBF-spendable outpoints outside of the unsubmitted package
+    std::set<COutPoint> mempool_outpoints;
+    std::map<COutPoint, CAmount> outpoints_value;
+    for (const auto& outpoint : g_outpoints_coinbase_init_mature) {
+        Assert(mempool_outpoints.insert(outpoint).second);
+        outpoints_value[outpoint] = 50 * COIN;
+    }
+
+    auto outpoints_updater = std::make_shared<OutpointsUpdater>(mempool_outpoints);
+
+    const auto mempool_opts = MakeMempoolOpts(fuzzed_data_provider, node);
+    CTxMemPool tx_pool_{CTxMemPool{mempool_opts}};
+    MockedTxPool& tx_pool_1 = *static_cast<MockedTxPool*>(&tx_pool_);
+
+    CTxMemPool tx_pool_2_{CTxMemPool{mempool_opts}};
+    MockedTxPool& tx_pool_2 = *static_cast<MockedTxPool*>(&tx_pool_2_);
+
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 300)
+    {
+        RegisterSharedValidationInterface(outpoints_updater);
+    
+        // We start by submitting to mempool 1, then switch to mempool 2 later
+        chainstate.SetMempool(&tx_pool_1);
+
+        std::vector<CTransactionRef> txs;
+
+        // Make packages of 2-to-25 transactions to submit to each mempool
+        const auto num_txs = (size_t) fuzzed_data_provider.ConsumeIntegralInRange<int>(2, 25);
+        std::set<COutPoint> package_outpoints;
+        std::set<uint256> txids_to_spend;
+        while (txs.size() < num_txs) {
+
+            // Last transaction in a package needs to be a descendant of ancestors to get further in validation
+            // so the last transaction to be generated(in a >1 package) must spend additional outputs potentially.
+            // We will make sure of this by making sure each non-child transaction has at least one spent output.
+            bool child_tx = fuzzed_data_provider.ConsumeBool() && num_txs > 1 && txs.size() == num_txs - 1;
+
+            const CTransactionRef tx = child_tx ? CreateChildTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend) :
+                CreatePackageTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend);
+
+            txs.push_back(tx);
+        }
+
+        // Filter for ancestor package shapes to allow more validation to occur
+        // FIXME should just make smarter construction for target that doesn't rbf itself
+        // inside package?
+        PackageValidationState dummy_state;
+        if (!IsPackageWellFormed(txs, dummy_state, /*require_sorted=*/false)) continue;
+        const AncestorPackage anc_package{txs};
+        if (!anc_package.IsAncestorPackage()) continue;
+
+        // Remember all added and removed transactions to validate entry and eviction per package
+        std::set<CTransactionRef> single_added, single_removed;
+        auto txr = std::make_shared<TransactionsDelta>(single_added, single_removed);
+        RegisterSharedValidationInterface(txr);
+
+        // Once we've generated the transaction package, start submitting one by one to ATMP to pool 1
+        for (const auto& tx : txs) {
+            const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, tx, GetTime(), /*bypass_limits=*/false, /*test_accept=*/false));
+            SyncWithValidationInterfaceQueue();
+
+            if (res.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                // If valid, it should have been added
+                Assert(single_added.count(tx) > 0);
+            }
+        }
+
+        SyncWithValidationInterfaceQueue();
+        UnregisterSharedValidationInterface(txr);
+        // Tracking outpoints for mempool 1 only
+        UnregisterSharedValidationInterface(outpoints_updater);
+
+        // Next we cross-validate results with package submission
+        std::set<CTransactionRef> package_added, package_removed;
+        txr = std::make_shared<TransactionsDelta>(package_added, package_removed);
+        RegisterSharedValidationInterface(txr);
+
+        chainstate.SetMempool(&tx_pool_2);
+
+        const auto result_package = WITH_LOCK(::cs_main,
+                                    return ProcessNewPackage(chainstate, tx_pool_2, txs, /*test_accept=*/false));
+
+        SyncWithValidationInterfaceQueue();
+
+        for (const auto& tx : txs) {
+            if (single_added.count(tx)) {
+                Assert(package_added.count(tx));
+            }
+        }
+
+        UnregisterSharedValidationInterface(txr);
+    }
+}
 
 FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
 {
@@ -329,8 +437,6 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
     auto& chainstate{static_cast<DummyChainState&>(node.chainman->ActiveChainstate())};
 
     MockTime(fuzzed_data_provider, chainstate);
-
-    const bool bypass_limits = fuzzed_data_provider.ConsumeBool();
 
     // If something is ever prioritised, we cannot reason as much about it during invariant checks
     std::set<uint256> prio_set;
@@ -346,7 +452,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
     auto outpoints_updater = std::make_shared<OutpointsUpdater>(mempool_outpoints);
     RegisterSharedValidationInterface(outpoints_updater);
 
-    CTxMemPool tx_pool_{MakeMempool(fuzzed_data_provider, node)};
+    CTxMemPool tx_pool_{CTxMemPool{MakeMempoolOpts(fuzzed_data_provider, node)}};
     MockedTxPool& tx_pool = *static_cast<MockedTxPool*>(&tx_pool_);
 
     chainstate.SetMempool(&tx_pool);
@@ -369,7 +475,7 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             bool child_tx = fuzzed_data_provider.ConsumeBool() && num_txs > 1 && txs.size() == num_txs - 1;
 
             const CTransactionRef tx = child_tx ? CreateChildTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend) :
-                CreatePackageTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend);
+                CreatePackageTxn(fuzzed_data_provider, mempool_outpoints, package_outpoints, outpoints_value, txids_to_spend, /*consensus_valid=*/false);
 
             txs.push_back(tx);
         }
@@ -389,57 +495,34 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             prio_set.insert(txid);
         }
 
-        // Remember all added transactions
-        std::set<CTransactionRef> added;
-        auto txr = std::make_shared<TransactionsDelta>(added);
-        RegisterSharedValidationInterface(txr);
-
-        // When there are multiple transactions in the package, we call ProcessNewPackage(txs, test_accept=false)
-        // and AcceptToMemoryPool(txs.back(), test_accept=true). When there is only 1 transaction, we might flip it
-        // (the package is a test accept and ATMP is a submission).
-        auto single_submit = txs.size() == 1 && fuzzed_data_provider.ConsumeBool();
-
         const auto result_package = WITH_LOCK(::cs_main,
-                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit));
-
-        const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(), bypass_limits, /*test_accept=*/!single_submit));
-        const bool accepted = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
+                                    return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/false));
 
         SyncWithValidationInterfaceQueue();
-        UnregisterSharedValidationInterface(txr);
 
-        // There is only 1 transaction in the package. We did a test-package-accept and a ATMP
-        if (single_submit) {
-            Assert(accepted != added.empty());
-            Assert(accepted == res.m_state.IsValid());
-            if (accepted) {
-                Assert(added.size() == 1);
-                Assert(txs.back() == *added.begin());
-            }
+        if (result_package.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
+            Assert(result_package.m_tx_results.empty());
         } else {
-            if (result_package.m_state.GetResult() == PackageValidationResult::PCKG_POLICY) {
-                Assert(result_package.m_tx_results.empty());
-            } else {
-                // We don't know anything about the validity since transactions were randomly generated, so
-                // just use result_package.m_state here. This makes the expect_valid check meaningless, but
-                // we can still verify that the contents of m_tx_results are consistent with m_state.
-                const bool expect_valid{result_package.m_state.IsValid()};
-                std::string placeholder_str;
-                Assert(CheckPackageMempoolAcceptResult(txs, result_package, expect_valid, nullptr, placeholder_str));
+            // We don't know anything about the validity since transactions were randomly generated, so
+            // just use result_package.m_state here. This makes the expect_valid check meaningless, but
+            // we can still verify that the contents of m_tx_results are consistent with m_state.
+            const bool expect_valid{result_package.m_state.IsValid()};
+            std::string placeholder_str;
+            Assert(CheckPackageMempoolAcceptResult(txs, result_package, expect_valid, nullptr, placeholder_str));
 
-                // This check requires more context, given separately
-                for (const auto& tx : txs) {
-                    const auto txid = tx->GetHash();
-                    const TxMempoolInfo tx_info = tx_pool.info(GenTxid::Txid(txid));
-                    const bool in_mempool = tx_pool.exists(GenTxid::Txid(txid));
-                    // Nothing can be below mintxrelay fee, even in packages, unless bypass_limits is set
-                    // or it had been prioritised earlier, entered into the mempool, then deprioritised.
-                    // We disallow ever prioritising for this check for now.
-                    if (in_mempool && !bypass_limits && prio_set.count(txid) == 0 &&
-                        tx_info.fee < tx_pool.m_min_relay_feerate.GetFee(GetVirtualTransactionSize(*tx, 0, 0))) {
-                        Assert(tx_info.nFeeDelta == 0);
-                        Assert(false);
-                    }
+            // This check requires more context, given separately
+            for (const auto& tx : txs) {
+                const auto txid = tx->GetHash();
+                //const auto wtxid = tx->GetWitnessHash();
+                const TxMempoolInfo tx_info = tx_pool.info(GenTxid::Txid(txid));
+                const bool in_mempool = tx_pool.exists(GenTxid::Txid(txid));
+                // Nothing can be below mintxrelay fee, even in packages unless it
+                // had been prioritised earlier, entered into the mempool, then deprioritised.
+                // We disallow ever prioritising for this check for now.
+                if (in_mempool && prio_set.count(txid) == 0 &&
+                    tx_info.fee < tx_pool.m_min_relay_feerate.GetFee(GetVirtualTransactionSize(*tx, 0, 0))) {
+                    Assert(tx_info.nFeeDelta == 0);
+                    Assert(false);
                 }
             }
         }

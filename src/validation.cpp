@@ -1131,6 +1131,8 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
     // Store transaction in memory
     m_pool.addUnchecked(*entry, ws.m_ancestors, validForFeeEstimation);
 
+    m_pool.m_total_vbytes_added += GetVirtualTransactionSize(tx);
+
     // trim mempool and check if tx was trimmed
     // If we are validating a package, don't trim here because we could evict a previous transaction
     // in the package. LimitMempoolSize() should be called at the very end to make sure the mempool

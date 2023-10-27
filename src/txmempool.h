@@ -327,6 +327,10 @@ protected:
 
 public:
 
+    // TODO protect this
+    CAmount m_total_mined_fee GUARDED_BY(cs){0}; //!< sum of all mempool tx fees that ended up mined
+    uint64_t m_total_vbytes_added GUARDED_BY(cs){0}; //!< sum of all mempool tx vbytes, increased as their added
+
     static const int ROLLING_FEE_HALFLIFE = 60 * 60 * 12; // public only for testing
 
     typedef boost::multi_index_container<

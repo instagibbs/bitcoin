@@ -684,6 +684,9 @@ UniValue MempoolInfoToJSON(const CTxMemPool& pool)
     ret.pushKV("incrementalrelayfee", ValueFromAmount(pool.m_incremental_relay_feerate.GetFeePerK()));
     ret.pushKV("unbroadcastcount", uint64_t{pool.GetUnbroadcastTxs().size()});
     ret.pushKV("fullrbf", pool.m_full_rbf);
+    ret.pushKV("total_submitted", pool.m_total_vbytes_added);
+    ret.pushKV("total_mined_fee", pool.m_total_mined_fee);
+    ret.pushKV("free_relay_metric", ((float) pool.m_total_vbytes_added) / (pool.GetTotalFee() + pool.m_total_mined_fee));
     return ret;
 }
 

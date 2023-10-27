@@ -502,6 +502,8 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         // in transactions included in blocks can subscribe to the BlockConnected
         // notification.
         GetMainSignals().TransactionRemovedFromMempool(it->GetSharedTx(), reason, mempool_sequence);
+    } else {
+        m_total_mined_fee += it->GetFee();
     }
     TRACE5(mempool, removed,
         it->GetTx().GetHash().data(),

@@ -990,7 +990,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     CheckIsNotStandard(t, "dust");
 
     // Check future Witness Program versions dust threshold (non-32-byte pushes are undefined for version 1)
-    for (int op = OP_1; op <= OP_16; op += 1) {
+    for (int op = OP_2; op <= OP_16; op += 1) {
         t.vout[0].scriptPubKey = CScript() << (opcodetype)op << std::vector<unsigned char>(2, 0);
         t.vout[0].nValue = 240;
         CheckIsStandard(t);
@@ -1000,7 +1000,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     }
 
     // Check anchor outputs allow dust
-    t.vout[0].scriptPubKey = CScript() << OP_1;
+    t.vout[0].scriptPubKey = CScript() << OP_1 << std::vector<unsigned char>{0xff, 0xff};
     t.vout[0].nValue = 0;
     CheckIsStandard(t);
     t.vout[0].nValue = 1; // Not just 0

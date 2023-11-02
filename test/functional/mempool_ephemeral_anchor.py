@@ -26,6 +26,8 @@ from test_framework.wallet import (
     MiniWallet,
 )
 
+ANCHOR_SCRIPT = CScript([OP_TRUE, b'\xff' * 2])
+
 class EphemeralAnchorTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
@@ -79,7 +81,7 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         """
 
         if additional_outputs is None:
-            additional_outputs=[CTxOut(0, CScript([OP_TRUE]))]
+            additional_outputs=[CTxOut(0, ANCHOR_SCRIPT)]
 
         child_inputs = []
         self.ctr += 1
@@ -182,7 +184,7 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         parent_coin = self.coins[-1]
         del self.coins[-1]
 
-        package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, additional_outputs=[CTxOut(0, CScript([OP_TRUE]))] * 2)
+        package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, additional_outputs=[CTxOut(0, ANCHOR_SCRIPT)] * 2)
         assert_raises_rpc_error(-26, "too-many-ephemeral-anchors", node.submitpackage, package_hex0)
         assert_equal(node.getrawmempool(), [])
 
@@ -195,7 +197,7 @@ class EphemeralAnchorTest(BitcoinTestFramework):
             parent_coin = self.coins[-1]
             del self.coins[-1]
 
-            package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, additional_outputs=[CTxOut(output_value, CScript([OP_TRUE]))])
+            package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, additional_outputs=[CTxOut(output_value, ANCHOR_SCRIPT)])
             node.submitpackage(package_hex0)
             self.assert_mempool_contents(expected=package_txns0, unexpected=[])
 
@@ -295,7 +297,7 @@ class EphemeralAnchorTest(BitcoinTestFramework):
                 version=3
             )
 
-            self.insert_additional_outputs(parent_result, [CTxOut(0, CScript([OP_TRUE]))])
+            self.insert_additional_outputs(parent_result, [CTxOut(0, ANCHOR_SCRIPT)])
 
             child_inputs.append(parent_result["new_utxo"])
             child_inputs.append({**parent_result["new_utxo"], 'vout': 1, 'value': 0, 'anchor': True})
@@ -409,7 +411,7 @@ class EphemeralAnchorTest(BitcoinTestFramework):
             version=3
         )
 
-        self.insert_additional_outputs(parent_result, [CTxOut(0, CScript([OP_TRUE]))])
+        self.insert_additional_outputs(parent_result, [CTxOut(0, ANCHOR_SCRIPT)])
 
         non_ea_coin = parent_result["new_utxo"]
         ea_coin = {**parent_result["new_utxo"], 'vout': 1, 'value': 0, 'anchor': True}

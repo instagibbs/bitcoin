@@ -130,7 +130,7 @@ BOOST_AUTO_TEST_CASE(script_standard_Solver_success)
 
     // TxoutType::ANCHOR
     s.clear();
-    s << OP_1;
+    s << OP_1 << std::vector<unsigned char>{0xff, 0xff};
     BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::ANCHOR);
     BOOST_CHECK_EQUAL(solutions.size(), 0);
 
@@ -195,15 +195,15 @@ BOOST_AUTO_TEST_CASE(script_standard_Solver_failure)
     s << OP_0 << std::vector<unsigned char>(19, 0x01);
     BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::NONSTANDARD);
 
-    // TxoutType::ANCHOR with extra push
+    // TxoutType::ANCHOR but wrong witness version
     s.clear();
-    s << OP_1 << OP_1;
-    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::NONSTANDARD);
+    s << OP_2 << std::vector<unsigned char>{0xff, 0xff};
+    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_UNKNOWN);
 
-    // TxoutType::ANCHOR but wrong truth-y opcode
+    // TxoutType::ANCHOR but wrong 2-byte data push
     s.clear();
-    s << OP_2;
-    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::NONSTANDARD);
+    s << OP_1 << std::vector<unsigned char>{0xff, 0xfe};
+    BOOST_CHECK_EQUAL(Solver(s, solutions), TxoutType::WITNESS_UNKNOWN);
 }
 
 BOOST_AUTO_TEST_CASE(script_standard_ExtractDestination)

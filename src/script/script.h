@@ -532,7 +532,7 @@ public:
 
 
     /*
-     * OP_TRUE
+     * OP_TRUE <ffff>
      */
     bool IsPayToAnchor() const;
 

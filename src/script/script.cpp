@@ -200,7 +200,11 @@ unsigned int CScript::GetSigOpCount(const CScript& scriptSig) const
 
 bool CScript::IsPayToAnchor() const
 {
-    return (this->size() == 1 && (*this)[0] == OP_TRUE);
+    return (this->size() == 4 &&
+        (*this)[0] == OP_TRUE &&
+        (*this)[1] == 2 &&
+        (*this)[2] == 0xff &&
+        (*this)[3] == 0xff);
 }
 
 

@@ -999,7 +999,7 @@ class PSBTTest(BitcoinTestFramework):
         assert_equal(anchor_tx.nVersion, 3)
         assert_equal(len(anchor_tx.vout), 1)
         assert_equal(anchor_tx.vout[0].nValue, 1)
-        assert_equal(anchor_tx.vout[0].scriptPubKey, bytes([OP_TRUE]))
+        assert_equal(anchor_tx.vout[0].scriptPubKey, bytes([OP_TRUE, 0x02, 0xff, 0xff]))
 
         psbt_anchor = self.nodes[0].createpsbt([{"txid": "ff"*32, "vout": 0}], [{"anchor":"0.00000001"}])
         anchor = PSBT.from_base64(psbt_anchor)
@@ -1011,8 +1011,8 @@ class PSBTTest(BitcoinTestFramework):
         # Choose a utxo to fund it
         funded_anchor = self.nodes[0].walletcreatefundedpsbt([{"txid": utxos[0]["txid"], "vout": utxos[0]["vout"]}], [{"anchor": "0.00000001"}], 0, {"fee_rate": "0"})
         funded_decoded = self.nodes[0].decodepsbt(funded_anchor["psbt"])["tx"]
-        anchor_idx = 0 if funded_decoded["vout"][0]["scriptPubKey"]["hex"] == "51" else 1
-        assert_equal(funded_decoded["vout"][anchor_idx]["scriptPubKey"]["hex"], "51")
+        anchor_idx = 0 if funded_decoded["vout"][0]["scriptPubKey"]["hex"] == "5102ffff" else 1
+        assert_equal(funded_decoded["vout"][anchor_idx]["scriptPubKey"]["hex"], "5102ffff")
         assert_equal(funded_decoded["vout"][anchor_idx]["scriptPubKey"]["type"], "anchor")
         assert_equal(funded_decoded["vout"][anchor_idx]["value"], Decimal("0.00000001"))
 
@@ -1024,8 +1024,8 @@ class PSBTTest(BitcoinTestFramework):
         # Take second utxo to bump
         bump = self.nodes[0].createpsbt([{"txid": anchor_decoded["txid"], "vout": anchor_index}, {"txid": utxos[1]["txid"], "vout": utxos[1]["vout"]}], [{self.nodes[0].getnewaddress(): utxos[1]["amount"] - 1}])
 
-        # Need to switch to v3 to spend v3 parent, and inject OP_TRUE utxo to extract later
-        acs_prevout = CTxOut(nValue=1, scriptPubKey=CScript([OP_TRUE]))
+        # Need to switch to v3 to spend v3 parent, and inject anchor utxo to extract later
+        acs_prevout = CTxOut(nValue=1, scriptPubKey=CScript([OP_TRUE, b'\xff' * 2]))
         bump_edit = PSBT.from_base64(bump)
         bump_tx = tx_from_hex(bump_edit.g.map[0].hex())
         bump_tx.nVersion = 3

@@ -118,7 +118,7 @@ void AddOutputs(CMutableTransaction& rawTx, const UniValue& outputs_in)
             rawTx.nVersion = 3;
             CAmount nAmount = AmountFromValue(outputs[name_]);
 
-            CTxOut out(nAmount, CScript() << OP_TRUE);
+            CTxOut out(nAmount, CScript() << OP_TRUE << std::vector<unsigned char>{0xff, 0xff});
             rawTx.vout.push_back(out);
         } else {
             CTxDestination destination = DecodeDestination(name_);

@@ -44,13 +44,29 @@ class MempoolAcceptV3(BitcoinTestFramework):
         node = self.nodes[0]
         self.log.info("Test a child of a V3 transaction cannot be more than 1000vB")
         self.restart_node(0, extra_args=["-datacarriersize=1000"])
-        tx_v3_parent_normal = self.wallet.send_self_transfer(from_node=node, version=3)
-        self.check_mempool([tx_v3_parent_normal["txid"]])
-        tx_v3_child_heavy = self.wallet.create_self_transfer(
-            utxo_to_spend=tx_v3_parent_normal["new_utxo"],
+        tx_v3_parent_normal = self.wallet.create_self_transfer(
+            fee_rate=0,
             target_weight=4004,
             version=3
         )
+        tx_v3_parent_2_normal = self.wallet.create_self_transfer(
+            fee_rate=0,
+            target_weight=4004,
+            version=3
+        )
+        tx_v3_child_heavy = self.wallet.create_self_transfer_multi(
+            utxos_to_spend=[tx_v3_parent_normal["new_utxo"], tx_v3_parent_2_normal["new_utxo"]],
+            target_weight=4004,
+            fee_per_output=10000,
+            version=3
+        )
+
+        assert_equal(node.getrawmempool(), [])
+        node.submitpackage([tx_v3_parent_normal["hex"], tx_v3_parent_2_normal["hex"], tx_v3_child_heavy["hex"]])
+        # !!! Oversize child and multiple (in-package) ancestors
+        assert_equal(len(node.getrawmempool()), 3)
+        assert False
+
         assert_greater_than_or_equal(tx_v3_child_heavy["tx"].get_vsize(), 1000)
         assert_raises_rpc_error(-26, "v3-tx-nonstandard, v3 child tx is too big", node.sendrawtransaction, tx_v3_child_heavy["hex"])
         self.check_mempool([tx_v3_parent_normal["txid"]])

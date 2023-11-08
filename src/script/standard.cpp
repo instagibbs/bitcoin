@@ -52,6 +52,7 @@ std::string GetTxnOutputType(TxoutType t)
     case TxoutType::SCRIPTHASH: return "scripthash";
     case TxoutType::MULTISIG: return "multisig";
     case TxoutType::NULL_DATA: return "nulldata";
+    case TxoutType::ANCHOR: return "anchor";
     case TxoutType::WITNESS_V0_KEYHASH: return "witness_v0_keyhash";
     case TxoutType::WITNESS_V0_SCRIPTHASH: return "witness_v0_scripthash";
     case TxoutType::WITNESS_V1_TAPROOT: return "witness_v1_taproot";
@@ -193,6 +194,11 @@ TxoutType Solver(const CScript& scriptPubKey, std::vector<std::vector<unsigned c
             vSolutionsRet.push_back(std::move(witnessprogram));
             return TxoutType::WITNESS_V1_TAPROOT;
         }
+        if (scriptPubKey.IsPayToAnchor()) {
+            vSolutionsRet.push_back(std::vector<unsigned char>{(unsigned char)witnessversion});
+            vSolutionsRet.push_back(std::move(witnessprogram));
+            return TxoutType::ANCHOR;
+        }
         if (witnessversion != 0) {
             vSolutionsRet.push_back(std::vector<unsigned char>{(unsigned char)witnessversion});
             vSolutionsRet.push_back(std::move(witnessprogram));
@@ -275,6 +281,7 @@ bool ExtractDestination(const CScript& scriptPubKey, CTxDestination& addressRet)
         return true;
     }
     case TxoutType::WITNESS_UNKNOWN: {
+    case TxoutType::ANCHOR:
         WitnessUnknown unk;
         unk.version = vSolutions[0][0];
         std::copy(vSolutions[1].begin(), vSolutions[1].end(), unk.program);

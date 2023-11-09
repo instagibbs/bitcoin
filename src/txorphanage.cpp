@@ -254,9 +254,10 @@ CTransactionRef TxOrphanage::MaybeGetSingleChild(const CTransactionRef& parent, 
             for (const auto& elem : it_by_prev->second) {
                 // If we have already found an orphan who is missing this parent, return
                 // nullptr because we don't have a way of deciding which child to use.
-                if (child_found) {
-                    return nullptr;
-                } else {
+                if (child_found && elem->second.fromPeer == peer) {
+                    // return nullptr; // FIXME This is trivially broken: you CPFP bump twice too fast, peer won't get the package
+                    // the latest from each peer is probably the thing that makes most sense
+                } else if (elem->second.fromPeer == peer) {
                     child_found = elem->second.tx;
                 }
             }

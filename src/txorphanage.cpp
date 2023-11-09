@@ -252,14 +252,12 @@ CTransactionRef TxOrphanage::MaybeGetSingleChild(const CTransactionRef& parent, 
         const auto it_by_prev = m_outpoint_to_orphan_it.find(COutPoint(parent->GetHash(), i));
         if (it_by_prev != m_outpoint_to_orphan_it.end()) {
             for (const auto& elem : it_by_prev->second) {
-                if (elem->second.fromPeer == peer) {
-                    // If we have already found an orphan who is missing this parent, return
-                    // nullptr because we don't have a way of deciding which child to use.
-                    if (child_found) {
-                        return nullptr;
-                    } else {
-                        child_found = elem->second.tx;
-                    }
+                // If we have already found an orphan who is missing this parent, return
+                // nullptr because we don't have a way of deciding which child to use.
+                if (child_found) {
+                    return nullptr;
+                } else {
+                    child_found = elem->second.tx;
                 }
             }
         }

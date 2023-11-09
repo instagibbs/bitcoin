@@ -3176,6 +3176,10 @@ void PeerManagerImpl::ProcessPackageResult(const Package& package, const Package
     AssertLockNotHeld(m_peer_mutex);
     AssertLockHeld(g_msgproc_mutex);
 
+    if (result.m_state.IsInvalid()) {
+        m_recent_rejects_reconsiderable.insert(GetPackageHash(package));
+    }
+
     // Iterate backwards to erase in-package descendants from the orphanage before they become
     // relevant in AddChildrenToWorkSet.
     for (auto package_it = package.rbegin(); package_it != package.rend(); ++package_it) {
@@ -4464,16 +4468,21 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 LogPrint(BCLog::TXPACKAGES, "found child %s (wtxid=%s) of tx %s (wtxid=%s) in orphanage, trying 1p1c",
                          maybe_cpfp_child->GetHash().ToString(), maybe_cpfp_child->GetWitnessHash().ToString(), txid.ToString(), wtxid.ToString());
                 Package maybe_cpfp_package{ptx, maybe_cpfp_child};
-                const auto maybe_cpfp_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, maybe_cpfp_package, /*test_accept=*/false)};
-                if (maybe_cpfp_result.m_state.IsValid()) {
-                    LogPrint(BCLog::TXPACKAGES, "optimistic package CPFP succeeded for parent %s (wtxid %s), child %s (wtxid %s), peer=%d\n",
-                             ptx->GetHash().ToString(), ptx->GetWitnessHash().ToString(),
-                             maybe_cpfp_child->GetHash().ToString(), maybe_cpfp_child->GetWitnessHash().ToString(),
-                             pfrom.GetId());
-                } else if (RecursiveDynamicUsage(*ptx) < 100000) {
-                    AddToCompactExtraTransactions(ptx);
+                if (m_recent_rejects_reconsiderable.contains(GetPackageHash(maybe_cpfp_package))) {
+                    LogPrint(BCLog::TXPACKAGES, "not trying package of parent %s (wtxid=%s) + child %s (wtxid=%s), found in recent rejects",
+                             maybe_cpfp_child->GetHash().ToString(), maybe_cpfp_child->GetWitnessHash().ToString(), txid.ToString(), wtxid.ToString());
+                } else {
+                    const auto maybe_cpfp_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, maybe_cpfp_package, /*test_accept=*/false)};
+                    if (maybe_cpfp_result.m_state.IsValid()) {
+                        LogPrint(BCLog::TXPACKAGES, "optimistic package CPFP succeeded for parent %s (wtxid %s), child %s (wtxid %s), peer=%d\n",
+                                 ptx->GetHash().ToString(), ptx->GetWitnessHash().ToString(),
+                                 maybe_cpfp_child->GetHash().ToString(), maybe_cpfp_child->GetWitnessHash().ToString(),
+                                 pfrom.GetId());
+                    } else if (RecursiveDynamicUsage(*ptx) < 100000) {
+                        AddToCompactExtraTransactions(ptx);
+                    }
+                    ProcessPackageResult(maybe_cpfp_package, maybe_cpfp_result, pfrom.GetId());
                 }
-                ProcessPackageResult(maybe_cpfp_package, maybe_cpfp_result, pfrom.GetId());
             }
         }
         return;

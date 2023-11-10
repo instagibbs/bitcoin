@@ -172,7 +172,8 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         del self.coins[-1]
 
         package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=1, child_fee=DEFAULT_FEE)
-        assert_raises_rpc_error(-26, "invalid-ephemeral-fee", node.submitpackage, package_hex0)
+        res = node.submitpackage(package_hex0)
+        assert res["tx-results"][package_txns0[0].getwtxid()]["error"] == "invalid-ephemeral-fee"
         assert_equal(node.getrawmempool(), [])
 
         # But works with no parent fee
@@ -192,7 +193,8 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         del self.coins[-1]
 
         package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, additional_outputs=[CTxOut(0, ANCHOR_SCRIPT)] * 2)
-        assert_raises_rpc_error(-26, "too-many-ephemeral-anchors", node.submitpackage, package_hex0)
+        res = node.submitpackage(package_hex0)
+        assert res["tx-results"][package_txns0[0].getwtxid()]["error"] == "too-many-ephemeral-anchors"
         assert_equal(node.getrawmempool(), [])
 
         self.generate(node, 1)
@@ -225,7 +227,8 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=1, child_fee=DEFAULT_FEE)
         parent_txid = node.decoderawtransaction(package_hex0[0])['txid']
         node.prioritisetransaction(txid=parent_txid, dummy=0, fee_delta=COIN)
-        assert_raises_rpc_error(-26, "invalid-ephemeral-fee", node.submitpackage, package_hex0)
+        res = node.submitpackage(package_hex0)
+        assert res["tx-results"][package_txns0[0].getwtxid()]["error"] == "invalid-ephemeral-fee"
         assert_equal(node.getrawmempool(), [])
 
         # Also doesn't make it invalid if applied to the parent
@@ -249,7 +252,8 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         del self.coins[-1]
 
         package_hex, package_txns = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, version=2)
-        assert_raises_rpc_error(-26, "wrong-ephemeral-nversion", node.submitpackage, package_hex)
+        res = node.submitpackage(package_hex)
+        assert res["tx-results"][package_txns[0].getwtxid()]["error"] == "wrong-ephemeral-nversion"
         assert_equal(node.getrawmempool(), [])
 
     def test_unspent_ephemeral(self):
@@ -262,7 +266,8 @@ class EphemeralAnchorTest(BitcoinTestFramework):
         # Submit whole package, but anchor are unspent
         package_hex0, package_txns0 = self.create_simple_package(parent_coin=parent_coin, parent_fee=0, child_fee=DEFAULT_FEE, spend_anchor=
 0)
-        assert_raises_rpc_error(-26, "missing-ephemeral-spends", node.submitpackage, package_hex0)
+        res = node.submitpackage(package_hex0)
+        assert "missing-ephemeral-spends" in res["tx-results"][package_txns0[0].getwtxid()]["error"]
         assert_equal(node.getrawmempool(), [])
 
         # Individual submission also fails
@@ -487,12 +492,14 @@ class EphemeralAnchorTest(BitcoinTestFramework):
             version=3
         )
 
-        # sendraw for single child_b propagates, but not the submitpackage?
         # Submit a + b + c ancestor package, (a) is rejected for not spending parent anchors
-        assert_raises_rpc_error(-26, "ephemeral-anchor-unspent, tx does not spend all parent ephemeral anchors", node.submitpackage, [child_a["hex"], child_b["hex"], child_c["hex"]])
+        res = node.submitpackage([child_a["hex"], child_b["hex"], child_c["hex"]])
+        assert res["tx-results"][child_a["wtxid"]]["error"] == "ephemeral-anchor-unspent, tx does not spend all parent ephemeral anchors"
+        assert "error" not in res["tx-results"][child_b["wtxid"]]
+        assert res["tx-results"][child_c["wtxid"]]["error"] == "bad-txns-inputs-missingorspent"
 
         # Only the sponsor RBF makes it into mempool, parent is evicted and other descendants have been rejected for V3 violations
-        # self.sync_all() # Check for propagation FIXME: submitpackage's child_b doesnt propagate unless sent via sendrawtansaction...
+        self.sync_all() # Check for propagation FIXME: submitpackage's child_b doesnt propagate unless sent via sendrawtansaction...
         assert_equal(node.getrawmempool(), [child_b["txid"]])
 
         # Mining everything

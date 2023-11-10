@@ -841,14 +841,15 @@ static RPCHelpMan submitpackage()
                     {RPCResult::Type::OBJ, "wtxid", "transaction wtxid", {
                         {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
                         {RPCResult::Type::STR_HEX, "other-wtxid", /*optional=*/true, "The wtxid of a different transaction with the same txid but different witness found in the mempool. This means the submitted transaction was ignored."},
-                        {RPCResult::Type::NUM, "vsize", "Virtual transaction size as defined in BIP 141."},
-                        {RPCResult::Type::OBJ, "fees", "Transaction fees", {
+                        {RPCResult::Type::NUM, "vsize", /*optional=*/true, "Virtual transaction size as defined in BIP 141."},
+                        {RPCResult::Type::OBJ, "fees", /*optional=*/true, "Transaction fees", {
                             {RPCResult::Type::STR_AMOUNT, "base", "transaction fee in " + CURRENCY_UNIT},
                             {RPCResult::Type::STR_AMOUNT, "effective-feerate", /*optional=*/true, "if the transaction was not already in the mempool, the effective feerate in " + CURRENCY_UNIT + " per KvB. For example, the package feerate and/or feerate with modified fees from prioritisetransaction."},
                             {RPCResult::Type::ARR, "effective-includes", /*optional=*/true, "if effective-feerate is provided, the wtxids of the transactions whose fees and vsizes are included in effective-feerate.",
                                 {{RPCResult::Type::STR_HEX, "", "transaction wtxid in hex"},
                             }},
                         }},
+                        {RPCResult::Type::STR, "error", /*optional=*/true, "The transaction error string, if it was rejected by the mempool"},
                     }}
                 }},
                 {RPCResult::Type::ARR, "replaced-transactions", /*optional=*/true, "List of txids of replaced transactions",
@@ -888,9 +889,18 @@ static RPCHelpMan submitpackage()
             Chainstate& chainstate = EnsureChainman(node).ActiveChainstate();
             const auto package_result = WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/ false));
 
-            // First catch any errors.
+            std::map<Wtxid, std::optional<std::string>> wtixd_to_error_strings;
+
+            // First catch any errors and capture useful error strings.
             switch(package_result.m_state.GetResult()) {
-                case PackageValidationResult::PCKG_RESULT_UNSET: break;
+                case PackageValidationResult::PCKG_RESULT_UNSET:
+                {
+                    CHECK_NONFATAL(package_result.m_tx_results.size() == txns.size());
+                    for (const auto& tx : txns) {
+                        wtixd_to_error_strings.insert({tx->GetWitnessHash(), std::nullopt});
+                    }
+                    break;
+                }
                 case PackageValidationResult::PCKG_POLICY:
                 {
                     throw JSONRPCTransactionError(TransactionError::INVALID_PACKAGE,
@@ -905,17 +915,29 @@ static RPCHelpMan submitpackage()
                 {
                     for (const auto& tx : txns) {
                         auto it = package_result.m_tx_results.find(tx->GetWitnessHash());
-                        if (it != package_result.m_tx_results.end() && it->second.m_state.IsInvalid()) {
-                            throw JSONRPCTransactionError(TransactionError::MEMPOOL_REJECTED,
-                                strprintf("%s failed: %s", tx->GetHash().ToString(), it->second.m_state.ToString()));
+                        if (it != package_result.m_tx_results.end()) {
+                            if (it->second.m_state.IsInvalid()) {
+                                wtixd_to_error_strings.insert({tx->GetWitnessHash(), it->second.m_state.ToString()});
+                            } else {
+                                wtixd_to_error_strings.insert({tx->GetWitnessHash(), std::nullopt});
+                            }
+                        } else {
+                            // No result returned; report this helpfully
+                            wtixd_to_error_strings.insert({tx->GetWitnessHash(), "unevaluated"});
                         }
                     }
-                    // If a PCKG_TX error was returned, there must have been an invalid transaction.
-                    NONFATAL_UNREACHABLE();
+                    break;
                 }
             }
+
             size_t num_broadcast{0};
             for (const auto& tx : txns) {
+                const auto wtxid = tx->GetWitnessHash();
+                if (!mempool.exists(GenTxid::Wtxid(wtxid))) {
+                    CHECK_NONFATAL(wtixd_to_error_strings.at(wtxid).has_value());
+                    continue;
+                }
+
                 std::string err_string;
                 const auto err = BroadcastTransaction(node, tx, err_string, /*max_tx_fee=*/0, /*relay=*/true, /*wait_callback=*/true);
                 if (err != TransactionError::OK) {
@@ -936,8 +958,9 @@ static RPCHelpMan submitpackage()
                 const auto& tx_result = it->second;
                 if (it->second.m_result_type == MempoolAcceptResult::ResultType::DIFFERENT_WITNESS) {
                     result_inner.pushKV("other-wtxid", it->second.m_other_wtxid.value().GetHex());
-                }
-                if (it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
+                } else if (it->second.m_result_type == MempoolAcceptResult::ResultType::INVALID) {
+                    result_inner.pushKV("error", wtixd_to_error_strings.at(tx->GetWitnessHash()).value());
+                } else if (it->second.m_result_type == MempoolAcceptResult::ResultType::VALID ||
                     it->second.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY) {
                     result_inner.pushKV("vsize", int64_t{it->second.m_vsize.value()});
                     UniValue fees(UniValue::VOBJ);
@@ -959,6 +982,8 @@ static RPCHelpMan submitpackage()
                             replaced_txids.insert(ptx->GetHash());
                         }
                     }
+                } else {
+                    NONFATAL_UNREACHABLE();
                 }
                 tx_result_map.pushKV(tx->GetWitnessHash().GetHex(), result_inner);
             }

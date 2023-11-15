@@ -929,8 +929,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         // This carve out is NOT granted in package RBF (see m_allow_carveouts in ATMPArgs ctors) because, during
         // package acceptance, we may call PreChecks for multiple transactions that conflict with different mempool
         // entries that don't share ancestry. It would be a bug to keep increasing the descendant limit each time.
-        // The carve out also does not apply to package RBF while it is restricted to V3 transactions, since an
-        // unconfirmed V3 transaction cannot have more than one descendant.
         assert(ws.m_iters_conflicting.size() == 1);
         CTxMemPool::txiter conflict = *ws.m_iters_conflicting.begin();
 
@@ -1002,11 +1000,9 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     //   descendant transaction of a direct conflict to pay a higher feerate than the transaction that
     //   might replace them, under these rules.
     if (const auto err_string{PaysMoreThanConflicts(ws.m_iters_conflicting, newFeeRate, hash)}) {
-        // If this transaction is v3 (for which package RBF is allowed), this fee-related failure is
-        // TX_RECONSIDERABLE because validating in a package may change the result. Otherwise, the
-        // result is TX_MEMPOOL_POLICY.
-        // This must be changed if package RBF is enabled for non-v3 transactions.
-        return state.Invalid(tx.nVersion == 3 ? TxValidationResult::TX_RECONSIDERABLE : TxValidationResult::TX_MEMPOOL_POLICY,
+        // This fee-related failure is TX_RECONSIDERABLE because validating in a package may change
+        // the result.
+        return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
                              "insufficient fee", *err_string);
     }
 
@@ -1029,10 +1025,8 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     }
     if (const auto err_string{PaysForRBF(m_conflicting_fees, ws.m_modified_fees, ws.m_vsize,
                                          m_pool.m_incremental_relay_feerate, hash)}) {
-        // If this transaction is v3 (for which package RBF is allowed), this fee-related failure is
-        // TX_RECONSIDERABLE because validating in a package may change the result. Otherwise, the
-        // result is TX_MEMPOOL_POLICY.
-        return state.Invalid(tx.nVersion == 3 ? TxValidationResult::TX_RECONSIDERABLE : TxValidationResult::TX_MEMPOOL_POLICY,
+        // Result may change in another package
+        return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
                              "insufficient fee", *err_string);
     }
     return true;
@@ -1052,9 +1046,9 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
                        { return !m_pool.exists(GenTxid::Txid(tx->GetHash()));}));
 
     // Populate with the union of all transactions' ancestors.
-    CTxMemPool::setEntries m_collective_ancestors;
+    CTxMemPool::setEntries collective_ancestors;
     for (const auto& ws : workspaces) {
-        for (const auto& it : ws.m_ancestors) m_collective_ancestors.insert(it);
+        for (const auto& it : ws.m_ancestors) collective_ancestors.insert(it);
     }
 
     std::string err_string;
@@ -1067,12 +1061,9 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     m_rbf = std::any_of(workspaces.cbegin(), workspaces.cend(), [](const auto& ws){return !ws.m_conflicts.empty();});
     if (!m_rbf) return true;
 
-    // Unless the transaction is V3, its own fees must meet the requirements for replacing its conflicts.
-    for (const auto& ws : workspaces) {
-        // If this transaction has a conflict, it must be V3.
-        if (!ws.m_iters_conflicting.empty() && ws.m_ptx->nVersion != 3) {
-            return package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package RBF failed: V3 required");
-        }
+    // We only allow clusters of size 2 to initiate package RBFs
+    if (!collective_ancestors.empty() || workspaces.size() != 2) {
+        return package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package RBF failed: replacing cluster not size two");
     }
 
     CTxMemPool::setEntries direct_conflict_iters;
@@ -1100,7 +1091,7 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     std::transform(m_all_conflicts.cbegin(), m_all_conflicts.cend(),
                    std::inserter(all_conflicting_txids, all_conflicting_txids.end()),
                    [](const auto& entry) { return entry->GetTx().GetHash(); });
-    if (const auto err_string{EntriesAndTxidsDisjoint(m_collective_ancestors, all_conflicting_txids, hash)}) {
+    if (const auto err_string{EntriesAndTxidsDisjoint(collective_ancestors, all_conflicting_txids, hash)}) {
         // Note that we handle this differently in individual transaction validation (a transaction
         // that conflicts with its own dependency is inconsistent, but this could just be
         // conflicting transactions in a package).
@@ -1109,7 +1100,7 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     }
 
     // Check if it's economically rational to mine this package rather than the ones it replaces.
-    if (const auto err_string{CheckMinerScores(m_total_modified_fees, m_total_vsize, m_collective_ancestors,
+    if (const auto err_string{CheckMinerScores(m_total_modified_fees, m_total_vsize, collective_ancestors,
                                                direct_conflict_iters, m_all_conflicts)}) {
         return package_state.Invalid(PackageValidationResult::PCKG_POLICY,
                                      "package RBF failed: insufficient fees", *err_string);

@@ -1045,12 +1045,6 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     assert(std::all_of(txns.cbegin(), txns.cend(), [this](const auto& tx)
                        { return !m_pool.exists(GenTxid::Txid(tx->GetHash()));}));
 
-    // Populate with the union of all transactions' ancestors.
-    CTxMemPool::setEntries collective_ancestors;
-    for (const auto& ws : workspaces) {
-        for (const auto& it : ws.m_ancestors) collective_ancestors.insert(it);
-    }
-
     std::string err_string;
     if (!m_pool.CheckPackageLimits(txns, total_vsize, err_string)) {
         // This is a package-wide error, separate from an individual transaction error.
@@ -1061,9 +1055,17 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
     m_rbf = std::any_of(workspaces.cbegin(), workspaces.cend(), [](const auto& ws){return !ws.m_conflicts.empty();});
     if (!m_rbf) return true;
 
-    // We only allow clusters of size 2 to initiate package RBFs
-    if (!collective_ancestors.empty() || workspaces.size() != 2) {
+    // We're in package RBF context; replacement proposal must be size 2
+    if (workspaces.size() != 2) {
         return package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package RBF failed: replacing cluster not size two");
+    }
+
+    // If the package has in-mempool ancestors, we won't consider a package RBF
+    // since it would result in a cluster larger than 2
+    for (const auto& ws : workspaces) {
+        if (!ws.m_ancestors.empty()) {
+            return package_state.Invalid(PackageValidationResult::PCKG_POLICY, "package RBF failed: replacing cluster not size two");
+        }
     }
 
     CTxMemPool::setEntries direct_conflict_iters;
@@ -1086,22 +1088,9 @@ bool MemPoolAccept::PackageMempoolChecks(const ATMPArgs& args,
         }
     }
 
-    // Make sure none of the package transactions depend on a mempool transaction that is going to be replaced.
-    std::set<uint256> all_conflicting_txids;
-    std::transform(m_all_conflicts.cbegin(), m_all_conflicts.cend(),
-                   std::inserter(all_conflicting_txids, all_conflicting_txids.end()),
-                   [](const auto& entry) { return entry->GetTx().GetHash(); });
-    if (const auto err_string{EntriesAndTxidsDisjoint(collective_ancestors, all_conflicting_txids, hash)}) {
-        // Note that we handle this differently in individual transaction validation (a transaction
-        // that conflicts with its own dependency is inconsistent, but this could just be
-        // conflicting transactions in a package).
-        return package_state.Invalid(PackageValidationResult::PCKG_POLICY,
-                                     "package RBF failed: package conflicts with dependency", *err_string);
-    }
-
     // Check if it's economically rational to mine this package rather than the ones it replaces.
-    if (const auto err_string{CheckMinerScores(m_total_modified_fees, m_total_vsize, collective_ancestors,
-                                               direct_conflict_iters, m_all_conflicts)}) {
+    if (const auto err_string{CheckMinerScores(m_total_modified_fees, m_total_vsize, direct_conflict_iters,
+                                               m_all_conflicts)}) {
         return package_state.Invalid(PackageValidationResult::PCKG_POLICY,
                                      "package RBF failed: insufficient fees", *err_string);
     }

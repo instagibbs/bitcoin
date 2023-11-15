@@ -184,25 +184,16 @@ std::optional<std::string> PaysForRBF(CAmount original_fees,
 
 std::optional<std::string> CheckMinerScores(CAmount replacement_fees,
                                             int64_t replacement_vsize,
-                                            const CTxMemPool::setEntries& ancestors,
                                             const CTxMemPool::setEntries& direct_conflicts,
                                             const CTxMemPool::setEntries& original_transactions)
 {
-        const CFeeRate replacement_individual_feerate(replacement_fees, replacement_vsize);
-        // Ancestor feerate is the total modified fees divided by the total size. To get the
-        // ancestor feerate, add up all the individual modified fees and sizes. Don't try to use the
-        // cached ancestor fees and sizes because entries may have overlapping ancestors.
-        for (CTxMemPool::txiter it : ancestors) {
-            replacement_fees += it->GetModifiedFee();
-            replacement_vsize += it->GetTxSize();
-        }
-        const CFeeRate replacement_ancestor_feerate(replacement_fees, replacement_vsize);
-        // A package/transaction's ancestor feerate is not equivalent to the miner score; it may
-        // overestimate. Some subset of the ancestors could be included by itself if it has other
-        // high-feerate descendants or are themselves higher feerate than this package/transaction.
-        // For now, as a conservative estimate, use the minimum between the transaction's individual
-        // feerate and ancestor feerate.
-        const CFeeRate replacement_miner_score = std::min(replacement_individual_feerate, replacement_ancestor_feerate);
+        // N.B. This presumes there are no in-mempool ancestors and simple topology
+        const CFeeRate replacement_miner_score(replacement_fees, replacement_vsize);
+
+        // FIXME: "Ideally" we'd check all original_transactions against individual feerate,
+        // but that borders on useless. If we constrict the original_transactions to be from
+        // a single cluster of size 2(ala v3), then we can just do a miner score check
+        // see https://github.com/bitcoin/bitcoin/pull/26451
         for (const auto& entry : direct_conflicts) {
             const CFeeRate original_individual_feerate(entry->GetModifiedFee(), entry->GetTxSize());
             if (replacement_miner_score < original_individual_feerate) {
@@ -211,6 +202,7 @@ std::optional<std::string> CheckMinerScores(CAmount replacement_fees,
                                  original_individual_feerate.ToString());
             }
         }
+
         for (const auto& entry : original_transactions) {
             const CFeeRate original_ancestor_feerate(entry->GetModFeesWithAncestors(), entry->GetSizeWithAncestors());
             if (replacement_miner_score < original_ancestor_feerate) {

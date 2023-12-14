@@ -14,47 +14,6 @@
 #include <numeric>
 #include <vector>
 
-std::optional<std::tuple<Wtxid, Wtxid, bool>> CheckV3Inheritance(const Package& package)
-{
-    assert(std::all_of(package.cbegin(), package.cend(), [](const auto& tx){return tx != nullptr;}));
-    // If all transactions are V3, we can stop here.
-    if (std::all_of(package.cbegin(), package.cend(), [](const auto& tx){return tx->nVersion == 3;})) {
-        return std::nullopt;
-    }
-    // If all transactions are non-V3, we can stop here.
-    if (std::all_of(package.cbegin(), package.cend(), [](const auto& tx){return tx->nVersion != 3;})) {
-        return std::nullopt;
-    }
-    // Look for a V3 transaction spending a non-V3 or vice versa.
-    std::unordered_map<Txid, Wtxid, SaltedTxidHasher> v3_txid_to_wtxid;
-    std::unordered_map<Txid, Wtxid, SaltedTxidHasher> non_v3_txid_to_wtxid;
-    for (const auto& tx : package) {
-        if (tx->nVersion == 3) {
-            // If duplicate txids exist, this function will still detect violations, but it
-            // will return the earlier transaction's wtxid.
-            Assume(v3_txid_to_wtxid.emplace(tx->GetHash(), tx->GetWitnessHash()).second);
-        } else {
-            Assume(non_v3_txid_to_wtxid.emplace(tx->GetHash(), tx->GetWitnessHash()).second);
-        }
-    }
-    for (const auto& tx : package) {
-        if (tx->nVersion == 3) {
-            for (const auto& input : tx->vin) {
-                if (auto it = non_v3_txid_to_wtxid.find(input.prevout.hash); it != non_v3_txid_to_wtxid.end()) {
-                    return std::make_tuple(it->second, tx->GetWitnessHash(), true);
-                }
-            }
-        } else {
-            for (const auto& input : tx->vin) {
-                if (auto it = v3_txid_to_wtxid.find(input.prevout.hash); it != v3_txid_to_wtxid.end()) {
-                    return std::make_tuple(it->second, tx->GetWitnessHash(), false);
-                }
-            }
-        }
-    }
-    return std::nullopt;
-}
-
 std::optional<std::string> PackageV3SanityChecks(const Package& package)
 {
     // This should only be called in scenarios where the topo of the package

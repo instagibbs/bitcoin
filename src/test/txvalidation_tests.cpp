@@ -101,8 +101,6 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
     pool.addUnchecked(entry.FromTx(mempool_tx_v3));
     auto mempool_tx_v2 = make_tx(random_outpoints(1), /*version=*/2);
     pool.addUnchecked(entry.FromTx(mempool_tx_v2));
-    // These two transactions are unrelated, so CheckV3Inheritance should pass.
-    BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, mempool_tx_v3}) == std::nullopt);
     // Default values.
     CTxMemPool::Limits m_limits{};
 
@@ -113,7 +111,6 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
         // tx_v2_from_v3
         auto tx_v2_from_v3 = make_tx({COutPoint{mempool_tx_v3->GetHash(), 0}}, /*version=*/2);
         auto ancestors_v2_from_v3{pool.CalculateMemPoolAncestors(entry.FromTx(tx_v2_from_v3), m_limits)};
-        BOOST_CHECK(CheckV3Inheritance({mempool_tx_v3, tx_v2_from_v3}).has_value());
         const auto expected_error_str{strprintf("non-v3 tx %s cannot spend from v3 tx %s", tx_v2_from_v3->GetWitnessHash().ToString(), mempool_tx_v3->GetWitnessHash().ToString())};
         BOOST_CHECK(*ApplyV3Rules(tx_v2_from_v3, *ancestors_v2_from_v3, /*num_other_ancestors=*/0, false, empty_conflicts_set, GetVirtualTransactionSize(*tx_v2_from_v3)) == expected_error_str);
         BOOST_CHECK(*PackageV3SanityChecks({mempool_tx_v3, tx_v2_from_v3}) == "txs in package are not all v3");
@@ -125,8 +122,6 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
         auto ancestors_v2_from_both{pool.CalculateMemPoolAncestors(entry.FromTx(tx_v2_from_v2_and_v3), m_limits)};
         const auto expected_error_str_2{strprintf("non-v3 tx %s cannot spend from v3 tx %s",
                                         tx_v2_from_v2_and_v3->GetWitnessHash().ToString(), mempool_tx_v3->GetWitnessHash().ToString())};
-        BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, mempool_tx_v3, tx_v2_from_v2_and_v3}).value() ==
-                    std::make_tuple(mempool_tx_v3->GetWitnessHash(), tx_v2_from_v2_and_v3->GetWitnessHash(), false));
         BOOST_CHECK(*ApplyV3Rules(tx_v2_from_v2_and_v3, *ancestors_v2_from_both, /*num_other_ancestors=*/0, false, empty_conflicts_set, GetVirtualTransactionSize(*tx_v2_from_v2_and_v3))
                     == expected_error_str_2);
         BOOST_CHECK(*PackageV3SanityChecks({mempool_tx_v2, mempool_tx_v3, tx_v2_from_v2_and_v3}) == "txs in package are not all v3");
@@ -139,8 +134,6 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
         // tx_v3_from_v2
         auto tx_v3_from_v2 = make_tx({COutPoint{mempool_tx_v2->GetHash(), 0}}, /*version=*/3);
         auto ancestors_v3_from_v2{pool.CalculateMemPoolAncestors(entry.FromTx(tx_v3_from_v2), m_limits)};
-        BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, tx_v3_from_v2}).value() ==
-                    std::make_tuple(mempool_tx_v2->GetWitnessHash(), tx_v3_from_v2->GetWitnessHash(), true));
         const auto expected_error_str{strprintf("v3 tx %s cannot spend from non-v3 tx %s",
                                       tx_v3_from_v2->GetWitnessHash().ToString(), mempool_tx_v2->GetWitnessHash().ToString())};
         BOOST_CHECK(*ApplyV3Rules(tx_v3_from_v2, *ancestors_v3_from_v2, /*num_other_ancestors=*/0, false, empty_conflicts_set, GetVirtualTransactionSize(*tx_v3_from_v2)) == expected_error_str);
@@ -153,8 +146,6 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
         auto ancestors_v3_from_both{pool.CalculateMemPoolAncestors(entry.FromTx(tx_v3_from_v2_and_v3), m_limits)};
         const auto expected_error_str_2{strprintf("v3 tx %s cannot spend from non-v3 tx %s",
                                         tx_v3_from_v2_and_v3->GetWitnessHash().ToString(), mempool_tx_v2->GetWitnessHash().ToString())};
-        BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, mempool_tx_v3, tx_v3_from_v2_and_v3}).value() ==
-                    std::make_tuple(mempool_tx_v2->GetWitnessHash(), tx_v3_from_v2_and_v3->GetWitnessHash(), true));
         BOOST_CHECK(*ApplyV3Rules(tx_v3_from_v2_and_v3, *ancestors_v3_from_both, /*num_other_ancestors=*/0, false, empty_conflicts_set, GetVirtualTransactionSize(*tx_v3_from_v2_and_v3))
                     == expected_error_str_2);
         BOOST_CHECK(*PackageV3SanityChecks({mempool_tx_v2, mempool_tx_v3, tx_v3_from_v2_and_v3}) == "txs in package are not all v3");
@@ -166,34 +157,17 @@ BOOST_FIXTURE_TEST_CASE(version3_tests, RegTestingSetup)
         // tx_v3_from_v3
         auto tx_v3_from_v3 = make_tx({COutPoint{mempool_tx_v3->GetHash(), 0}}, /*version=*/3);
         auto ancestors_v3{pool.CalculateMemPoolAncestors(entry.FromTx(tx_v3_from_v3), m_limits)};
-        BOOST_CHECK(CheckV3Inheritance({mempool_tx_v3, tx_v3_from_v3}) == std::nullopt);
 
         // mempool_tx_v2
         //      ^
         // tx_v2_from_v2
         auto tx_v2_from_v2 = make_tx({COutPoint{mempool_tx_v2->GetHash(), 0}}, /*version=*/2);
         auto ancestors_v2{pool.CalculateMemPoolAncestors(entry.FromTx(tx_v2_from_v2), m_limits)};
-        BOOST_CHECK(CheckV3Inheritance({tx_v2_from_v2, mempool_tx_v2}) == std::nullopt);
-        BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, tx_v2_from_v2}) == std::nullopt);
     }
-    // Empty: no violations detected
-    BOOST_CHECK(CheckV3Inheritance({}) == std::nullopt);
-
-    // Just 1 transaction: no violations detected.
-    BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2}) == std::nullopt);
-
-    // Duplicate transactions: no violations detected because no spending relationships between
-    // these transactions.
-    BOOST_CHECK(CheckV3Inheritance({mempool_tx_v3, mempool_tx_v3}) == std::nullopt);
-
-    // Unrelated transactions: no violations detected because no spending relationships between
-    // these transactions.
-    BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, mempool_tx_v3}) == std::nullopt);
 
     // Putting them all together is fine, as spending relationships are checked.
     auto tx_v3_child_1 = make_tx({COutPoint{mempool_tx_v3->GetHash(), 0}}, /*version=*/3);
     auto tx_v2_child_1 = make_tx({COutPoint{mempool_tx_v2->GetHash(), 0}}, /*version=*/2);
-    BOOST_CHECK(CheckV3Inheritance({mempool_tx_v2, tx_v2_child_1, mempool_tx_v3, tx_v3_child_1}) == std::nullopt);
 
     // Tx spending v3 cannot have too many mempool ancestors
     // Configuration where the tx has multiple direct parents.

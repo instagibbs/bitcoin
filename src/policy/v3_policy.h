@@ -60,17 +60,6 @@ std::optional<std::string> ApplyV3Rules(const CTransactionRef& ptx,
                                         const std::set<Txid>& direct_conflicts,
                                         int64_t vsize);
 
-/** Helper function for PackageV3SanityChecks below.
- * Any two unconfirmed transactions with a dependency relationship must either both be v3 or both
- * be non-v3. Check this rule for any list of unconfirmed transactions (no topology requirements).
- *
- * @returns a tuple (parent wtxid, child wtxid, bool) where one is V3 but the other is not, if at
- * least one such pair exists. The bool represents whether the child is v3 or not. There may be
- * other such pairs that are not returned.
- * Otherwise std::nullopt.
- */
-std::optional<std::tuple<Wtxid, Wtxid, bool>> CheckV3Inheritance(const Package& package);
-
 /** Optimization for early package rejection. Should not be called for non-v3 packages.
  *
  * Check the following rules for transactions within the package:

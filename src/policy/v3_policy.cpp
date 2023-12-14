@@ -57,28 +57,30 @@ std::optional<std::tuple<Wtxid, Wtxid, bool>> CheckV3Inheritance(const Package& 
 
 std::optional<std::string> PackageV3SanityChecks(const Package& package)
 {
+    // This should only be called in scenarios where the topo of the package
+    // is restricted to a connected component of specific shape.
+    Assume(IsChildWithParents(package));
+
+    const bool all_v3{std::all_of(package.cbegin(), package.cend(), [](const auto& tx){ return tx->nVersion == 3; })};
     // Check inheritance rules within package.
-    if (const auto inheritance_error{CheckV3Inheritance(package)}) {
-        const auto [parent_wtxid, child_wtxid, child_v3] = inheritance_error.value();
-        if (child_v3) {
-            return strprintf("v3 tx %s cannot spend from non-v3 tx %s", child_wtxid.ToString(), parent_wtxid.ToString());
-        } else {
-            return strprintf("non-v3 tx %s cannot spend from v3 tx %s", child_wtxid.ToString(), parent_wtxid.ToString());
-        }
+    if (!all_v3) {
+        // We already checked there was one at least
+        Assume(std::any_of(package.cbegin(), package.cend(), [](const auto& tx){ return tx->nVersion == 3; }));
+        return strprintf("txs in package are not all v3");
     }
 
     // Sanity check that package itself obeys ancestor/descendant limits. Assumes that this is
     // ancestor package-shaped. This check is not complete as we have not seen in-mempool ancestors yet.
-    if (!package.empty() && package.size() > V3_ANCESTOR_LIMIT && package.back()->nVersion == 3) {
+    if (package.size() > V3_ANCESTOR_LIMIT) {
         const auto& child_wtxid = package.back()->GetWitnessHash();
         return strprintf("tx %s would have too many ancestors", child_wtxid.ToString());
     }
 
     // Sanity check that a v3 transaction with unconfirmed ancestors is within V3_CHILD_MAX_VSIZE.
     // Again, this assumes that all transactions are part of the last transaction's ancestor set.
-    // This check is not complete as we have not calculated the sigop cost, which is part of vsize.
+    // Sigops adjusted size can only make this value larger once inputs are pulled in.
     if (package.size() > 1) {
-        const int64_t vsize = GetVirtualTransactionSize(*package.back());
+        const int64_t vsize = GetVirtualTransactionSize(*package.back(), /*nSigOpCost=*/0, /*bytes_per_sigop=*/0);
         if (vsize > V3_CHILD_MAX_VSIZE) {
             return strprintf("v3 child tx is too big: %u > %u virtual bytes", vsize, V3_CHILD_MAX_VSIZE);
         }
@@ -90,6 +92,7 @@ std::optional<std::string> PackageV3SanityChecks(const Package& package)
 std::optional<std::string> ApplyV3Rules(const CTransactionRef& ptx,
                                         const CTxMemPool::setEntries& ancestors,
                                         unsigned int num_other_ancestors,
+                                        unsigned int num_non_v3_in_package_ancestors,
                                         const std::set<Txid>& direct_conflicts,
                                         int64_t vsize)
 {
@@ -108,8 +111,18 @@ std::optional<std::string> ApplyV3Rules(const CTransactionRef& ptx,
     static_assert(V3_ANCESTOR_LIMIT == 2);
     static_assert(V3_DESCENDANT_LIMIT == 2);
 
-    // The rest of the rules only apply to transactions with nVersion=3.
-    if (ptx->nVersion != 3) return std::nullopt;
+    if (ptx->nVersion != 3) {
+        if (num_other_ancestors - num_non_v3_in_package_ancestors > 0) {
+            return strprintf("non-v3 tx %s has a v3 in-package ancestor", ptx->GetWitnessHash().ToString());
+        }
+        // The rest of the rules only apply to transactions with nVersion=3.
+        return std::nullopt;
+    }
+
+    // If this is V3, it cannot have in-package ancestors that are non-V3
+    if (num_non_v3_in_package_ancestors > 0) {
+        return strprintf("tx %s has a non-v3 in-package ancestor", ptx->GetWitnessHash().ToString());
+    }
 
     // Check that V3_ANCESTOR_LIMIT would not be violated, including both in-package and in-mempool.
     if (ancestors.size() + num_other_ancestors + 1 > V3_ANCESTOR_LIMIT) {

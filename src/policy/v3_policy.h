@@ -56,6 +56,7 @@ static_assert(V3_CHILD_MAX_VSIZE + MAX_STANDARD_TX_WEIGHT / WITNESS_SCALE_FACTOR
 std::optional<std::string> ApplyV3Rules(const CTransactionRef& ptx,
                                         const CTxMemPool::setEntries& ancestors,
                                         unsigned int num_other_ancestors,
+                                        unsigned int num_non_v3_in_package_ancestors,
                                         const std::set<Txid>& direct_conflicts,
                                         int64_t vsize);
 
@@ -70,7 +71,7 @@ std::optional<std::string> ApplyV3Rules(const CTransactionRef& ptx,
  */
 std::optional<std::tuple<Wtxid, Wtxid, bool>> CheckV3Inheritance(const Package& package);
 
-/** Must be called for every package containing any v3 transaction. Should not be called for non-v3 packages.
+/** Optimization for early package rejection. Should not be called for non-v3 packages.
  *
  * Check the following rules for transactions within the package:
  * 1. A v3 tx must only have v3 unconfirmed ancestors.
@@ -80,7 +81,7 @@ std::optional<std::tuple<Wtxid, Wtxid, bool>> CheckV3Inheritance(const Package& 
  * 5. If a v3 tx has any unconfirmed ancestors, the tx's sigop-adjusted vsize must be within
  * V3_CHILD_MAX_VSIZE.
  *
- * Important: this function is necessary but insufficient to enforce these rules.  ApplyV3Rules must
+ * Important: this function is not necessary to enforce these rules.  ApplyV3Rules must
  * still be called for each individual transaction, after in-mempool ancestors, virtual sizes, and
  * in-package ancestors have been calculated. This function serves as a way to quit early on
  * packages in which those calculations may be expensive.

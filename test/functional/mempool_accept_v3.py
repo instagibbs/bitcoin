@@ -257,12 +257,17 @@ class MempoolAcceptV3(BitcoinTestFramework):
 
         assert_equal(node.getrawmempool(), [])
         result = node.submitpackage([tx_v3_parent_normal["hex"], tx_v3_parent_2_normal["hex"], tx_v3_child_multiparent["hex"]])
-        assert_equal(result['package_msg'], "v3-violation")
+        # assert_equal(result['package_msg'], "v3-violation")
+        # N.B. this error only happens if I turn off sanity checks; should be exposed with testmempoolaccept
+        assert "would have too many ancestors" in result["tx-results"][tx_v3_child_multiparent["wtxid"]]["error"]
         self.check_mempool([])
 
         assert_equal(node.getrawmempool(), [])
         result = node.submitpackage([tx_v3_parent_normal["hex"], tx_v3_child_heavy["hex"]])
-        assert_equal(result['package_msg'], "v3-violation")
+        # assert_equal(result['package_msg'], "v3-violation")
+        # N.B. this error only happens if I turn off sanity checks; should be exposed with testmempoolaccept
+        assert "v3 child tx is too big" in result["tx-results"][tx_v3_child_heavy["wtxid"]]["error"]
+
         self.check_mempool([])
 
     @cleanup
@@ -313,7 +318,9 @@ class MempoolAcceptV3(BitcoinTestFramework):
         )
         assert_equal(node.getrawmempool(), [])
         result = node.submitpackage([tx_v3_parent["hex"], tx_v2_child["hex"]])
-        assert_equal(result['package_msg'], "v3-violation")
+        # assert_equal(result['package_msg'], "v3-violation")
+        # N.B. this error only happens if I turn off sanity checks; should be exposed with testmempoolaccept
+        assert "v3-rule-violation, non-v3 tx" in result["tx-results"][tx_v2_child["wtxid"]]["error"]
         self.check_mempool([])
 
     def run_test(self):

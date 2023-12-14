@@ -626,6 +626,9 @@ private:
          * Reused across PolicyScriptChecks and ConsensusScriptChecks. */
         PrecomputedTransactionData m_precomputed_txdata;
 
+        /** Used to fail V3 in-package inheritence failures */
+        unsigned int m_num_non_v3_in_package_ancestors{0};
+
         /** Number of in-package ancestors, excluding itself. If applicable, populated at the start
          * of each PreChecks iteration within AcceptMultipleTransactions. */
         unsigned int m_num_in_package_ancestors{0};
@@ -966,7 +969,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // already calculated.
     CTxMemPool::setEntries collective_ancestors = *ancestors;
     collective_ancestors.merge(ws.m_ancestors_of_in_package_ancestors);
-    if (const auto err_string{ApplyV3Rules(ws.m_ptx, collective_ancestors, ws.m_num_in_package_ancestors, ws.m_conflicts, ws.m_vsize)}) {
+    if (const auto err_string{ApplyV3Rules(ws.m_ptx, collective_ancestors, ws.m_num_in_package_ancestors, ws.m_num_non_v3_in_package_ancestors, ws.m_conflicts, ws.m_vsize)}) {
         return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "v3-rule-violation", *err_string);
     }
 
@@ -1311,11 +1314,12 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
                    [](const auto& tx) { return Workspace(tx); });
     std::map<uint256, MempoolAcceptResult> results;
 
-    // Not a complete check of v3 rules, helps us detect failures early.
     // Some data structures are only necessary if we are checking v3 rules; skip this work if those
     // rules are not applicable.
     const bool check_v3_rules{std::any_of(txns.cbegin(), txns.cend(), [](const auto& tx){ return tx->nVersion == 3; })};
-    if (check_v3_rules) {
+    // FIXME turned off PackageV3SanityChecks to demonstrate it's simply additional coverage
+    if (!args.m_test_accept && check_v3_rules && false) {
+        // These checks are only an optimization helps us detect failures early if we're actually intenting on submitting.
         if (const auto err_string{PackageV3SanityChecks(txns)}) {
             package_state.Invalid(PackageValidationResult::PCKG_POLICY, "v3-violation", err_string.value());
             return PackageMempoolAcceptResult(package_state, std::move(results));
@@ -1327,10 +1331,17 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
     // due to something being accepted.
     const auto in_package_ancestors{CalculateInPackageAncestors(txns)};
 
+    // Hack: Used for quick lookup of in-package transactions below
+    std::map<Txid, CTransactionRef> txid_to_txref;
+    for (const auto& tx : txns) {
+        txid_to_txref.emplace(tx->GetHash(), tx);
+    }
+
     LOCK(m_pool.cs);
 
     // Do all PreChecks first and fail fast to avoid running expensive script checks when unnecessary.
     for (Workspace& ws : workspaces) {
+        // TODO encapsulate all this as GetInPackageAncestorInfo() or something
         // This process is O(n^2) in the number of transactions, so only do it when v3 rules are
         // applicable. PackageV3SanityChecks helps significantly limit the computation here.
         if (check_v3_rules) {
@@ -1346,6 +1357,15 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
                 // If somehow CalculateInPackageAncestors failed to find this transaction's ancestor set,
                 // we use a safe (over)estimate that all of the transactions are in the ancestor set.
                 ws.m_num_in_package_ancestors = txns.size() - 1;
+            }
+
+            // For each in-package ancestor, check for non-v3
+            for (const auto& ancestor : ancestor_set_iter->second) {
+                if (const auto tx_ref_iter = txid_to_txref.find(ancestor); tx_ref_iter != txid_to_txref.end()) {
+                    if (tx_ref_iter->second->GetHash() != ws.m_ptx->GetHash() && tx_ref_iter->second->nVersion != 3) {
+                        ws.m_num_non_v3_in_package_ancestors += 1;;
+                    }
+                }
             }
 
             // If this tx is one of our ancestors, add all of its in-mempool ancestors to ours.

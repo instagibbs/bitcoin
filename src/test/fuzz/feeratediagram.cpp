@@ -73,6 +73,17 @@ void PopulateDiagram(FuzzedDataProvider& fuzzed_data_provider, std::vector<FeeFr
     return;
 }
 
+void PopulateChunks(FuzzedDataProvider& fuzzed_data_provider, std::vector<FeeFrac>& chunks)
+{
+    chunks.clear();
+
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 50)
+    {
+        chunks.emplace_back(FeeFrac{fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(INT32_MIN>>1, INT32_MAX>>1), fuzzed_data_provider.ConsumeIntegralInRange<int32_t>(1, 1000000)});
+    }
+    return;
+}
+
 } // namespace
 
 FUZZ_TARGET(rbf_compare_feerate_diagram)
@@ -83,6 +94,36 @@ FUZZ_TARGET(rbf_compare_feerate_diagram)
 
     PopulateDiagram(fuzzed_data_provider, diagram1);
     PopulateDiagram(fuzzed_data_provider, diagram2);
+
+    // Note: CompareFeerateDiagram will pad the diagrams to be the same size. I
+    // believe this is needed, both for correctness of the algorithm, and also
+    // so that the re-implementation above will produce correct results.
+    if (CompareFeerateDiagram(diagram1, diagram2)) {
+        assert(CompareFeerateDiagram(diagram2, diagram1) == false);
+        assert(CompareDiagrams(diagram1, diagram2) == -1);
+    }
+    if (CompareFeerateDiagram(diagram2, diagram1)) {
+        assert(CompareDiagrams(diagram2, diagram1) == -1);
+    }
+    return;
+}
+
+FUZZ_TARGET(build_and_compare_feerate_diagram)
+{
+    // Generate a random set of chunks
+    FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+    std::vector<FeeFrac> chunks1, chunks2;
+    std::vector<FeeFrac> diagram1, diagram2;
+    FeeFrac empty{0, 0};
+
+    PopulateChunks(fuzzed_data_provider, chunks1);
+    PopulateChunks(fuzzed_data_provider, chunks2);
+
+    BuildDiagramFromUnsortedChunks(chunks1, diagram1);
+    BuildDiagramFromUnsortedChunks(chunks2, diagram2);
+
+    assert(diagram1.front() == empty);
+    assert(diagram2.front() == empty);
 
     // Note: CompareFeerateDiagram will pad the diagrams to be the same size. I
     // believe this is needed, both for correctness of the algorithm, and also

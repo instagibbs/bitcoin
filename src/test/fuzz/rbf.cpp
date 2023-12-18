@@ -147,4 +147,8 @@ FUZZ_TARGET(package_rbf, .init = initialize_rbf)
         assert(old_diagram.back().fee - replaced_fee + replacement_fees == new_diagram.back().fee);
         assert(old_diagram.back().size - replaced_size + replacement_vsize == new_diagram.back().size);
     }
+
+    // If internals report error, wrapper should too
+    auto err_string2{ImprovesFeerateDiagram(pool, direct_conflicts, all_conflicts, replacement_vsize, replacement_fees)};
+    if (err_string.has_value()) assert(err_string2.has_value());
 }

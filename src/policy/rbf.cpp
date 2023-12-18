@@ -190,7 +190,10 @@ int InterpolateValueAndCompare(int64_t eval_size, const FeeFrac& p1, const FeeFr
 {
     // Interpolate between two points using the formula:
     // y = y1 + (x - x1) * (y2 - y1) / (x2 - x1)
-    // where x is eval_size, y is the interpolated fee, x1 and y1 are p1, and x2 and y2 are p2.
+    // i.e.
+    // y = p1.fee + (eval_size - p1.size) * (p2.fee - p1.fee) / (p2.size - p2.size)
+    // fee_compare = fee value we want to compare against the interpolated y
+    //
     // Then evaluating y > fee_compare is equivalent to checking if y*(x2-x1) > fee_compare*(x2-x1),
     // or y1*(x2-x1) + (x - x1) * (y2 - y1) > fee_compare*(x2-x1).
     int64_t fee_compare_scaled = fee_compare * (p2.size - p1.size); // 1100* 300
@@ -216,6 +219,11 @@ bool CompareFeerateDiagram(std::vector<FeeFrac>& old_diagram, std::vector<FeeFra
 
     // whether the old diagram has at least one point better than new_diagram
     bool old_better = false;
+
+    // Diagrams should be non-empty, and first elements zero in size and fee
+    Assert(!old_diagram.empty() && !new_diagram.empty());
+    Assert(old_diagram[0].fee == 0 && old_diagram[0].size == 0);
+    Assert(new_diagram[0].fee == 0 && new_diagram[0].size == 0);
 
     // Start by padding the smaller diagram with a transaction that pays the
     // tail feerate up to the size of the larger diagram.
@@ -253,9 +261,8 @@ bool CompareFeerateDiagram(std::vector<FeeFrac>& old_diagram, std::vector<FeeFra
         }
     }
 
-    if (new_better && !old_better) return true;
-
-    return false;
+    // New is strictly better at all points; we'll take it
+    return new_better && !old_better;
 }
 
 std::optional<std::string> ImprovesFeerateDiagram(CTxMemPool& pool,
@@ -267,6 +274,7 @@ std::optional<std::string> ImprovesFeerateDiagram(CTxMemPool& pool,
     // Require that the replacement strictly improve the mempool's fee vs. size diagram.
     std::vector<FeeFrac> old_diagram, new_diagram;
 
+    // ok!
     const auto err_string{pool.CalculateFeerateDiagramsForRBF(replacement_fees, replacement_vsize, direct_conflicts, all_conflicts, old_diagram, new_diagram)};
 
     if (err_string.has_value()) {

@@ -316,6 +316,31 @@ BOOST_AUTO_TEST_CASE(feerate_diagram_utilities)
 
     BOOST_CHECK(CompareFeerateDiagram(old_diagram, new_diagram));
     BOOST_CHECK(!CompareFeerateDiagram(new_diagram, old_diagram));
+
+    // Identical diagrams, cannot be strictly better
+    old_diagram = {FeeFrac{0, 0}, FeeFrac{950, 300}, FeeFrac{1050, 400}};
+    new_diagram = {FeeFrac{0, 0}, FeeFrac{950, 300}, FeeFrac{1050, 400}};
+
+    BOOST_CHECK(!CompareFeerateDiagram(old_diagram, new_diagram));
+    BOOST_CHECK(!CompareFeerateDiagram(new_diagram, old_diagram));
+
+    // Same aggregate fee, but different total size (trigger size padding once)
+    old_diagram = {FeeFrac{0, 0}, FeeFrac{950, 300}, FeeFrac{1050, 399}};
+    new_diagram = {FeeFrac{0, 0}, FeeFrac{950, 300}, FeeFrac{1050, 400}};
+
+    // Only pads once, no change in evaluation
+    BOOST_CHECK(!CompareFeerateDiagram(old_diagram, new_diagram));
+    Assert(new_diagram.size() + 1 == old_diagram.size());
+    BOOST_CHECK(!CompareFeerateDiagram(old_diagram, new_diagram));
+    Assert(new_diagram.size() + 1 == old_diagram.size());
+
+    old_diagram = {FeeFrac{0, 0}, FeeFrac{950, 300}, FeeFrac{1050, 399}};
+
+    // Padding happens on either argument
+    BOOST_CHECK(CompareFeerateDiagram(new_diagram, old_diagram));
+    Assert(new_diagram.size() + 1 == old_diagram.size());
+    BOOST_CHECK(CompareFeerateDiagram(new_diagram, old_diagram));
+    Assert(new_diagram.size() + 1 == old_diagram.size());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

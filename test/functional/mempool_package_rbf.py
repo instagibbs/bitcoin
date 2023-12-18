@@ -179,8 +179,8 @@ class PackageRBFTest(BitcoinTestFramework):
         node.submitpackage(package_hex1)
         self.assert_mempool_contents(expected=package_txns1)
 
-        # Package 2 has a higher feerate but lower absolute fee
-        package_hex2, package_txns2 = self.create_simple_package(coin, parent_fee=DEFAULT_FEE - fee_delta, child_fee=DEFAULT_FEE + fee_delta - Decimal("0.000000001"))
+        # Package 2 has a higher feerate but lower absolute fee (which diagram check covers)
+        package_hex2, package_txns2 = self.create_simple_package(coin, parent_fee=DEFAULT_FEE - fee_delta, child_fee=DEFAULT_FEE + fee_delta - Decimal("0.00000001"))
         pkg_results2 = node.submitpackage(package_hex2)
         assert_equal(pkg_results2["package_msg"], 'package RBF failed: insufficient feerate')
         self.assert_mempool_contents(expected=package_txns1, unexpected=package_txns2)
@@ -195,9 +195,9 @@ class PackageRBFTest(BitcoinTestFramework):
         package_hex4, package_txns4 = self.create_simple_package(coin, parent_fee=DEFAULT_FEE, child_fee=DEFAULT_FEE)
         node.submitpackage(package_hex4)
         self.assert_mempool_contents(expected=package_txns4, unexpected=[])
-        package_hex5, package_txns5 = self.create_simple_package(coin, parent_fee=DEFAULT_FEE - fee_delta, child_fee=DEFAULT_FEE + fee_delta + Decimal("0.000000001"))
+        package_hex5, package_txns5 = self.create_simple_package(coin, parent_fee=DEFAULT_FEE - fee_delta, child_fee=DEFAULT_FEE + fee_delta + Decimal("0.00000001"))
         pkg_results5 = node.submitpackage(package_hex5)
-        assert_equal(pkg_results5["package_msg"], 'package RBF failed: insufficient feerate')
+        assert_equal(pkg_results5["package_msg"], 'package RBF failed: insufficient anti-DoS fees')
 
         self.assert_mempool_contents(expected=package_txns4, unexpected=package_txns5)
         self.generate(node, 1)

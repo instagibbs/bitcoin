@@ -125,7 +125,7 @@ std::optional<std::string> ImprovesFeerateDiagram(CTxMemPool& pool,
                                                 EXCLUSIVE_LOCKS_REQUIRED(pool.cs);
 
 // returns true if the new_diagram is strictly better than the old one; false
-// otherwise.
+// otherwise. Requires the diagrams start with 0-value, aka empty, elements.
 bool CompareFeerateDiagram(std::vector<FeeFrac>& old_diagram, std::vector<FeeFrac>& new_diagram);
 
 #endif // BITCOIN_POLICY_RBF_H

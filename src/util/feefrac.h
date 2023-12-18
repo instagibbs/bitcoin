@@ -195,4 +195,6 @@ struct FeeFrac
     }
 };
 
+void BuildDiagramFromUnsortedChunks(std::vector<FeeFrac>& chunks, std::vector<FeeFrac>& diagram);
+
 #endif // BITCOIN_UTIL_FEEFRAC_H

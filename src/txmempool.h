@@ -21,6 +21,7 @@
 #include <util/epochguard.h>
 #include <util/hasher.h>
 #include <util/result.h>
+#include <util/feefrac.h>
 
 #include <boost/multi_index/hashed_index.hpp>
 #include <boost/multi_index/identity.hpp>
@@ -733,6 +734,24 @@ public:
     uint64_t GetSequence() const EXCLUSIVE_LOCKS_REQUIRED(cs) {
         return m_sequence_number;
     }
+
+    /**
+     * Calculate the old and new mempool feerate diagrams relating to the
+     * clusters that would be affected by a potential replacement transaction.
+     *
+     * @param[in] replacement_fees    Package fees
+     * @param[in] replacement_vsize   Package size
+     * @param[in] direct_conflicts    All transactions that would be removed directly by
+     *                                having a conflicting input wih a proposed transaction
+     * @param[in] all_conflicts       All transactions that would be removed
+     * @param[out] old_diagram        The feerate diagram of the relevant clusters before accepting the new tx
+     * @param[out] new_diagram        The feerate diagram of the relevant clusters after accepting the new tx
+     * @return An optional error string if the conflicts don't match a calculable topology
+     */
+    std::optional<std::string> CalculateFeerateDiagramsForRBF(CAmount replacement_fees, int64_t replacement_vsize, const setEntries& direct_conflicts, const setEntries& all_conflicts, std::vector<FeeFrac>& old_diagram, std::vector<FeeFrac>& new_diagram) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /* Check that all direct conflicts are in a cluster size of two or less. */
+    std::optional<std::string> CheckConflictTopology(const setEntries& direct_conflicts);
 
 private:
     /** UpdateForDescendants is used by UpdateTransactionsFromBlock to update

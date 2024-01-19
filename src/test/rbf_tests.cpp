@@ -271,6 +271,48 @@ BOOST_FIXTURE_TEST_CASE(rbf_helper_functions, TestChain100Setup)
     BOOST_CHECK(pool.CheckConflictTopology({entry9_unchained, entry10_child2, entry11_unchained}).has_value());
 }
 
+BOOST_FIXTURE_TEST_CASE(improves_feerate, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(::cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+
+    const CAmount low_fee{CENT/100};
+    const CAmount normal_fee{CENT/10};
+
+    // One low feerate txn followed be normal feerate
+    const auto tx1 = make_tx(/*inputs=*/ {m_coinbase_txns[0]}, /*output_values=*/ {10 * COIN});
+    pool.addUnchecked(entry.Fee(low_fee).FromTx(tx1));
+    const auto tx2 = make_tx(/*inputs=*/ {tx1}, /*output_values=*/ {995 * CENT});
+    pool.addUnchecked(entry.Fee(normal_fee).FromTx(tx2));
+
+    const auto entry1 = pool.GetIter(tx1->GetHash()).value();
+    const auto tx1_fee = entry1->GetModifiedFee();
+    const auto tx1_size = entry1->GetTxSize();
+    const auto entry2 = pool.GetIter(tx2->GetHash()).value();
+    const auto tx2_fee = entry2->GetModifiedFee();
+    const auto tx2_size = entry2->GetTxSize();
+
+    // Now test ImprovesFeerateDiagram with various levels of "package rbf" feerates
+
+    // It doesn't improve itself
+    const auto res1 = ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, tx1_fee + tx2_fee, tx1_size + tx2_size);
+    BOOST_CHECK(res1.has_value());
+    BOOST_CHECK(res1.value().first == DiagramCheckError::FAILURE);
+    BOOST_CHECK(res1.value().second == "insufficient feerate: does not improve feerate diagram");
+
+    // With one more satoshi it does
+    BOOST_CHECK(ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, tx1_fee + tx2_fee + 1, tx1_size + tx2_size) == std::nullopt);
+
+    // Make conflict un-calculable(for now)
+    const auto tx3 = make_tx(/*inputs=*/ {tx2}, /*output_values=*/ {995 * CENT});
+    pool.addUnchecked(entry.Fee(normal_fee).FromTx(tx3));
+    const auto res3 = ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, tx1_fee + tx2_fee + 1, tx1_size + tx2_size);
+    BOOST_CHECK(res3.has_value());
+    BOOST_CHECK(res3.value().first == DiagramCheckError::UNCALCULABLE);
+    BOOST_CHECK(res3.value().second == strprintf("%s has 2 descendants, max 1 allowed", tx1->GetHash().GetHex()));
+}
+
 BOOST_AUTO_TEST_CASE(feerate_diagram_utilities)
 {
     // Sanity check the correctness of the feerate diagram comparison.

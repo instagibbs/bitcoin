@@ -971,6 +971,49 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     const uint256& hash = ws.m_hash;
     TxValidationState& state = ws.m_state;
 
+    // Calculate all conflicting entries and enforce Rule #5.
+    if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, ws.m_all_conflicting)}) {
+        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                             "too many potential replacements", *err_string);
+    }
+
+
+    // Gotta be a nicer way: We might try diagram check if this tx would form a cluster of up to size 2
+    std::set<Txid> conflicting_txids;
+    for (const auto& entry : ws.m_iters_conflicting) {
+        conflicting_txids.insert(entry->GetTx().GetHash());
+    }
+    bool try_diagram_check = false;
+    if (ws.m_ancestors.size() <= 1) {
+        try_diagram_check = true;
+        for (const auto& ancestor :  ws.m_ancestors) {
+            const auto desc_count = ancestor->GetCountWithDescendants();
+            if (desc_count > 2) {
+                 try_diagram_check = false;
+            } else if (ancestor->GetCountWithDescendants() ==  2) {
+                const auto children = ancestor->GetMemPoolChildrenConst();
+                for (const auto& child : children) {
+                    if (conflicting_txids.count(child.get().GetTx().GetHash()) == 0) {
+                        try_diagram_check = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // Incentives checks
+    if (try_diagram_check) {
+        const auto err_tuple{ImprovesFeerateDiagram(m_pool, ws.m_iters_conflicting, ws.m_all_conflicting,
+            ws.m_modified_fees, ws.m_vsize)};
+        if (err_tuple.has_value() && err_tuple.value().first != DiagramCheckError::UNCALCULABLE) {
+            // We were able to calculate the diagram check and it failed incentives check
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "insufficient fee", err_tuple.value().second);
+        } else if (err_tuple.has_value()) {
+            // Unable to compute, try heuristic
+            try_diagram_check = false;
+        }
+    }
+    // Fallback to heuristics check if we cannot compute diagram check
     CFeeRate newFeeRate(ws.m_modified_fees, ws.m_vsize);
     // Enforce Rule #6. The replacement transaction must have a higher feerate than its direct conflicts.
     // - The motivation for this check is to ensure that the replacement transaction is preferable for
@@ -981,18 +1024,15 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     //   guarantee that this is incentive-compatible for miners, because it is possible for a
     //   descendant transaction of a direct conflict to pay a higher feerate than the transaction that
     //   might replace them, under these rules.
-    if (const auto err_string{PaysMoreThanConflicts(ws.m_iters_conflicting, newFeeRate, hash)}) {
-        // Even though this is a fee-related failure, this result is TX_MEMPOOL_POLICY, not
-        // TX_RECONSIDERABLE, because it cannot be bypassed using package validation.
-        // This must be changed if package RBF is enabled.
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "insufficient fee", *err_string);
+    if (!try_diagram_check) {
+        if (const auto err_string{PaysMoreThanConflicts(ws.m_iters_conflicting, newFeeRate, hash)}) {
+            // Even though this is a fee-related failure, this result is TX_MEMPOOL_POLICY, not
+            // TX_RECONSIDERABLE, because it cannot be bypassed using package validation.
+            // This must be changed if package RBF is enabled.
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "insufficient fee", *err_string);
+        }
     }
 
-    // Calculate all conflicting entries and enforce Rule #5.
-    if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, ws.m_all_conflicting)}) {
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
-                             "too many potential replacements", *err_string);
-    }
     // Enforce Rule #2.
     if (const auto err_string{HasNoNewUnconfirmed(tx, m_pool, ws.m_iters_conflicting)}) {
         return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,

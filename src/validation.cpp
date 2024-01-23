@@ -997,6 +997,8 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
                         try_diagram_check = false;
                     }
                 }
+            } else {
+                // FIXME add parent to diagram check to OLD(and NEW in turn)
             }
         }
     }

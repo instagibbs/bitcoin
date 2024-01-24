@@ -23,10 +23,28 @@ namespace {
 const BasicTestingSetup* g_setup;
 } // namespace
 
+const int NUM_ITERS = 10000;
+
+std::vector<COutPoint> g_outpoints;
+
 void initialize_rbf()
 {
     static const auto testing_setup = MakeNoLogFileContext<>();
     g_setup = testing_setup.get();
+}
+
+void initialize_package_rbf()
+{
+    static const auto testing_setup = MakeNoLogFileContext<>();
+    g_setup = testing_setup.get();
+
+    // Create a fixed set of unique "UTXOs" to source parents from
+    // to avoid fuzzer giving circular references
+    for (int i = 0; i < NUM_ITERS * 2; ++i) {
+        g_outpoints.emplace_back();
+        g_outpoints.back().n = i;
+    }
+
 }
 
 FUZZ_TARGET(rbf, .init = initialize_rbf)
@@ -40,7 +58,7 @@ FUZZ_TARGET(rbf, .init = initialize_rbf)
 
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node)};
 
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10000)
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), NUM_ITERS)
     {
         const std::optional<CMutableTransaction> another_mtx = ConsumeDeserializable<CMutableTransaction>(fuzzed_data_provider, TX_WITH_WITNESS);
         if (!another_mtx) {
@@ -75,7 +93,7 @@ void CheckDiagramConcave(std::vector<FeeFrac>& diagram)
     }
 }
 
-FUZZ_TARGET(package_rbf, .init = initialize_rbf)
+FUZZ_TARGET(package_rbf, .init = initialize_package_rbf)
 {
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
     SetMockTime(ConsumeTime(fuzzed_data_provider));
@@ -87,12 +105,18 @@ FUZZ_TARGET(package_rbf, .init = initialize_rbf)
 
     // Add a bunch of parent-child pairs to the mempool, and remember them.
     std::vector<CTransaction> txs;
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10000)
+    size_t iter{0};
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), NUM_ITERS)
     {
-        const std::optional<CMutableTransaction> parent = ConsumeDeserializable<CMutableTransaction>(fuzzed_data_provider, TX_WITH_WITNESS);
+        // Make sure txns only have one input, and that a unique input is given to avoid circular references
+        std::optional<CMutableTransaction> parent = ConsumeDeserializable<CMutableTransaction>(fuzzed_data_provider, TX_WITH_WITNESS);
         if (!parent) {
             continue;
         }
+        assert(iter <= g_outpoints.size());
+        parent->vin.resize(1);
+        parent->vin[0].prevout = g_outpoints[iter++];
+
         txs.emplace_back(*parent);
         LOCK2(cs_main, pool.cs);
         pool.addUnchecked(ConsumeTxMemPoolEntry(fuzzed_data_provider, txs.back()));
@@ -137,7 +161,7 @@ FUZZ_TARGET(package_rbf, .init = initialize_rbf)
         CheckDiagramConcave(new_diagram);
 
         CAmount replaced_fee{0};
-        CAmount replaced_size{0};
+        int64_t replaced_size{0};
         for (auto txiter : all_conflicts) {
             replaced_fee += txiter->GetModifiedFee();
             replaced_size += txiter->GetTxSize();

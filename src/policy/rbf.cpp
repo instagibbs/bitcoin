@@ -187,11 +187,45 @@ std::optional<std::string> PaysForRBF(CAmount original_fees,
 std::optional<std::pair<DiagramCheckError, std::string>> ImprovesFeerateDiagram(CTxMemPool& pool,
                                                 const CTxMemPool::setEntries& direct_conflicts,
                                                 const CTxMemPool::setEntries& all_conflicts,
-                                                CAmount replacement_fees,
-                                                int64_t replacement_vsize)
+                                                const std::optional<FeeFrac> parent_feefrac,
+                                                const FeeFrac& child_feefrac,
+                                                bool parent_conflicts)
 {
+    // replacement_*: CNK
+    FeeFrac empty;
+    CAmount replacement_fees{0}; // = parent_conflicts ? parent_fees.value_or(FeeFrac{}).fee + child_feerac.fee : child_feefrac.fee;
+    CAmount replacement_vsize{0}; // = parent_conflicts ? parent_vsize.value_or(0) + child_vsize : child_vsize;
+    // bool parent_in_old_and_new = false;
+
+    // if parent conflicts, this should already be a single chunk package rbf
+    if (parent_conflicts) {
+        Assume(parent_feefrac.has_value());
+        if (parent_feefrac.has_value() && parent_feefrac.value() >= child_feefrac) {
+            return std::make_pair(DiagramCheckError::UNCALCULABLE, "proposed parent-child package is not a chunk");
+        }
+        replacement_fees = parent_feefrac.value_or(FeeFrac{}).fee + child_feefrac.fee;
+        replacement_vsize = parent_feefrac.value_or(FeeFrac{}).size + child_feefrac.size;
+    } else if (parent_feefrac.has_value()) {
+        // Parent is unconflicted, will be in both OLD and NEW
+        if (parent_feefrac.value() >= child_feefrac) {
+            // Parent is own chunk
+            return std::make_pair(DiagramCheckError::UNCALCULABLE, "we only support single chunks for now");
+        } else {
+            // Parent and child one chunk, but parent isn't being added to mempool
+            replacement_fees = parent_feefrac.value_or(empty).fee + child_feefrac.fee;
+            replacement_vsize = parent_feefrac.value_or(empty).size + child_feefrac.size;
+            // Existing parent needs to be accounted for in OLD and NEW
+            // parent_in_old_and_new = true;
+        }
+    }
+
     // Require that the replacement strictly improve the mempool's fee vs. size diagram.
     std::vector<FeeFrac> old_diagram, new_diagram;
+
+    // hack: inject parent in OLD as own chunk if not conflicted
+    if (!parent_conflicts && parent_feefrac.has_value()) {
+        old_diagram.emplace_back(parent_feefrac.value());
+    }
 
     const auto err_string{pool.CalculateFeerateDiagramsForRBF(replacement_fees, replacement_vsize, direct_conflicts, all_conflicts, old_diagram, new_diagram)};
 

@@ -173,6 +173,6 @@ FUZZ_TARGET(package_rbf, .init = initialize_package_rbf)
     }
 
     // If internals report error, wrapper should too
-    auto err_tuple{ImprovesFeerateDiagram(pool, direct_conflicts, all_conflicts, replacement_fees, replacement_vsize)};
+    auto err_tuple{ImprovesFeerateDiagram(pool, direct_conflicts, all_conflicts, std::nullopt, FeeFrac{replacement_fees, replacement_vsize}, false)};
     if (err_string.has_value()) assert(err_tuple.has_value());
 }

@@ -296,18 +296,18 @@ BOOST_FIXTURE_TEST_CASE(improves_feerate, TestChain100Setup)
     // Now test ImprovesFeerateDiagram with various levels of "package rbf" feerates
 
     // It doesn't improve itself
-    const auto res1 = ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, tx1_fee + tx2_fee, tx1_size + tx2_size);
+    const auto res1 = ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, std::nullopt, FeeFrac{tx1_fee + tx2_fee, tx1_size + tx2_size}, false);
     BOOST_CHECK(res1.has_value());
     BOOST_CHECK(res1.value().first == DiagramCheckError::FAILURE);
     BOOST_CHECK(res1.value().second == "insufficient feerate: does not improve feerate diagram");
 
     // With one more satoshi it does
-    BOOST_CHECK(ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, tx1_fee + tx2_fee + 1, tx1_size + tx2_size) == std::nullopt);
+    BOOST_CHECK(ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, std::nullopt, FeeFrac{tx1_fee + tx2_fee + 1, tx1_size + tx2_size}, false) == std::nullopt);
 
     // Make conflict un-calculable(for now)
     const auto tx3 = make_tx(/*inputs=*/ {tx2}, /*output_values=*/ {995 * CENT});
     pool.addUnchecked(entry.Fee(normal_fee).FromTx(tx3));
-    const auto res3 = ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, tx1_fee + tx2_fee + 1, tx1_size + tx2_size);
+    const auto res3 = ImprovesFeerateDiagram(pool, {entry1}, {entry1, entry2}, std::nullopt, FeeFrac{tx1_fee + tx2_fee + 1, tx1_size + tx2_size}, false);
     BOOST_CHECK(res3.has_value());
     BOOST_CHECK(res3.value().first == DiagramCheckError::UNCALCULABLE);
     BOOST_CHECK(res3.value().second == strprintf("%s has 2 descendants, max 1 allowed", tx1->GetHash().GetHex()));

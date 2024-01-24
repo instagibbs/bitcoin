@@ -984,9 +984,12 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         conflicting_txids.insert(entry->GetTx().GetHash());
     }
     bool try_diagram_check = false;
+    std::optional<FeeFrac> parent_feefrac = std::nullopt;
+    FeeFrac child_feefrac{ws.m_modified_fees, ws.m_vsize};
     if (ws.m_ancestors.size() <= 1) {
         try_diagram_check = true;
         for (const auto& ancestor :  ws.m_ancestors) {
+            parent_feefrac = FeeFrac{ancestor->GetModifiedFee(), ancestor->GetTxSize()};
             const auto desc_count = ancestor->GetCountWithDescendants();
             if (desc_count > 2) {
                  try_diagram_check = false;
@@ -998,7 +1001,12 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
                     }
                 }
             } else {
-                // FIXME add parent to diagram check to OLD(and NEW in turn)
+                // FIXME add parent to diagram check to OLD (as its own chunk)
+                // and NEW in turn:
+                // feerate(child) > feerate(parent) -> add parent to fees/size arg
+                // otherwise -> we need a second arg, parent+child fee/size?
+                // What if ImprovesFeerateDiagram handled IsChunk detection?
+                // or do we ignore non-chunks
             }
         }
     }
@@ -1006,7 +1014,8 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     // Incentives checks
     if (try_diagram_check) {
         const auto err_tuple{ImprovesFeerateDiagram(m_pool, ws.m_iters_conflicting, ws.m_all_conflicting,
-            ws.m_modified_fees, ws.m_vsize)};
+            /*parent_feefrac=*/parent_feefrac,
+            /*child_feefrac=*/child_feefrac, /*parent_conflicts=*/false)};
         if (err_tuple.has_value() && err_tuple.value().first != DiagramCheckError::UNCALCULABLE) {
             // We were able to calculate the diagram check and it failed incentives check
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "insufficient fee", err_tuple.value().second);

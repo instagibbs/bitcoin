@@ -128,8 +128,9 @@ std::optional<std::string> PaysForRBF(CAmount original_fees,
 std::optional<std::pair<DiagramCheckError, std::string>> ImprovesFeerateDiagram(CTxMemPool& pool,
                                                 const CTxMemPool::setEntries& direct_conflicts,
                                                 const CTxMemPool::setEntries& all_conflicts,
-                                                CAmount replacement_fees,
-                                                int64_t replacement_vsize)
+                                                const std::optional<FeeFrac> parent_feefrac,
+                                                const FeeFrac& child_feefrac,
+                                                bool parent_conflicts)
                                                 EXCLUSIVE_LOCKS_REQUIRED(pool.cs);
 
 #endif // BITCOIN_POLICY_RBF_H

@@ -2770,6 +2770,9 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     LOCK(cs_main);
     CNodeState *nodestate = State(pfrom.GetId());
 
+    // Header was sent, but blocks not advertised
+    if(!CanServeBlocks(peer)) return;
+
     if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= last_header.nChainWork) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};

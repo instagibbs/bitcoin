@@ -265,6 +265,25 @@ extern const char* WTXIDRELAY;
  * txreconciliation, as described by BIP 330.
  */
 extern const char* SENDTXRCNCL;
+/**
+ * Contains a CBlockHeaderAndShortTxIDs object - providing a header and
+ * list of "short txids".
+ * @since protocol version 70014 as described by BIP 152
+ */
+extern const char* WCMPCTBLOCK;
+/**
+ * Contains a BlockTransactionsRequest
+ * Peer should respond with "blocktxn" message.
+ * @since protocol version 70014 as described by BIP 152
+ */
+extern const char* GETWBLOCKTXN;
+/**
+ * Contains a BlockTransactions.
+ * Sent in response to a "getblocktxn" message.
+ * @since protocol version 70014 as described by BIP 152
+ */
+extern const char* WBLOCKTXN;
+
 }; // namespace NetMsgType
 
 /* Get a vector of all valid message types (see above) */

@@ -821,6 +821,21 @@ class CBlock(CBlockHeader):
             self.nNonce += 1
             self.rehash()
 
+    def unsolve(self, multiplier=2):
+        self.rehash()
+        target = uint256_from_compact(self.nBits)
+        while self.sha256 < target * multiplier:
+            self.nNonce += 1
+            self.rehash()
+
+    # Make a block not consensus valid but above N/multiplier work
+    def solve_weak(self, multiplier=2):
+        self.rehash()
+        target = uint256_from_compact(self.nBits)
+        while self.sha256 > target * multiplier or self.sha256 < target:
+            self.nNonce += 1
+            self.rehash()
+
     # Calculate the block weight using witness and non-witness
     # serialization size (does NOT use sigops).
     def get_weight(self):
@@ -1672,6 +1687,64 @@ class msg_cmpctblock:
 
     def __repr__(self):
         return "msg_cmpctblock(HeaderAndShortIDs=%s)" % repr(self.header_and_shortids)
+
+class msg_weakcmpctblock:
+    __slots__ = ("header_and_shortids",)
+    msgtype = b"wcmpctblock"
+
+    def __init__(self, header_and_shortids = None):
+        self.header_and_shortids = header_and_shortids
+
+    def deserialize(self, f):
+        self.header_and_shortids = P2PHeaderAndShortIDs()
+        self.header_and_shortids.deserialize(f)
+
+    def serialize(self):
+        r = b""
+        r += self.header_and_shortids.serialize()
+        return r
+
+    def __repr__(self):
+        return "msg_weakcmpctblock(HeaderAndShortIDs=%s)" % repr(self.header_and_shortids)
+
+
+class msg_getwblocktxn:
+    __slots__ = ("weak_block_txn_request",)
+    msgtype = b"getwblocktxn"
+
+    def __init__(self):
+        self.weak_block_txn_request = None
+
+    def deserialize(self, f):
+        self.weak_block_txn_request = BlockTransactionsRequest()
+        self.weak_block_txn_request.deserialize(f)
+
+    def serialize(self):
+        r = b""
+        r += self.weak_block_txn_request.serialize()
+        return r
+
+    def __repr__(self):
+        return "msg_getwblocktxn(weak_block_txn_request=%s)" % (repr(self.weak_block_txn_request))
+
+
+class msg_wblocktxn:
+    __slots__ = ("weak_block_transactions",)
+    msgtype = b"wblocktxn"
+
+    def __init__(self):
+        self.weak_block_transactions = BlockTransactions()
+
+    def deserialize(self, f):
+        self.weak_block_transactions.deserialize(f)
+
+    def serialize(self):
+        r = b""
+        r += self.weak_block_transactions.serialize()
+        return r
+
+    def __repr__(self):
+        return "msg_wblocktxn(weak_block_transactions=%s)" % (repr(self.weak_block_transactions))
 
 
 class msg_getblocktxn:

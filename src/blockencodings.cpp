@@ -47,7 +47,7 @@ uint64_t CBlockHeaderAndShortTxIDs::GetShortID(const uint256& txhash) const {
 
 
 
-ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn) {
+ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<uint256, CTransactionRef>>& extra_txn, const std::vector<std::pair<uint256, CTransactionRef>>& weak_block_txns) {
     if (cmpctblock.header.IsNull() || (cmpctblock.shorttxids.empty() && cmpctblock.prefilledtxn.empty()))
         return READ_STATUS_INVALID;
     if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > MAX_BLOCK_WEIGHT / MIN_SERIALIZABLE_TRANSACTION_WEIGHT)
@@ -164,6 +164,39 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
             break;
     }
 
+    // FIXME do something less stupid. Just concat the two lists?
+    for (size_t i = 0; i < weak_block_txns.size(); i++) {
+        uint64_t shortid = cmpctblock.GetShortID(weak_block_txns[i].first);
+        std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
+        if (idit != shorttxids.end()) {
+            if (!have_txn[idit->second]) {
+                txn_available[idit->second] = weak_block_txns[i].second;
+                have_txn[idit->second]  = true;
+                mempool_count++;
+                extra_count++;
+            } else {
+                // If we find two mempool/extra txn that match the short id, just
+                // request it.
+                // This should be rare enough that the extra bandwidth doesn't matter,
+                // but eating a round-trip due to FillBlock failure would be annoying
+                // Note that we don't want duplication between weak_block_txns and mempool to
+                // trigger this case, so we compare witness hashes first
+                if (txn_available[idit->second] &&
+                        txn_available[idit->second]->GetWitnessHash() != weak_block_txns[i].second->GetWitnessHash()) {
+                    txn_available[idit->second].reset();
+                    mempool_count--;
+                    extra_count--;
+                }
+            }
+        }
+        // Though ideally we'd continue scanning for the two-txn-match-shortid case,
+        // the performance win of an early exit here is too good to pass up and worth
+        // the extra risk.
+        if (mempool_count == shorttxids.size())
+            break;
+    }
+
+
     LogPrint(BCLog::CMPCTBLOCK, "Initialized PartiallyDownloadedBlock for block %s using a cmpctblock of size %lu\n", cmpctblock.header.GetHash().ToString(), GetSerializeSize(cmpctblock));
 
     return READ_STATUS_OK;
@@ -177,7 +210,7 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
-ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing)
+ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool check_pow)
 {
     if (header.IsNull()) return READ_STATUS_INVALID;
 
@@ -204,7 +237,7 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
 
     BlockValidationState state;
     CheckBlockFn check_block = m_check_block_mock ? m_check_block_mock : CheckBlock;
-    if (!check_block(block, state, Params().GetConsensus(), /*fCheckPoW=*/true, /*fCheckMerkleRoot=*/true)) {
+    if (!check_block(block, state, Params().GetConsensus(), /*fCheckPoW=*/check_pow, /*fCheckMerkleRoot=*/true)) {
         // TODO: We really want to just check merkle tree manually here,
         // but that is expensive, and CheckBlock caches a block's
         // "checked-status" (in the CBlock?). CBlock should be able to

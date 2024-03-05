@@ -27,6 +27,7 @@
 #include <policy/fees.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
@@ -527,6 +528,10 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_recent_confirmed_transactions_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
     void UpdateLastBlockAnnounceTime(NodeId node, int64_t time_in_seconds) override;
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
+    /** Relays weak block to all high bandwidth cb peers that have not sent this most recently
+     */
+    void RelayWeakBlock(const std::shared_ptr<const CBlock>& pblock) override;
+
 
 private:
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
@@ -671,6 +676,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     void SendBlockTransactions(CNode& pfrom, Peer& peer, const CBlock& block, const BlockTransactionsRequest& req);
+    void SendWeakBlockTransactions(CNode& pfrom, Peer& peer, const CBlock& block, const BlockTransactionsRequest& req);
 
     /** Register with TxRequestTracker that an INV has been received from a
      *  peer. The announcement parameters are decided in PeerManager and then
@@ -867,6 +873,13 @@ private:
     uint256 m_most_recent_block_hash GUARDED_BY(m_most_recent_block_mutex);
     std::unique_ptr<const std::map<uint256, CTransactionRef>> m_most_recent_block_txs GUARDED_BY(m_most_recent_block_mutex);
 
+    // All of the following cache a recent weak block, and are protected by m_most_recent_weak_block_mutex
+    Mutex m_most_recent_weak_block_mutex;
+    std::shared_ptr<const CBlock> m_most_recent_weak_block GUARDED_BY(m_most_recent_weak_block_mutex);
+    std::shared_ptr<const CBlockHeaderAndShortTxIDs> m_most_recent_weak_compact_block GUARDED_BY(m_most_recent_weak_block_mutex);
+    uint256 m_most_recent_weak_block_hash GUARDED_BY(m_most_recent_weak_block_mutex);
+    std::vector<std::pair<uint256, CTransactionRef>> m_most_recent_weak_block_txs GUARDED_BY(m_most_recent_weak_block_mutex);
+
     // Data about the low-work headers synchronization, aggregated from all peers' HeadersSyncStates.
     /** Mutex guarding the other m_headers_presync_* variables. */
     Mutex m_headers_presync_mutex;
@@ -952,6 +965,9 @@ private:
     typedef std::multimap<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>> BlockDownloadMap;
     BlockDownloadMap mapBlocksInFlight GUARDED_BY(cs_main);
 
+    NodeId m_weak_partial_block_source;
+    std::shared_ptr<PartiallyDownloadedBlock> m_weak_partial_block;
+
     /** When our tip was last updated. */
     std::atomic<std::chrono::seconds> m_last_tip_update{0s};
 
@@ -988,6 +1004,8 @@ private:
     TxOrphanage m_orphanage;
 
     void AddToCompactExtraTransactions(const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+
+    void AddToWeakBlockTransactions(const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     /** Orphan/conflicted/etc transactions that are kept for compact block reconstruction.
      *  The last -blockreconstructionextratxn/DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN of
@@ -1083,6 +1101,7 @@ private:
 
     void AddAddressKnown(Peer& peer, const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     void PushAddress(Peer& peer, const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+
 };
 
 const CNodeState* PeerManagerImpl::State(NodeId pnode) const EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -2079,6 +2098,52 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
     });
 }
 
+void PeerManagerImpl::RelayWeakBlock(const std::shared_ptr<const CBlock>& pblock)
+{
+    auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock);
+
+    LOCK(cs_main);
+
+    const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(pcmpctblock->header.hashPrevBlock);
+    Assert(prev_block);
+
+    m_most_recent_weak_block = pblock;
+
+    uint256 block_hash(pblock->GetHash());
+    const std::shared_future<CSerializedNetMsg> lazy_ser{
+        std::async(std::launch::deferred, [&] { return NetMsg::Make(NetMsgType::WCMPCTBLOCK, *pcmpctblock); })};
+    {
+        std::vector<std::pair<uint256, CTransactionRef>> most_recent_weak_block_txs;
+        for (const auto& tx : pblock->vtx) {
+            most_recent_weak_block_txs.emplace_back(tx->GetWitnessHash(), tx);
+        }
+
+        LOCK(m_most_recent_block_mutex);
+        m_most_recent_weak_block_hash = block_hash;
+        m_most_recent_weak_block = pblock;
+        m_most_recent_weak_compact_block = pcmpctblock;
+        m_most_recent_weak_block_txs = most_recent_weak_block_txs;
+    }
+
+    m_connman.ForEachNode([this, prev_block, &lazy_ser, &block_hash](CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+
+        if (pnode->GetCommonVersion() < INVALID_CB_NO_BAN_VERSION || pnode->fDisconnect)
+            return;
+        ProcessBlockAvailability(pnode->GetId());
+        CNodeState &state = *State(pnode->GetId());
+        // We should only announce weak block to peers we expect might not know about it already
+        if (state.m_requested_hb_cmpctblocks && PeerHasHeader(&state, prev_block)) {
+
+            LogPrint(BCLog::NET, "%s sending header-and-ids %s to peer=%d\n", "PeerManager::RelayWeakBlock",
+                    block_hash.ToString(), pnode->GetId());
+
+            const CSerializedNetMsg& ser_cmpctblock{lazy_ser.get()};
+            PushMessage(*pnode, ser_cmpctblock.Copy());
+        }
+    });
+}
+
 /**
  * Update our best height and announce any block hashes which weren't previously
  * in m_chainman.ActiveChain() to our peers.
@@ -2523,6 +2588,19 @@ void PeerManagerImpl::SendBlockTransactions(CNode& pfrom, Peer& peer, const CBlo
     MakeAndPushMessage(pfrom, NetMsgType::BLOCKTXN, resp);
 }
 
+void PeerManagerImpl::SendWeakBlockTransactions(CNode& pfrom, Peer& peer, const CBlock& block, const BlockTransactionsRequest& req)
+{
+    BlockTransactions resp(req);
+    for (size_t i = 0; i < req.indexes.size(); i++) {
+        if (req.indexes[i] >= block.vtx.size()) {
+            Misbehaving(peer, 100, "getwblocktxn with out-of-bounds tx indices");
+            return;
+        }
+        resp.txn[i] = block.vtx[req.indexes[i]];
+    }
+
+    MakeAndPushMessage(pfrom, NetMsgType::WBLOCKTXN, resp);
+}
 bool PeerManagerImpl::CheckHeadersPoW(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams, Peer& peer)
 {
     // Do these headers have proof-of-work matching what's claimed?
@@ -4400,6 +4478,168 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::WCMPCTBLOCK)
+    {
+        // Ignore cmpctblock received while importing
+        if (m_chainman.m_blockman.LoadingBlocks()) {
+            LogPrint(BCLog::NET, "Unexpected weakcmpctblock message received from peer %d\n", pfrom.GetId());
+            return;
+        }
+
+        CBlockHeaderAndShortTxIDs cmpctblock;
+        vRecv >> cmpctblock;
+
+        const auto blockhash = cmpctblock.header.GetHash();
+
+        {
+            LOCK(cs_main);
+
+            // Check it connects to index
+            const CBlockIndex* prev_block = m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock);
+            if (!prev_block) {
+                LogPrint(BCLog::NET, "weakcmpctblock doesn't connect to known block: %s\n", blockhash.ToString());
+                return;
+            }
+
+            // Make sure we don't already have the block
+            if (m_chainman.m_blockman.LookupBlockIndex(blockhash)) {
+                LogPrint(BCLog::NET, "weakcmpctblock is an already known block: %s\n", blockhash.ToString());
+                return;
+            }
+
+            // Claims to be better than our tip if at full PoW
+            if (prev_block->nChainWork + CalculateHeadersWork({cmpctblock.header}) <= GetAntiDoSWorkThreshold()) {
+                // If we get a low-work header in a compact block, we can ignore it.
+                LogPrint(BCLog::NET, "Ignoring low-work compact block from peer %d\n", pfrom.GetId());
+                return;
+            }
+
+        }
+
+        // Check claimed PoW against 1/N target (N==2)
+        if (!CheckWeakProofOfWork(blockhash, cmpctblock.header.nBits, /*multiplier=*/2, m_chainparams.GetConsensus())) {
+            LogPrint(BCLog::NET, "weak compact block work too low from peer %d\n", pfrom.GetId());
+            return;
+        }
+
+        // If we're not close to tip yet, give up and let parallel block fetch work its magic
+        if (!CanDirectFetch()) {
+            LogPrint(BCLog::NET, "Too far behind to get weak block from peer %d\n", pfrom.GetId());
+            return;
+        }
+
+        // We have one partial block for weak blocks
+        m_weak_partial_block.reset(new PartiallyDownloadedBlock(&m_mempool));
+        m_weak_partial_block_source = pfrom.GetId();
+
+        ReadStatus status = m_weak_partial_block->InitData(cmpctblock, vExtraTxnForCompact, m_most_recent_weak_block_txs);
+
+        if (status == READ_STATUS_INVALID) {
+            m_weak_partial_block.reset();
+            Misbehaving(*peer, 100, "invalid weak compact block");
+            return;
+        } else if (status == READ_STATUS_FAILED) {
+            // Hope we are less unlucky next weak block
+            return;
+        }
+
+        BlockTransactionsRequest req;
+        for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+            if (!m_weak_partial_block->IsTxAvailable(i)) {
+                req.indexes.push_back(i);
+            }
+        }
+        if (req.indexes.empty()) {
+            // Everything looks good, protect the transactions in case they're evicted
+            std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
+            std::vector<CTransactionRef> dummy;
+            status = m_weak_partial_block->FillBlock(*pblock, dummy, /*check_pow=*/false);
+            if (status == READ_STATUS_OK) {
+                LogPrint(BCLog::NET, "Reconstructed weak compact block %s from peer %d\n", blockhash.ToString(), pfrom.GetId());
+                RelayWeakBlock(pblock);
+            } else {
+                LogPrint(BCLog::NET, "Unable to reconstruct weak compact block %s from peer %d\n", blockhash.ToString(), pfrom.GetId());
+            }
+            m_weak_partial_block.reset();
+        } else {
+            // We can't be sure of what we've been told yet, don't protect
+            // anything.
+            req.blockhash = cmpctblock.header.GetHash();
+            MakeAndPushMessage(pfrom, NetMsgType::GETWBLOCKTXN, req);
+        }
+
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETWBLOCKTXN)
+    {
+        BlockTransactionsRequest req;
+        vRecv >> req;
+
+        // Only handling "most recent" weak block for now
+        std::shared_ptr<const CBlock> recent_weak_block;
+        {
+            LOCK(m_most_recent_weak_block_mutex);
+            if (m_most_recent_weak_block_hash == req.blockhash)
+                recent_weak_block = m_most_recent_weak_block;
+            // Unlock m_most_recent_block_mutex to avoid cs_main lock inversion
+        }
+        if (recent_weak_block) {
+            SendWeakBlockTransactions(pfrom, *peer, *recent_weak_block, req);
+            return;
+        }
+
+        LogPrint(BCLog::NET, "Unhandled get weak compact block txn from peer %d\n", pfrom.GetId());
+        return;
+    }
+
+    if (msg_type == NetMsgType::WBLOCKTXN)
+    {
+        LogPrint(BCLog::NET, "Received wblocktxn from peer %d\n", pfrom.GetId());
+
+        BlockTransactions resp;
+        vRecv >> resp;
+
+        if (pfrom.GetId() != m_weak_partial_block_source) {
+            LogPrint(BCLog::NET, "Didn't ask for wblocktxn from peer %d; ignoring\n", pfrom.GetId());
+            return;
+        }
+
+        // Check that it matches what we most recently asked for
+        if (!m_weak_partial_block || m_weak_partial_block->header.GetHash() != resp.blockhash) {
+            LogPrint(BCLog::NET, "Wrong wblocktxn header %s from peer %d; ignoring\n", resp.blockhash.ToString(), pfrom.GetId());
+            return;
+        }
+
+        std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
+        ReadStatus status = m_weak_partial_block->FillBlock(*pblock, resp.txn, /*check_pow=*/false);
+        if (status == READ_STATUS_OK) {
+            LogPrint(BCLog::NET, "Reconstructed weak compact block %s from peer %d\n", pblock->GetHash().ToString(), pfrom.GetId());
+            for (const auto& tx : pblock->vtx) {
+                // We try to insert everything we hear about into mempool
+                // FIXME do obvious protections like checking recent rejects etc
+                {
+                    LOCK(cs_main);
+                    const MempoolAcceptResult result = m_chainman.ProcessTransaction(tx);
+                    if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                        LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: peer=%d: accepted %s (wtxid=%s) (poolsz %u txn, %u kB)\n",
+                            pfrom.GetId(),
+                            tx->GetHash().ToString(),
+                            tx->GetWitnessHash().ToString(),
+                            m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
+                    }
+                }
+            }
+            RelayWeakBlock(pblock);
+        } else {
+            LogPrint(BCLog::NET, "Unable to reconstruct weak compact block %s from peer %d\n", resp.blockhash.ToString(), pfrom.GetId());
+        }
+        m_weak_partial_block.reset();
+        m_weak_partial_block_source = -1;
+
+        return;
+    }
+
     if (msg_type == NetMsgType::CMPCTBLOCK)
     {
         // Ignore cmpctblock received while importing
@@ -4526,7 +4766,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
 
                 PartiallyDownloadedBlock& partialBlock = *(*queuedBlockIt)->partialBlock;
-                ReadStatus status = partialBlock.InitData(cmpctblock, vExtraTxnForCompact);
+                ReadStatus status = partialBlock.InitData(cmpctblock, vExtraTxnForCompact, m_most_recent_weak_block_txs);
                 if (status == READ_STATUS_INVALID) {
                     RemoveBlockRequest(pindex->GetBlockHash(), pfrom.GetId()); // Reset in-flight state in case Misbehaving does not result in a disconnect
                     Misbehaving(*peer, 100, "invalid compact block");
@@ -4577,7 +4817,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // Optimistically try to reconstruct anyway since we might be
                 // able to without any round trips.
                 PartiallyDownloadedBlock tempBlock(&m_mempool);
-                ReadStatus status = tempBlock.InitData(cmpctblock, vExtraTxnForCompact);
+                ReadStatus status = tempBlock.InitData(cmpctblock, vExtraTxnForCompact, m_most_recent_weak_block_txs);
                 if (status != READ_STATUS_OK) {
                     // TODO: don't ignore failures
                     return;

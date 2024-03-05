@@ -53,6 +53,7 @@ from test_framework.messages import (
     msg_getcfilters,
     msg_getdata,
     msg_getheaders,
+    msg_getwblocktxn,
     msg_headers,
     msg_inv,
     msg_mempool,
@@ -69,6 +70,7 @@ from test_framework.messages import (
     MSG_TYPE_MASK,
     msg_verack,
     msg_version,
+    msg_wblocktxn,
     MSG_WTX,
     msg_wtxidrelay,
     NODE_NETWORK,
@@ -145,6 +147,8 @@ MESSAGEMAP = {
     b"verack": msg_verack,
     b"version": msg_version,
     b"wtxidrelay": msg_wtxidrelay,
+    b"getwblocktxn": msg_getwblocktxn,
+    b"wblocktxn": msg_wblocktxn,
 }
 
 
@@ -532,6 +536,8 @@ class P2PInterface(P2PConnection):
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
     def on_getheaders(self, message): pass
+    def on_getwblocktxn(self, message): pass
+    def on_wblocktxn(self, message): pass
     def on_headers(self, message): pass
     def on_mempool(self, message): pass
     def on_merkleblock(self, message): pass

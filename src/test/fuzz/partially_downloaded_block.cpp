@@ -79,7 +79,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         }
     }
 
-    auto init_status{pdb.InitData(cmpctblock, extra_txn)};
+    auto init_status{pdb.InitData(cmpctblock, extra_txn, extra_txn)};
 
     std::vector<CTransactionRef> missing;
     // Whether we skipped a transaction that should be included in `missing`.

@@ -20,6 +20,7 @@
 #include <deploymentstatus.h>
 #include <key_io.h>
 #include <net.h>
+#include <net_processing.h>
 #include <node/context.h>
 #include <node/miner.h>
 #include <pow.h>
@@ -969,6 +970,67 @@ static RPCHelpMan getblocktemplate()
     };
 }
 
+static RPCHelpMan submitweakblock()
+{
+    return RPCHelpMan{"submitweakblock",
+        "\nAttempts to submit weak block to network.\n",
+        {
+            {"hexdata", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the hex-encoded block data to submit"},
+        },
+        {
+            RPCResult{"If the block was accepted", RPCResult::Type::NONE, "", ""},
+            RPCResult{"Otherwise", RPCResult::Type::STR, "", "According to BIP22"},
+        },
+        RPCExamples{
+                    HelpExampleCli("submitweakblock", "\"mydata\"")
+            + HelpExampleRpc("submitweakblock", "\"mydata\"")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    PeerManager& peerman = EnsurePeerman(node);
+
+    std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
+    CBlock& block = *blockptr;
+    if (!DecodeHexBlk(block, request.params[0].get_str())) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block decode failed");
+    }
+
+    if (block.vtx.empty() || !block.vtx[0]->IsCoinBase()) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Block does not start with a coinbase");
+    }
+
+    ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    uint256 hash = block.GetHash();
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(hash);
+        if (pindex) {
+            if (pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
+                return "duplicate";
+            }
+            if (pindex->nStatus & BLOCK_FAILED_MASK) {
+                return "duplicate-invalid";
+            }
+        }
+    }
+
+    {
+        LOCK(cs_main);
+        const CBlockIndex* pindex = chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock);
+        if (!pindex) {
+            return "unconnected";
+        }
+    }
+
+    // FIXME make sure this is better than chaintip
+    peerman.RelayWeakBlock(blockptr);
+    return UniValue::VNULL;
+},
+    };
+}
+
+
 class submitblock_StateCatcher final : public CValidationInterface
 {
 public:
@@ -1103,6 +1165,7 @@ void RegisterMiningRPCCommands(CRPCTable& t)
         {"mining", &prioritisetransaction},
         {"mining", &getprioritisedtransactions},
         {"mining", &getblocktemplate},
+        {"mining", &submitweakblock},
         {"mining", &submitblock},
         {"mining", &submitheader},
 

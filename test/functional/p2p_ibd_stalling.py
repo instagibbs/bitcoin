@@ -160,27 +160,32 @@ class P2PIBDStallingTest(BitcoinTestFramework):
         # only send 1024 headers, so that the window can't overshoot and the ibd stalling mechanism isn't triggered
         headers_message = msg_headers()
         headers_message.headers = [CBlockHeader(b) for b in self.blocks[:self.NUM_BLOCKS-1]]
-        self.log.info("Add two stalling peers")
-        for id in range(2):
+        self.log.info("Add three stalling peers")
+        for id in range(3):
             peers.append(node.add_outbound_p2p_connection(P2PStaller(stall_block), p2p_idx=id, connection_type="outbound-full-relay"))
             peers[-1].block_store = self.block_dict
             peers[-1].send_message(headers_message)
 
         self.wait_until(lambda: sum(len(peer['inflight']) for peer in node.getpeerinfo()) == 1)
         self.all_sync_send_with_ping(peers)
-        assert peers[0].stall_block_requested
-        assert not peers[1].stall_block_requested
+        assert_equal(sum(peer.stall_block_requested for peer in peers),  1)
 
-        self.log.info("Check that after 9 minutes, nothing is done against the stalling")
-        self.mocktime = int(time.time()) + 9 * 60
+        self.log.info("Check that after 30 seconds we request the block from a second peer")
+        self.mocktime = int(time.time()) + 31
         node.setmocktime(self.mocktime)
-        self.all_sync_send_with_ping(peers)
+        self.wait_until(lambda: sum(peer.stall_block_requested for peer in peers) == 2)
 
-        self.log.info("Check that after more than 10 minutes, the stalling peer is disconnected")
-        self.mocktime += 2 * 60
+        self.log.info("Check that after another 30 seconds we request the block from a third peer")
+        self.mocktime += 31
         node.setmocktime(self.mocktime)
-        peers[0].wait_for_disconnect()
-        self.wait_until(lambda: peers[1].stall_block_requested)
+        self.wait_until(lambda: sum(peer.stall_block_requested for peer in peers) == 3)
+
+        self.log.info("Check that after another 20 minutes, all stalling peers are disconnected")
+        # 10 minutes BLOCK_DOWNLOAD_TIMEOUT_BASE + 2*5 minutes BLOCK_DOWNLOAD_TIMEOUT_PER_PEER
+        self.mocktime += 20 * 60
+        node.setmocktime(self.mocktime)
+        for peer in peers:
+            peer.wait_for_disconnect()
 
     def total_bytes_recv_for_blocks(self, node):
         total = 0

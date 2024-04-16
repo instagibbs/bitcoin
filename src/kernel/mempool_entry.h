@@ -184,8 +184,6 @@ public:
     // XXX: we should move all topology calculations into the mempool, and
     // eliminate this accessor. This is only needed for v3_policy checks, which
     // could be reimplemented within the mempool itself.
-    int64_t GetNumChildren() const { return GetTxEntryChildren().size(); }
-
     mutable size_t idx_randomized; //!< Index in mempool's txns_randomized
     mutable Epoch::Marker m_epoch_marker; //!< epoch when last touched, useful for graph algorithms
 };

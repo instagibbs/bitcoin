@@ -202,6 +202,14 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             if (subscript.GetSigOpCount(true) > MAX_P2SH_SIGOPS) {
                 return false;
             }
+        } else if (whichType == TxoutType::MULTISIG) {
+            unsigned char m = vSolutions.front()[0];
+            unsigned char n = vSolutions.back()[0];
+            // Support up to x-of-3 multisig txns as standard
+            if (n < 1 || n > 3)
+                return false;
+            if (m < 1 || m > n)
+                return false;
         }
     }
 

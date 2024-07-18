@@ -242,6 +242,7 @@ std::optional<std::pair<std::string, CTransactionRef>> SingleTRUCChecks(const CT
     return std::nullopt;
 }
 
+// FIXME move these functions somewhere else
 bool CheckValidEphemeralTx(const CTransaction& tx, CFeeRate dust_relay_fee, CAmount txfee, TxValidationState& state)
 {
     bool has_dust = false;

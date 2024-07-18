@@ -210,9 +210,8 @@ class EphemeralDustTest(BitcoinTestFramework):
             self.generate(self.nodes[0], 1)
             assert_equal(self.nodes[0].getrawmempool(), [])
 
-
     def test_non_truc(self):
-        self.log.info("Test that v2 dust-having transaction is rejected even if spent")
+        self.log.info("Test that v2 dust-having transaction is rejected even if spent, because of min relay requirement")
 
         assert_equal(self.nodes[0].getrawmempool(), [])
 
@@ -223,7 +222,7 @@ class EphemeralDustTest(BitcoinTestFramework):
 
         res = self.nodes[0].submitpackage([dusty_tx["hex"], sweep_tx["hex"]])
         assert_equal(res["package_msg"], "transaction failed")
-        assert_equal(res["tx-results"][dusty_tx["wtxid"]]["error"], "dust")
+        assert_equal(res["tx-results"][dusty_tx["wtxid"]]["error"], "min relay fee not met, 0 < 147")
 
         assert_equal(self.nodes[0].getrawmempool(), [])
 

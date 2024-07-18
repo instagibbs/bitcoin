@@ -258,12 +258,6 @@ bool CheckValidEphemeralTx(const CTransaction& tx, CFeeRate dust_relay_fee, CAmo
     // No dust; it's complete standard already
     if (!has_dust) return true;
 
-    // Makes spending checks inference simple via topology restrictions,
-    // can be relaxed if spending checks can be done easier in future.
-    if (tx.version != TRUC_VERSION) {
-        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "dust");
-    }
-
     // We never want to give incentives to mine this alone
     if (txfee != 0) {
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "dust");

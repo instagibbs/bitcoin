@@ -81,6 +81,7 @@ class EphemeralDustTest(BitcoinTestFramework):
         self.test_unspent_ephemeral()
         self.test_reorgs()
         self.test_acceptnonstd()
+        self.test_free_relay()
 
     def test_normal_dust(self):
         self.log.info("Create 0-value dusty output, show that it works inside truc when spend in package")
@@ -379,6 +380,29 @@ class EphemeralDustTest(BitcoinTestFramework):
         self.nodes[0].rpc.sendrawtransaction(dusty_tx["hex"])
 
         self.assert_mempool_contents(expected=[dusty_tx["tx"]])
+
+    # N.B. this extra_args can be removed post cluster mempool
+    @cleanup(extra_args=["-minrelaytxfee=0"])
+    def test_free_relay(self):
+        self.log.info("Test that ephemeral dust works in non-TRUC contexts when there's no minrelay requirement")
+
+        assert_equal(self.nodes[0].getrawmempool(), [])
+
+        dusty_tx = self.wallet.create_self_transfer_multi(fee_per_output=0, version=2)
+        self.add_output_to_create_multi_result(dusty_tx, CTxOut(0, dusty_tx["tx"].vout[0].scriptPubKey))
+
+        sweep_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=dusty_tx["new_utxos"], version=2)
+
+        self.nodes[0].submitpackage([dusty_tx["hex"], sweep_tx["hex"]])
+
+        self.assert_mempool_contents(expected=[dusty_tx["tx"], sweep_tx["tx"]])
+
+        # FIXME add more substantial test topologies:
+        # 1) batch CPFP
+        # 2) linear chain CPFP of anchors: 0->0->3*DEFAULT_FEE
+        # 3) diamond (legit)
+        # and show they are mined (but leave note that they will not propagate!.
+        # ???
 
 if __name__ == "__main__":
     EphemeralDustTest().main()

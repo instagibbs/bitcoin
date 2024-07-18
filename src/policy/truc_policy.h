@@ -101,11 +101,10 @@ std::optional<std::string> PackageTRUCChecks(const CTransactionRef& ptx, int64_t
  */
 bool CheckValidEphemeralTx(const CTransaction& tx, CFeeRate dust_relay_fee, CAmount txfee, TxValidationState& state);
 
-/** Checks that all dust in package ends up spent by package. Assumes package is well-formed and sorted. */
+/** Checks that all dust in package ends up spent by direct children. Assumes package is well-formed and sorted. */
 std::optional<uint256> CheckEphemeralSpends(const Package& package, CFeeRate dust_relay_rate);
 
-/** Checks that individual transactions' ancestors have all their dust spent by this transaction.
- *  Excluding reorgs, the ancestor set will be the direct parent only due to v3 restrictions.
+/** Checks that individual transactions' parents have all their dust spent by this transaction.
  */
 std::optional<std::string> CheckEphemeralSpends(const CTransactionRef& ptx,
                                                 const CTxMemPool::setEntries& ancestors,

@@ -274,21 +274,58 @@ bool CheckValidEphemeralTx(const CTransaction& tx, CFeeRate dust_relay_fee, CAmo
 
 std::optional<uint256> CheckEphemeralSpends(const Package& package, CFeeRate dust_relay_rate)
 {
+    // Package is topologically sorted, and PreChecks ensures that
+    // there is up to one dust output per tx.
+
     assert(std::all_of(package.cbegin(), package.cend(), [](const auto& tx){return tx != nullptr;}));
 
-    // Package is topologically sorted, and PreChecks ensures that
-    // there is up to one dust output per tx. Simply check if
-    // any are left unspent in this package.
+    // Running tally of unspent dust
     std::unordered_set<COutPoint, SaltedOutpointHasher> unspent_dust;
+
+    // If a parent tx has dust, we have to check for the spend
+    // Single dust per tx possible
+    std::map<Txid, uint32_t> map_tx_dust;
+
     for (const auto& tx : package) {
+        std::unordered_set<Txid, SaltedTxidHasher> child_unspent_dust;
+        for (const auto& tx_input : tx->vin) {
+            // Parent tx had dust, child MUST be sweeping it
+            // if it's spending any output from parent
+            if (map_tx_dust.count(tx_input.prevout.hash)) {
+                child_unspent_dust.insert(tx_input.prevout.hash);
+            }
+        }
+
+        // Now that we've built a list of parent txids
+        // that have dust, make sure that all parent's
+        // dust are swept by this same tx
+        for (const auto& tx_input : tx->vin) {
+            const auto& prevout = tx_input.prevout;
+            // Parent tx had dust, child MUST be sweeping it
+            // if it's spending any output from parent
+            if (map_tx_dust.count(prevout.hash) &&
+                map_tx_dust[prevout.hash] == prevout.n) {
+                 child_unspent_dust.erase(prevout.hash);
+            }
+
+            // We want to detect dangling dust too
+            unspent_dust.erase(tx_input.prevout);
+        }
+
+        if (!child_unspent_dust.empty()) {
+            return tx->GetHash();
+        }
+
+        // Process new dust
         for (uint32_t i=0; i<tx->vout.size(); i++) {
             if (IsDust(tx->vout[i], dust_relay_rate)) {
+                // CheckValidEphemeralTx should disallow multiples
+                Assume(map_tx_dust.count(tx->GetHash()) == 0);
+                map_tx_dust[tx->GetHash()] = i;
                 unspent_dust.insert(COutPoint(tx->GetHash(), i));
             }
         }
-        for (const auto& tx_input : tx->vin) {
-            unspent_dust.erase(tx_input.prevout);
-        }
+
     }
 
     if (!unspent_dust.empty()) {
@@ -303,18 +340,17 @@ std::optional<std::string> CheckEphemeralSpends(const CTransactionRef& ptx,
                                                 const CTxMemPool::setEntries& ancestors,
                                                 CFeeRate dust_relay_feerate)
 {
-    /* Ephemeral dust is disallowed already, no need to check */
-    if (ptx->version != TRUC_VERSION) {
-        return std::nullopt;
-    }
-
     std::unordered_set<COutPoint, SaltedOutpointHasher> unspent_dust;
 
-    // In the case of TRUC transactions, only one ancestor will be allowed anyways,
-    // but if relaxed to non-TRUC, this would need to be re-worked to check
-    // parents only.
+    std::unordered_set<Txid, SaltedTxidHasher> parents;
+    for (const auto& tx_input : ptx->vin) {
+        parents.insert(tx_input.prevout.hash);
+    }
+
     for (const auto& entry : ancestors) {
         const auto& tx = entry->GetTx();
+        // Only deal with direct parents
+        if (parents.count(tx.GetHash()) == 0) continue;
         for (uint32_t i=0; i<tx.vout.size(); i++) {
             if (IsDust(tx.vout[i], dust_relay_feerate)) {
                 unspent_dust.insert(COutPoint(tx.GetHash(), i));

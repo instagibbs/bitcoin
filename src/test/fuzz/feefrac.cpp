@@ -32,6 +32,18 @@ arith_uint256 Abs256(int64_t x)
     }
 }
 
+/** Construct an arith_uint256 whose value equals abs(x), for 96-bit x. */
+arith_uint256 Abs256(std::pair<int64_t, uint32_t> x)
+{
+    if (x.first >= 0) {
+        // x.first and x.second are both non-negative; sum their absolute values.
+        return (Abs256(x.first) << 32) + Abs256(x.second);
+    } else {
+        // x.first is negative and x.second is non-negative; subtract the absolute values.
+        return (Abs256(x.first) << 32) - Abs256(x.second);
+    }
+}
+
 std::strong_ordering MulCompare(int64_t a1, int64_t a2, int64_t b1, int64_t b2)
 {
     // Compute and compare signs.
@@ -91,4 +103,73 @@ FUZZ_TARGET(feefrac)
     assert((fr1 >= fr2) == std::is_gteq(cmp_total));
     assert((fr1 == fr2) == std::is_eq(cmp_total));
     assert((fr1 != fr2) == std::is_neq(cmp_total));
+}
+
+FUZZ_TARGET(feefrac_div_fallback)
+{
+    // Verify the behavior of FeeFrac::DivFallback over all possible inputs.
+
+    // Construct a 96-bit signed value num, and positive 31-bit value den.
+    FuzzedDataProvider provider(buffer.data(), buffer.size());
+    auto num_high = provider.ConsumeIntegral<int64_t>();
+    auto num_low = provider.ConsumeIntegral<uint32_t>();
+    std::pair<int64_t, uint32_t> num{num_high, num_low};
+    auto den = provider.ConsumeIntegralInRange<int32_t>(1, std::numeric_limits<int32_t>::max());
+
+    // Predict the sign of the actual result.
+    bool is_negative = num_high < 0;
+    // Evaluate absolute value using arith_uint256. If the actual result is negative, the absolute
+    // value of the quotient is the rounded-up quotient of the absolute values.
+    auto num_abs = Abs256(num);
+    auto den_abs = Abs256(den);
+    auto quot_abs = is_negative ? (num_abs + den_abs - 1) / den_abs : num_abs / den_abs;
+
+    // If the result is not representable by an int64_t, bail out.
+    if ((is_negative && quot_abs > MAX_ABS_INT64) || (!is_negative && quot_abs >= MAX_ABS_INT64)) {
+        return;
+    }
+
+    // Verify the behavior of FeeFrac::DivFallback.
+    auto res = FeeFrac::DivFallback(num, den);
+    assert((res < 0) == is_negative);
+    assert(Abs256(res) == quot_abs);
+}
+
+FUZZ_TARGET(feefrac_mul_div)
+{
+    // Verify the behavior of:
+    // - The combination of FeeFrac::Mul + FeeFrac::Div.
+    // - The combination of FeeFrac::MulFallback + FeeFrac::DivFallback.
+    // - FeeFrac::Evaluate.
+
+    // Construct a 32-bit signed multiplicand, a 64-bit signed multiplicand, and a positive 31-bit
+    // divisor.
+    FuzzedDataProvider provider(buffer.data(), buffer.size());
+    auto mul32 = provider.ConsumeIntegral<int32_t>();
+    auto mul64 = provider.ConsumeIntegral<int64_t>();
+    auto div = provider.ConsumeIntegralInRange<int32_t>(1, std::numeric_limits<int32_t>::max());
+
+    // Predict the sign of the overall result.
+    bool is_negative = ((mul32 < 0) && (mul64 > 0)) || ((mul32 > 0) && (mul64 < 0));
+    // Evaluate absolute value using arith_uint256. If the actual result is negative, the absolute
+    // value of the quotient is the rounded-up quotient of the absolute values.
+    auto prod_abs = Abs256(mul32) * Abs256(mul64);
+    auto div_abs = Abs256(div);
+    auto quot_abs = is_negative ? (prod_abs + div_abs - 1) / div_abs : prod_abs / div_abs;
+
+    // If the result is not representable by an int64_t, bail out.
+    if ((is_negative && quot_abs > MAX_ABS_INT64) || (!is_negative && quot_abs >= MAX_ABS_INT64)) {
+        // If 0 <= mul32 <= div, then the result is guaranteed to be representable.
+        assert(mul32 < 0 || mul32 > div);
+        return;
+    }
+
+    // Verify the behavior of FeeFrac::Mul + FeeFrac::Div.
+    auto res = FeeFrac::Div(FeeFrac::Mul(mul64, mul32), div);
+    assert((res < 0) == is_negative);
+    assert(Abs256(res) == quot_abs);
+
+    // Verify the behavior of FeeFrac::MulFallback + FeeFrac::DivFallback.
+    auto res_fallback = FeeFrac::DivFallback(FeeFrac::MulFallback(mul64, mul32), div);
+    assert(res == res_fallback);
 }

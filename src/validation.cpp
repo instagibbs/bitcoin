@@ -666,6 +666,13 @@ private:
     // separately in ReplacementChecks()).
     bool ClusterSizeChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
+    // Run cluster size checks (for non-rbf transactions -- RBF is handled
+    // separately in ReplacementChecks()).
+    // If size would bust, tries to execute sibling eviction.
+    bool ClusterSizeChecks2(Workspace& ws, bool allow_sibling_eviction) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+
+    std::optional<std::vector<Txid>> FindEvictionCandidates(const CTxMemPool::Entries m_parents, int64_t exceed_count, int64_t exceed_size) const;
+
     // Enforce package mempool ancestor/descendant limits (distinct from individual
     // ancestor/descendant limits done in PreChecks) and run Package RBF checks.
     bool PackageMempoolChecks(const std::vector<CTransactionRef>& txns,
@@ -987,6 +994,53 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
 
     // We want to detect conflicts in any tx in a package to trigger package RBF logic
     m_subpackage.m_rbf |= !ws.m_conflicts.empty();
+    return true;
+}
+
+std::optional<std::vector<Txid>> MemPoolAccept::FindEvictionCandidates(const CTxMemPool::Entries parents, int64_t exceed_count, int64_t exceed_size) const
+{
+    int64_t total_count_removed{0};
+    int64_t total_vsize_removed{0};
+    std::vector<Txid> eviction_candidates;
+
+    // Only works for a single generation. FIXME walk up ancestors, store all descendants seen
+    // FIXME calculate how much we're evicting and stop before everything. Use TxGraph et al for this?
+    for (const auto& parent : parents) {
+        const auto& children = m_pool.GetChildren(*parent);
+        for (const auto& child : children) {
+            eviction_candidates.emplace_back(child.get().GetTx().GetHash());
+        }
+    }
+
+    if (!eviction_candidates.empty()) return eviction_candidates;
+    return std::nullopt;
+}
+
+bool MemPoolAccept::ClusterSizeChecks2(Workspace& ws, bool allow_sibling_eviction)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(m_pool.cs);
+
+    const CTxMemPoolEntry &entry = *ws.m_entry;
+    TxValidationState& state = ws.m_state;
+
+    auto exceed_result{m_pool.CheckClusterSizeLimit2(entry.GetTxSize(), 1, m_pool.m_opts.limits, ws.m_parents)};
+    if (exceed_result) {
+        if (!allow_sibling_eviction) return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+
+        // We're busting limits, see if we can turn it into an RBF of relatives who are not ancestors
+        if (const auto to_conflict{FindEvictionCandidates(ws.m_parents, exceed_result->first, exceed_result->second)}) {
+            for (const auto& conflict_txid : *to_conflict) {
+                ws.m_conflicts.insert(conflict_txid);
+                ws.m_iters_conflicting.insert(m_pool.GetIter(conflict_txid).value());
+                ws.m_sibling_eviction = true;
+                m_subpackage.m_rbf = true;
+            }
+        } else {
+            // We can't try to evict anything, abort
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        }
+    }
     return true;
 }
 
@@ -1356,6 +1410,13 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 
+    if (!m_subpackage.m_rbf) {
+        // This may populate m_rbf and conflict iter
+        if (!ClusterSizeChecks2(ws, args.m_allow_replacement)) {
+            return MempoolAcceptResult::Failure(ws.m_state);
+        }
+    }
+
     if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
         if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
             // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
@@ -1363,8 +1424,6 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
         }
         return MempoolAcceptResult::Failure(ws.m_state);
     }
-
-    if (!m_subpackage.m_rbf && !ClusterSizeChecks(ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
     // Perform the inexpensive checks first and avoid hashing and signature verification unless
     // those checks pass, to mitigate CPU exhaustion denial-of-service attacks.

@@ -163,24 +163,42 @@ std::vector<TxEntry::TxEntryRef> CTxMemPool::CalculateAncestors(const CTxMemPool
     return txgraph.GetAncestors(parents);
 }
 
+// XXX sibling eviction would require package rbf logic to be sound
 util::Result<void> CTxMemPool::CheckPackageLimits(const Package& package,
                                                   const int64_t total_vsize) const
 {
-    Entries staged_ancestors;
+    Entries staged_parents;
     for (const auto& tx : package) {
         for (const auto& input : tx->vin) {
             std::optional<txiter> piter = GetIter(input.prevout.hash);
             if (piter) {
-                staged_ancestors.emplace_back(*piter);
+                staged_parents.emplace_back(*piter);
             }
         }
     }
 
-    auto cluster_result{CheckClusterSizeLimit(total_vsize, package.size(), m_opts.limits, staged_ancestors)};
+    auto cluster_result{CheckClusterSizeLimit(total_vsize, package.size(), m_opts.limits, staged_parents)};
     if (!cluster_result) {
         return util::Error{Untranslated(util::ErrorString(cluster_result).original)};
     }
     return {};
+}
+
+std::optional<std::pair<int64_t, int64_t>> CTxMemPool::CheckClusterSizeAgainstLimits2(const std::vector<TxEntry::TxEntryRef>& parents, int64_t count, int64_t vbytes, GraphLimits limits) const
+{
+    int64_t total_cluster_count{0};
+    int64_t total_cluster_vbytes{0};
+
+    txgraph.GetClusterSize(parents, total_cluster_vbytes, total_cluster_count);
+
+    total_cluster_count += count;
+    total_cluster_vbytes += vbytes;
+
+    if (total_cluster_count > limits.cluster_count || total_cluster_vbytes > limits.cluster_size_vbytes) {
+        return std::make_pair(std::max((int64_t) 0, total_cluster_count - limits.cluster_count),
+                              std::max((int64_t) 0, total_cluster_vbytes - limits.cluster_size_vbytes));
+    }
+    return std::nullopt;
 }
 
 util::Result<bool> CTxMemPool::CheckClusterSizeAgainstLimits(const std::vector<TxEntry::TxEntryRef>& parents, int64_t count, int64_t vbytes, GraphLimits limits) const
@@ -202,6 +220,7 @@ util::Result<bool> CTxMemPool::CheckClusterSizeAgainstLimits(const std::vector<T
     return true;
 }
 
+// FIXME have this return the size/count to remove?
 util::Result<bool> CTxMemPool::CheckClusterSizeLimit(int64_t entry_size, size_t entry_count,
         const Limits& limits, Entries& all_parents) const
 {
@@ -211,6 +230,17 @@ util::Result<bool> CTxMemPool::CheckClusterSizeLimit(int64_t entry_size, size_t 
     }
 
     return CheckClusterSizeAgainstLimits(parents, entry_count, entry_size, limits);
+}
+
+std::optional<std::pair<int64_t, int64_t>> CTxMemPool::CheckClusterSizeLimit2(int64_t entry_size, size_t entry_count,
+        const Limits& limits, Entries& all_parents) const
+{
+    std::vector<TxEntry::TxEntryRef> parents;
+    for (auto p : all_parents) {
+        parents.emplace_back(*p);
+    }
+
+    return CheckClusterSizeAgainstLimits2(parents, entry_count, entry_size, limits);
 }
 
 bool CTxMemPool::HasDescendants(const Txid& txid) const

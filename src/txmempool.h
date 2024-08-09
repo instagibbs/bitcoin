@@ -448,12 +448,25 @@ public:
             const Limits& limits, Entries& all_parents) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    std::optional<std::pair<int64_t, int64_t>> CheckClusterSizeLimit2(int64_t entry_size, size_t entry_count,
+            const Limits& limits, Entries& all_parents) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+
     std::vector<FeeFrac> GetFeerateDiagram() const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
 private:
     util::Result<bool> CheckClusterSizeAgainstLimits(const std::vector<TxEntry::TxEntryRef>& parents,
             int64_t count, int64_t vbytes, GraphLimits limits) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /**
+     * If size or count is exceeded, returns a pair with count/vsize amount that is exceeded, or std::nullopt otherwise.
+     */
+    std::optional<std::pair<int64_t, int64_t>> CheckClusterSizeAgainstLimits2(const std::vector<TxEntry::TxEntryRef>& parents,
+            int64_t count, int64_t vbytes, GraphLimits limits) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs);
+
 
 public:
     /**

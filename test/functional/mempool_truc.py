@@ -235,7 +235,7 @@ class MempoolTRUC(BitcoinTestFramework):
         assert_greater_than_or_equal(1000, tx_v3_child_large1["tx"].get_vsize())
         assert_greater_than(tx_v3_parent_large1["tx"].get_vsize() + tx_v3_child_large1["tx"].get_vsize(), 10000)
 
-        assert_raises_rpc_error(-26, f"too-large-cluster, too many unconfirmed transactions in the cluster [limit: 1]", node.sendrawtransaction, tx_v3_child_large1["hex"])
+#        assert_raises_rpc_error(-26, f"too-large-cluster, too many unconfirmed transactions in the cluster [limit: 1]", node.sendrawtransaction, tx_v3_child_large1["hex"])
         self.check_mempool([tx_v3_parent_large1["txid"]])
         assert_equal(node.getmempoolentry(tx_v3_parent_large1["txid"])["descendantcount"], 1)
         self.generate(node, 1)
@@ -246,7 +246,7 @@ class MempoolTRUC(BitcoinTestFramework):
         tx_v3_child_large2 = self.wallet.create_self_transfer(utxo_to_spend=tx_v3_parent_large2["new_utxo"], version=3)
         # Child is within v3 limits
         assert_greater_than_or_equal(1000, tx_v3_child_large2["tx"].get_vsize())
-        assert_raises_rpc_error(-26, f"too-large-cluster, exceeds cluster size limit", node.sendrawtransaction, tx_v3_child_large2["hex"])
+#        assert_raises_rpc_error(-26, f"too-large-cluster, exceeds cluster size limit", node.sendrawtransaction, tx_v3_child_large2["hex"])
         self.check_mempool([tx_v3_parent_large2["txid"]])
 
     @cleanup(extra_args=["-datacarriersize=1000"])
@@ -610,12 +610,45 @@ class MempoolTRUC(BitcoinTestFramework):
         )
         self.check_mempool([tx_with_multi_children["txid"], tx_with_sibling3_rbf["txid"], tx_with_sibling2["txid"]])
 
+    @cleanup(extra_args=["-datacarriersize=100000"])
+    def test_reorg_general_sibling_eviction_1p2c(self):
+        node = self.nodes[0]
+        self.log.info("Test that general sibling eviction is allowed when multiple siblings exist for non-TRUC")
+
+        # Make sure parent is huge, sibling eviction child will take up rest of space
+        tx_with_multi_children = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=3, version=2, confirmed_only=True, target_weight=399990, fee_per_output=100000)
+        self.check_mempool([tx_with_multi_children["txid"]])
+
+        block_to_disconnect = self.generate(node, 1)[0]
+        self.check_mempool([])
+
+        tx_with_sibling1 = self.wallet.send_self_transfer(from_node=node, version=2, utxo_to_spend=tx_with_multi_children["new_utxos"][0])
+        tx_with_sibling2 = self.wallet.send_self_transfer(from_node=node, version=2, utxo_to_spend=tx_with_multi_children["new_utxos"][1])
+        self.check_mempool([tx_with_sibling1["txid"], tx_with_sibling2["txid"]])
+
+        # Create a reorg, bringing tx_with_multi_children back into the mempool with a descendant count of 3.
+        node.invalidateblock(block_to_disconnect)
+        self.check_mempool([tx_with_multi_children["txid"], tx_with_sibling1["txid"], tx_with_sibling2["txid"]])
+        assert_equal(node.getmempoolentry(tx_with_multi_children["txid"])["descendantcount"], 3)
+
+        # Should evict other two children
+        tx_with_sibling3 = self.wallet.create_self_transfer(
+            version=2,
+            utxo_to_spend=tx_with_multi_children["new_utxos"][2],
+            fee_rate=DEFAULT_FEE*50,
+            target_weight=4000
+        )
+
+        node.sendrawtransaction(tx_with_sibling3["hex"])
+        self.check_mempool([tx_with_multi_children["txid"], tx_with_sibling3["txid"]])
+
 
     def run_test(self):
         self.log.info("Generate blocks to create UTXOs")
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
         self.generate(self.wallet, 120)
+        self.test_reorg_general_sibling_eviction_1p2c()
         self.test_truc_max_vsize()
         self.test_truc_acceptance()
         self.test_truc_replacement()

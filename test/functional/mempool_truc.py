@@ -642,12 +642,76 @@ class MempoolTRUC(BitcoinTestFramework):
         node.sendrawtransaction(tx_with_sibling3["hex"])
         self.check_mempool([tx_with_multi_children["txid"], tx_with_sibling3["txid"]])
 
+    def test_general_sibling_eviction(self):
+        node = self.nodes[0]
+        self.log.info("Test that general sibling eviction is allowed even if tx has non-parent ancestors with their own descendants")
+
+        # Make chain of 94 transactions, T1->T94, then add additional descendant to T1, and a chain of two transactions to T2
+        # then finally T3 + T4 spent by T3' and T4', where T3' and T4' are in turn spent by a single tx
+        # Note that none of these transactions are conflicting!
+
+        tx_ultimate_ancestor = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, version=2, confirmed_only=True)
+        self.check_mempool([tx_ultimate_ancestor["txid"]])
+
+        ancestor_utxos = [tx_ultimate_ancestor["new_utxos"]]
+
+        # Finish chain of 94 transactions
+        for i in range(93):
+            # Spend first utxo of last made ancestor
+            num_outputs = 2 if i < 5 else 1 # make 4 txns with more outputs, reserving last for sibling eviction usage
+            tx_ancestor = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[ancestor_utxos[-1][0]], num_outputs=num_outputs, version=2)
+            ancestor_utxos.append(tx_ancestor["new_utxos"])
+
+        child_info = node.getmempoolentry(tx_ancestor["txid"])
+        cluster_id = child_info["clusterid"]
+        cluster_info = node.getmempoolcluster(cluster_id)
+        assert_equal(cluster_info["txcount"], 94)
+
+        # Tx1', a second child of Tx1
+        Tx1_prime = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[ancestor_utxos[0][1]], version=2)
+
+        # Two generations after Tx2
+        Tx2_prime = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[ancestor_utxos[1][1]], version=2)
+        Tx2_prime_child = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=Tx2_prime["new_utxos"], version=2)
+
+        # Tx3' + Tx4' + sweep of those outputs
+        Tx3_prime = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[ancestor_utxos[2][1]], version=2)
+        Tx4_prime = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[ancestor_utxos[3][1]], version=2)
+        Tx_combine = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[Tx3_prime["new_utxos"][0], Tx4_prime["new_utxos"][0]], version=2)
+
+        child_info = node.getmempoolentry(tx_ancestor["txid"])
+        cluster_id = child_info["clusterid"]
+        cluster_info = node.getmempoolcluster(cluster_id)
+        assert_equal(cluster_info["txcount"], 100)
+
+        self.log.info("Make final child tx that doesn't bring enough fees")
+        low_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], version=2)
+        assert_equal(node.testmempoolaccept([low_fee_tx["hex"]])[0]["reject-reason"], "insufficient fee (including sibling eviction)")
+
+        # Needs to evict 5 transactions, give it below required fees
+        med_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], fee_per_output=1000, version=2)
+        assert_equal(node.testmempoolaccept([med_fee_tx["hex"]])[0]["reject-reason"], "insufficient fee (including sibling eviction)")
+
+        high_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], fee_per_output=100000, version=2)
+        assert node.testmempoolaccept([high_fee_tx["hex"]])[0]["allowed"]
+
+        child_txid = node.sendrawtransaction(high_fee_tx["hex"])
+
+        # Everything not in ancestor set was evicted
+        child_info = node.getmempoolentry(child_txid)
+        cluster_id = child_info["clusterid"]
+        cluster_info = node.getmempoolcluster(cluster_id)
+        assert_equal(cluster_info["txcount"], 94 + 1)
+
+        self.generate(self.wallet, 1)
+
 
     def run_test(self):
         self.log.info("Generate blocks to create UTXOs")
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
         self.generate(self.wallet, 120)
+        self.test_general_sibling_eviction()
         self.test_reorg_general_sibling_eviction_1p2c()
         self.test_truc_max_vsize()
         self.test_truc_acceptance()

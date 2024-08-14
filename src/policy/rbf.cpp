@@ -63,19 +63,28 @@ std::optional<std::string> GetEntriesForConflicts(const CTransaction& tx,
     AssertLockHeld(pool.cs);
     const uint256 txid = tx.GetHash();
 
+    // Create an unordered_set to hold the txids
+    std::vector<Txid> conflicting_txids;
+
+    // Calculate the set of all transactions that would have to be evicted.
+    CTxMemPool::Entries direct_conflicts{iters_conflicting.begin(), iters_conflicting.end()};
+
+    for (const auto entry : direct_conflicts) {
+        conflicting_txids.push_back(entry->GetTx().GetHash());
+    }
+
     // Rule #5: don't consider replacements that conflict directly with more
     // than MAX_REPLACEMENT_CANDIDATES. This gives us a bound on how many
     // mempool clusters might need to be re-sorted in order to process the
     // replacement, preventing CPU DoS.
-    if (iters_conflicting.size() > MAX_REPLACEMENT_CANDIDATES) {
+    if (pool.GetClusterCount(conflicting_txids) > MAX_REPLACEMENT_CANDIDATES) {
         return strprintf("rejecting replacement %s; too many direct conflicts (%u > %d)\n",
                 txid.ToString(),
                 iters_conflicting.size(),
                 MAX_REPLACEMENT_CANDIDATES);
     }
 
-    // Calculate the set of all transactions that would have to be evicted.
-    CTxMemPool::Entries direct_conflicts{iters_conflicting.begin(), iters_conflicting.end()};
+
     auto descendants = pool.CalculateDescendants(direct_conflicts);
     for (auto it : descendants) {
         all_conflicts.insert(it);

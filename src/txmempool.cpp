@@ -1147,6 +1147,23 @@ std::vector<CTxMemPool::txiter> CTxMemPool::GatherClusters(const std::vector<uin
     return ret;
 }
 
+size_t CTxMemPool::GetClusterCount(const std::vector<Txid>& txids) const
+{
+    AssertLockHeld(cs);
+
+    std::unordered_set<int64_t> cluster_ids;
+
+    for (auto txid : txids) {
+        auto it = mapTx.find(txid);
+        if (it != mapTx.end()) {
+            cluster_ids.insert(it->m_cluster->m_id);
+        }
+    }
+
+    return cluster_ids.size();
+}
+
+
 util::Result<std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>>> CTxMemPool::CalculateChunksForRBF(std::vector<std::pair<CTxMemPoolEntry*, CAmount>> new_entries, const setEntries& direct_conflicts, const setEntries& all_conflicts)
 {
     std::vector<FeeFrac> old_diagram;

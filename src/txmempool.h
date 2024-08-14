@@ -499,6 +499,10 @@ public:
      * more transactions as a DoS protection. */
     std::vector<txiter> GatherClusters(const std::vector<uint256>& txids) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    /** Collect the total number of unique clusters the set of txids is in.
+     */
+    size_t GetClusterCount(const std::vector<Txid>& txids) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     /** Calculate all in-mempool ancestors of a set of transactions not already in the mempool and
      * check ancestor and descendant limits. Heuristics are used to estimate the ancestor and
      * descendant count of all entries if the package were to be added to the mempool.  The limits

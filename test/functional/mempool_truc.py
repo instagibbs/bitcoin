@@ -642,6 +642,7 @@ class MempoolTRUC(BitcoinTestFramework):
         node.sendrawtransaction(tx_with_sibling3["hex"])
         self.check_mempool([tx_with_multi_children["txid"], tx_with_sibling3["txid"]])
 
+    @cleanup(extra_args=["-datacarriersize=100000"])
     def test_general_sibling_eviction(self):
         node = self.nodes[0]
         self.log.info("Test that general sibling eviction is allowed even if tx has non-parent ancestors with their own descendants")
@@ -688,23 +689,51 @@ class MempoolTRUC(BitcoinTestFramework):
         low_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], version=2)
         assert_equal(node.testmempoolaccept([low_fee_tx["hex"]])[0]["reject-reason"], "insufficient fee (including sibling eviction)")
 
-        # Needs to evict 5 transactions, give it below required fees
-        med_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], fee_per_output=1000, version=2)
-        assert_equal(node.testmempoolaccept([med_fee_tx["hex"]])[0]["reject-reason"], "insufficient fee (including sibling eviction)")
-
-        high_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], fee_per_output=100000, version=2)
+        high_fee_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[ancestor_utxos[-1][0]], fee_per_output=2000, version=2)
         assert node.testmempoolaccept([high_fee_tx["hex"]])[0]["allowed"]
 
         child_txid = node.sendrawtransaction(high_fee_tx["hex"])
 
-        # Everything not in ancestor set was evicted
         child_info = node.getmempoolentry(child_txid)
         cluster_id = child_info["clusterid"]
         cluster_info = node.getmempoolcluster(cluster_id)
-        assert_equal(cluster_info["txcount"], 94 + 1)
+        assert_equal(cluster_info["txcount"], 100)
+
+        last_tx = high_fee_tx
+
+        # Subsequent children evict one tx each step, until only the ancestor set remains (linear chain of 100)
+        for _ in range(5):
+            descendant_tx = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=last_tx["new_utxos"], fee_per_output=2000, version=2)
+            cluster_info = node.getmempoolcluster(cluster_id)
+            assert_equal(cluster_info["txcount"], 100)
+            last_tx = descendant_tx
+
+        too_long_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=last_tx["new_utxos"], fee_per_output=2000, version=2)
+        assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, too_long_tx["hex"])
+
+        # Make T1'', a fat child that evicts all but one other children via vsize
+        Tx1_prime_prime = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[ancestor_utxos[0][1]], version=2, fee_per_output=10000000, target_weight=400000-30)
+        assert Tx1_prime_prime["txid"] in node.getrawmempool()
+
+        # FIXME no magic numbers
+        cluster_info = node.getmempoolcluster(cluster_id)
+        assert cluster_info["txcount"] < 10
+        assert cluster_info["vsize"] > 100900
 
         self.generate(self.wallet, 1)
 
+        self.log.info("Test that evicting more than 100 transactions is not allowed due to conflict accounting")
+
+        # FIXME more topos to test, test splitting clusters,
+        # joining clusters, etc.
+
+        # Once you have transactions you want to boot, how to compute
+        # the minimal subset of direct conflicts required for the same
+        # cluster result?
+
+        # With 2nd generation tx, you may be "directly conflicting" with up to 99 child txn
+        # unless it's pruned to RBF less.
+        # Show that you get pinned if merging to clusters that have many children
 
     def run_test(self):
         self.log.info("Generate blocks to create UTXOs")

@@ -232,6 +232,78 @@ util::Result<bool> CTxMemPool::CheckClusterSizeLimit(int64_t entry_size, size_t 
     return CheckClusterSizeAgainstLimits(parents, entry_count, entry_size, limits);
 }
 
+std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMemPool::Entries parents, int64_t exceed_count, int64_t exceed_size) const
+{
+    int64_t total_count_removed{0};
+    int64_t total_vsize_removed{0};
+    std::vector<Txid> eviction_candidates;
+
+    std::vector<TxEntry::TxEntryRef> parents_entry;
+    for (const auto& parent : parents) parents_entry.push_back(*parent);
+
+    const auto all_ancestors = txgraph.GetAncestors(parents_entry);
+    std::unordered_set<Txid, SaltedTxidHasher> all_ancestor_txids;
+    for (const auto& ancestor : all_ancestors) {
+        const Txid ancestor_txid = dynamic_cast<const CTxMemPoolEntry&>(ancestor.get()).GetTx().GetHash();
+        all_ancestor_txids.insert(ancestor_txid);
+    }
+
+    // We will process transactions, starting with non-ancestor sinks, moving backwards
+    std::vector<TxEntry::TxEntryRef> to_process;
+    std::unordered_set<Txid, SaltedTxidHasher> processed_txids;
+
+    // Start with sinks from descendant of ancestors, not including ancestors themselves
+    const auto all_ancestors_descendants = txgraph.GetDescendants(all_ancestors);
+    std::unordered_set<Txid, SaltedTxidHasher> non_ancestor_sinks;
+    for (const auto& descendant : all_ancestors_descendants) {
+        const Txid descendant_txid = dynamic_cast<const CTxMemPoolEntry&>(descendant.get()).GetTx().GetHash();
+        if (all_ancestor_txids.contains(descendant_txid)) continue;
+        if (descendant.get().GetTxEntryChildren().size() > 0) continue;
+        to_process.push_back(descendant);
+    }
+
+    // Future Work: choose processing order more smartly than arbitrary DFS
+    // Could fetch Chunks(and CFR) from txgraph and use FeeFrac as priority queue
+    while (!to_process.empty()) {
+
+        const auto processed_entry = to_process.back();
+        to_process.pop_back();
+
+        const auto processed_txid = dynamic_cast<const CTxMemPoolEntry&>(processed_entry.get()).GetTx().GetHash();
+        processed_txids.insert(processed_txid);
+
+        total_count_removed++;
+        total_vsize_removed += processed_entry.get().GetTxSize();
+
+        // We can stop pruning
+        if (total_count_removed >= exceed_count && total_vsize_removed >= exceed_size) break;
+
+        const auto parents = processed_entry.get().GetTxEntryParents();
+        for (const auto parent : parents) {
+            const Txid parent_txid = dynamic_cast<const CTxMemPoolEntry&>(parent.get()).GetTx().GetHash();
+
+            // Don't walk up parent if that's a topological requirement
+            if (all_ancestor_txids.contains(parent_txid)) continue;
+
+            // Or if we've already visited it
+            if (processed_txids.contains(parent_txid)) continue;
+
+            // Otherwise we stick it in the work queue
+            to_process.push_back(parent);
+        }
+    }
+
+    // We can evict anything in descendant_txids by marking them as direct conflicts
+    // FIXME Prune the direct conflicted count via deduplication, this is overcounting.
+    eviction_candidates = std::vector<Txid>(processed_txids.begin(), processed_txids.end());
+
+    if (eviction_candidates.empty()) return std::nullopt;
+    if (total_count_removed < exceed_count || total_vsize_removed < exceed_size) return std::nullopt;
+
+    return eviction_candidates;
+
+}
+
 std::optional<std::pair<int64_t, int64_t>> CTxMemPool::CheckClusterSizeLimit2(int64_t entry_size, size_t entry_count,
         const Limits& limits, Entries& all_parents) const
 {

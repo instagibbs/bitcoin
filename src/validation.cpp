@@ -1074,7 +1074,7 @@ bool MemPoolAccept::ClusterSizeChecks2(Workspace& ws, bool allow_sibling_evictio
         if (!allow_sibling_eviction) return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
 
         // We're busting limits, see if we can turn it into an RBF of relatives who are not ancestors
-        if (const auto to_conflict{FindEvictionCandidates(ws.m_parents, exceed_result->first, exceed_result->second)}) {
+        if (const auto to_conflict{m_pool.FindEvictionCandidates(ws.m_parents, exceed_result->first, exceed_result->second)}) {
             for (const auto& conflict_txid : *to_conflict) {
                 ws.m_conflicts.insert(conflict_txid);
                 ws.m_iters_conflicting.insert(m_pool.GetIter(conflict_txid).value());

@@ -452,6 +452,8 @@ public:
             const Limits& limits, Entries& all_parents) const
         EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    // Returns a set of txids to directly conflict against
+    std::optional<std::vector<Txid>> FindEvictionCandidates(const CTxMemPool::Entries m_parents, int64_t exceed_count, int64_t exceed_size) const;
 
     std::vector<FeeFrac> GetFeerateDiagram() const EXCLUSIVE_LOCKS_REQUIRED(cs);
 

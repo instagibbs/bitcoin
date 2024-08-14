@@ -241,6 +241,8 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
     std::vector<TxEntry::TxEntryRef> parents_entry;
     for (const auto& parent : parents) parents_entry.push_back(*parent);
 
+    LOCK(cs);
+
     const auto all_ancestors = txgraph.GetAncestors(parents_entry);
     std::unordered_set<Txid, SaltedTxidHasher> all_ancestor_txids;
     for (const auto& ancestor : all_ancestors) {
@@ -297,20 +299,17 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
     // and topologically valid to remove from the list
 
     for (const auto eviction_candidate : processed_txids) {
-        {
-            LOCK(cs);
-            // Only keep candidates who have no parent in the conflicts list
-            const auto parents = GetParents(*GetEntry(eviction_candidate));
-            bool found_parent = false;
-            for (const auto& parent : parents) {
-                if (processed_txids.contains(parent.get().GetTx().GetHash())) {
-                    found_parent = true;
-                    break;
-                }
+        // Only keep candidates who have no parent in the conflicts list
+        const auto parents = GetParents(*GetEntry(eviction_candidate));
+        bool found_parent = false;
+        for (const auto& parent : parents) {
+            if (processed_txids.contains(parent.get().GetTx().GetHash())) {
+                found_parent = true;
+                break;
             }
-            if (!found_parent) {
-                eviction_candidates.push_back(eviction_candidate);
-            }
+        }
+        if (!found_parent) {
+            eviction_candidates.push_back(eviction_candidate);
         }
     }
 

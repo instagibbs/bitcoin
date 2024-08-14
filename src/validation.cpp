@@ -664,12 +664,8 @@ private:
 
     // Run cluster size checks (for non-rbf transactions -- RBF is handled
     // separately in ReplacementChecks()).
-    bool ClusterSizeChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
-
-    // Run cluster size checks (for non-rbf transactions -- RBF is handled
-    // separately in ReplacementChecks()).
     // If size would bust, tries to execute sibling eviction.
-    bool ClusterSizeChecks2(Workspace& ws, bool allow_sibling_eviction) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+    bool ClusterSizeChecks(Workspace& ws, bool allow_sibling_eviction) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     // Enforce package mempool ancestor/descendant limits (distinct from individual
     // ancestor/descendant limits done in PreChecks) and run Package RBF checks.
@@ -995,7 +991,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     return true;
 }
 
-bool MemPoolAccept::ClusterSizeChecks2(Workspace& ws, bool allow_sibling_eviction)
+bool MemPoolAccept::ClusterSizeChecks(Workspace& ws, bool allow_sibling_eviction)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
@@ -1019,21 +1015,6 @@ bool MemPoolAccept::ClusterSizeChecks2(Workspace& ws, bool allow_sibling_evictio
             // We can't try to evict anything, abort
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         }
-    }
-    return true;
-}
-
-bool MemPoolAccept::ClusterSizeChecks(Workspace& ws)
-{
-    AssertLockHeld(cs_main);
-    AssertLockHeld(m_pool.cs);
-
-    const CTxMemPoolEntry &entry = *ws.m_entry;
-    TxValidationState& state = ws.m_state;
-
-    auto result{m_pool.CheckClusterSizeLimit(entry.GetTxSize(), 1, m_pool.m_opts.limits, ws.m_parents)};
-    if (!result) {
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", util::ErrorString(result).original);
     }
     return true;
 }
@@ -1391,7 +1372,7 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
 
     if (!m_subpackage.m_rbf) {
         // This may populate m_rbf and conflict iter
-        if (!ClusterSizeChecks2(ws, args.m_allow_replacement)) {
+        if (!ClusterSizeChecks(ws, args.m_allow_replacement)) {
             return MempoolAcceptResult::Failure(ws.m_state);
         }
     }

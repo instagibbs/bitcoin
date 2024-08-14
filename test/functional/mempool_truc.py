@@ -722,18 +722,48 @@ class MempoolTRUC(BitcoinTestFramework):
 
         self.generate(self.wallet, 1)
 
-        self.log.info("Test that evicting more than 100 transactions is not allowed due to conflict accounting")
+        self.log.info("Test that eviction direct conflicts aren't being over-counted")
+
+        # Both parents have two outputs
+        tx_parent_A = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, version=2, confirmed_only=True)
+        tx_parent_B = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, version=2, confirmed_only=True)
+
+        last_tx_A = tx_parent_A
+        last_tx_B = tx_parent_B
+
+        # And each have 99 transactions chained off of their first output
+        for _ in range(99):
+            descendant_tx_A = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[last_tx_A["new_utxos"][0]], version=2)
+            descendant_tx_B = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[last_tx_B["new_utxos"][0]], version=2)
+            last_tx_A = descendant_tx_A
+            last_tx_B = descendant_tx_B
+
+        # No more allowed
+        too_long_tx_A = self.wallet.create_self_transfer_multi(utxos_to_spend=last_tx_A["new_utxos"], version=2)
+        assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, too_long_tx_A["hex"])
+
+        too_long_tx_B = self.wallet.create_self_transfer_multi(utxos_to_spend=last_tx_B["new_utxos"], version=2)
+        assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, too_long_tx_B["hex"])
+
+        # Make a single giant child that spends the 2nd output from both tx_parent_A and tx_parent_B
+        # It should be large enough to require eviction of 99 * 2 transactions, but should only be counted
+        # as 2 direct conflicts
+        combiner_tx = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[tx_parent_A["new_utxos"][1], tx_parent_B["new_utxos"][1]], version=2, target_weight=400000-3, fee_per_output=1000000)
+
+        child_info = node.getmempoolentry(combiner_tx["txid"])
+        cluster_id = child_info["clusterid"]
+        cluster_info = node.getmempoolcluster(cluster_id)
+
+        parent_A_info = node.getmempoolentry(tx_parent_A["txid"])
+        parent_B_info = node.getmempoolentry(tx_parent_B["txid"])
+        assert_equal(parent_A_info["clusterid"], parent_B_info["clusterid"])
+        assert_equal(parent_A_info["clusterid"], child_info["clusterid"])
+
+        # < 10 means we evicted > 190 txns
+        assert cluster_info["txcount"] < 10
+        assert cluster_info["vsize"] > 100900
 
         # FIXME more topos to test, test splitting clusters,
-        # joining clusters, etc.
-
-        # Once you have transactions you want to boot, how to compute
-        # the minimal subset of direct conflicts required for the same
-        # cluster result?
-
-        # With 2nd generation tx, you may be "directly conflicting" with up to 99 child txn
-        # unless it's pruned to RBF less.
-        # Show that you get pinned if merging to clusters that have many children
 
     def run_test(self):
         self.log.info("Generate blocks to create UTXOs")

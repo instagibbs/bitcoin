@@ -293,9 +293,20 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
         }
     }
 
-    // We can evict anything in descendant_txids by marking them as direct conflicts
-    // FIXME Prune the direct conflicted count via deduplication, this is overcounting.
-    eviction_candidates = std::vector<Txid>(processed_txids.begin(), processed_txids.end());
+    for (const auto eviction_candidate : processed_txids) {
+        // Only keep candidates who have no parent in the conflicts list
+        const auto parents = GetParents(*GetEntry(eviction_candidate));
+        bool found_parent = false;
+        for (const auto& parent : parents) {
+            if (processed_txids.contains(parent.get().GetTx().GetHash())) {
+                found_parent = true;
+                break;
+            }
+        }
+        if (!found_parent) {
+            eviction_candidates.push_back(eviction_candidate);
+        }
+    }
 
     if (eviction_candidates.empty()) return std::nullopt;
     if (total_count_removed < exceed_count || total_vsize_removed < exceed_size) return std::nullopt;

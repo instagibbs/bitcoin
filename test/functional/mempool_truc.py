@@ -763,6 +763,40 @@ class MempoolTRUC(BitcoinTestFramework):
         assert cluster_info["txcount"] < 10
         assert cluster_info["vsize"] > 100900
 
+        self.log.info("Test that eviction this direct conflict limits")
+
+        # Both parents have 100 outputs
+        tx_parent_A = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=100, version=2, confirmed_only=True)
+        tx_parent_B = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=100, version=2, confirmed_only=True)
+
+        parent_vsize = tx_parent_A["tx"].get_vsize() + tx_parent_B["tx"].get_vsize()
+
+        # And each have 99 transactions, one each off of their corresponding outputs
+        for i in range(99):
+            child_tx_A = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[tx_parent_A["new_utxos"][i]], version=2)
+            child_tx_B = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[tx_parent_B["new_utxos"][i]], version=2)
+
+        A_info = node.getmempoolentry(tx_parent_A["txid"])
+        cluster_A_id = A_info["clusterid"]
+        cluster_A_info = node.getmempoolcluster(cluster_A_id)
+
+        B_info = node.getmempoolentry(tx_parent_B["txid"])
+        cluster_B_id = B_info["clusterid"]
+        cluster_B_info = node.getmempoolcluster(cluster_B_id)
+
+        assert_equal(cluster_A_info["txcount"], 100)
+        assert_equal(cluster_B_info["txcount"], 100)
+
+        # Single giant child of both parents will cause too many calculated direct conflicts and will be rejected
+        combiner_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[tx_parent_A["new_utxos"][-1], tx_parent_B["new_utxos"][-1]], version=2, target_weight=400000 - (parent_vsize * 4), fee_per_output=1000000)
+        expected_err_string = f"too many potential replacements (including sibling eviction), rejecting replacement {combiner_tx['txid']}; too many direct conflicts (189 > 100)"
+        assert_raises_rpc_error(-26, expected_err_string, node.sendrawtransaction, combiner_tx["hex"])
+
+        # Even if we make it smaller, it has to evict > 100 txns to have the resulting cluster be right sized
+        combiner_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[tx_parent_A["new_utxos"][-1], tx_parent_B["new_utxos"][-1]], version=2, fee_per_output=1000000)
+        expected_err_string = f"too many potential replacements (including sibling eviction), rejecting replacement {combiner_tx['txid']}; too many direct conflicts (101 > 100)"
+        assert_raises_rpc_error(-26, expected_err_string, node.sendrawtransaction, combiner_tx["hex"])
+
         # FIXME more topos to test, test splitting clusters,
 
     def run_test(self):

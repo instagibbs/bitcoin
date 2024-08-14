@@ -293,18 +293,24 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
         }
     }
 
+    // TODO: Look through processed_txids, see if any are small enough
+    // and topologically valid to remove from the list
+
     for (const auto eviction_candidate : processed_txids) {
-        // Only keep candidates who have no parent in the conflicts list
-        const auto parents = GetParents(*GetEntry(eviction_candidate));
-        bool found_parent = false;
-        for (const auto& parent : parents) {
-            if (processed_txids.contains(parent.get().GetTx().GetHash())) {
-                found_parent = true;
-                break;
+        {
+            LOCK(cs);
+            // Only keep candidates who have no parent in the conflicts list
+            const auto parents = GetParents(*GetEntry(eviction_candidate));
+            bool found_parent = false;
+            for (const auto& parent : parents) {
+                if (processed_txids.contains(parent.get().GetTx().GetHash())) {
+                    found_parent = true;
+                    break;
+                }
             }
-        }
-        if (!found_parent) {
-            eviction_candidates.push_back(eviction_candidate);
+            if (!found_parent) {
+                eviction_candidates.push_back(eviction_candidate);
+            }
         }
     }
 

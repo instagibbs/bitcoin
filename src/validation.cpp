@@ -671,8 +671,6 @@ private:
     // If size would bust, tries to execute sibling eviction.
     bool ClusterSizeChecks2(Workspace& ws, bool allow_sibling_eviction) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
-    std::optional<std::vector<Txid>> FindEvictionCandidates(const CTxMemPool::Entries m_parents, int64_t exceed_count, int64_t exceed_size) const;
-
     // Enforce package mempool ancestor/descendant limits (distinct from individual
     // ancestor/descendant limits done in PreChecks) and run Package RBF checks.
     bool PackageMempoolChecks(const std::vector<CTransactionRef>& txns,
@@ -995,70 +993,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // We want to detect conflicts in any tx in a package to trigger package RBF logic
     m_subpackage.m_rbf |= !ws.m_conflicts.empty();
     return true;
-}
-
-std::optional<std::vector<Txid>> MemPoolAccept::FindEvictionCandidates(const CTxMemPool::Entries parents, int64_t exceed_count, int64_t exceed_size) const
-{
-    int64_t total_count_removed{0};
-    int64_t total_vsize_removed{0};
-    std::vector<Txid> eviction_candidates;
-
-    // Set of things we cannot evict
-    std::unordered_set<Txid, SaltedTxidHasher> ancestor_txids;
-    std::vector<Txid> ancestors_to_process;
-
-    // Set of ancestor_txids's descendants, not including ancestor_txids
-    std::unordered_set<Txid, SaltedTxidHasher> descendant_txids;
-    std::vector<Txid> descendants_to_process;
-
-    // Add parents to processing queue
-    for (const auto& parent : parents) {
-        const auto parent_txid = parent->GetTx().GetHash();
-        ancestors_to_process.push_back(parent_txid);
-        ancestor_txids.insert(parent_txid);
-    }
-
-    // Collect all ancestors, and all ancestors' direct children
-    while (!ancestors_to_process.empty()) {
-        const Txid ancestor_txid = ancestors_to_process.back();
-        ancestors_to_process.pop_back();
-        Assume(ancestor_txids.contains(ancestor_txid));
-
-        const auto ancestor_entry = m_pool.GetEntry(ancestor_txid);
-        Assert(ancestor_entry);
-
-        const auto& parents = m_pool.GetParents(*ancestor_entry);
-        for (const auto & parent : parents) {
-            const auto parent_txid = parent.get().GetTx().GetHash();
-            // Is latter clause possible to hit?
-            if (ancestor_txids.contains(parent_txid) || descendant_txids.contains(parent_txid)) continue;
-
-            ancestors_to_process.push_back(parent_txid);
-            ancestor_txids.insert(parent_txid);
-        }
-
-    }
-
-    for (const auto& ancestor_txid : ancestor_txids) {
-        const auto ancestor_entry = m_pool.GetEntry(ancestor_txid);
-        Assert(ancestor_entry);
-
-        const auto& children = m_pool.GetChildren(*ancestor_entry);
-        for (const auto& child : children) {
-            const auto child_txid = child.get().GetTx().GetHash();
-            // Don't add children that are in ancestor set or double-add
-            if (ancestor_txids.contains(child_txid) || descendant_txids.contains(child_txid)) continue;
-
-            descendants_to_process.push_back(child_txid);
-            descendant_txids.insert(child_txid);
-        }
-    }
-
-    // We can evict anything in descendant_txids by marking them as direct conflicts
-    eviction_candidates = std::vector<Txid>(descendant_txids.begin(), descendant_txids.end());
-
-    if (!eviction_candidates.empty()) return eviction_candidates;
-    return std::nullopt;
 }
 
 bool MemPoolAccept::ClusterSizeChecks2(Workspace& ws, bool allow_sibling_eviction)

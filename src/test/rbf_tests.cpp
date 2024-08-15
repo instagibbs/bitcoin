@@ -207,12 +207,14 @@ BOOST_FIXTURE_TEST_CASE(rbf_helper_functions, TestChain100Setup)
     BOOST_CHECK_EQUAL(all_conflicts.size(), 100);
     all_conflicts.clear();
 
-    // If we treat all conflicts as being direct conflicts, then we should exceed the replacement limit.
+    // Even if we treat all conflicts as being direct conflicts, then we should exceed the replacement limit.
     add_descendants(tx8, 1, pool);
     BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_parents, all_conflicts) == std::nullopt);
     BOOST_CHECK_EQUAL(all_conflicts.size(), 101);
     CTxMemPool::setEntries dummy;
-    BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_conflicts, dummy).has_value());
+    BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_conflicts, dummy) == std::nullopt);
+
+    // TODO conflict against 101 clusters to fail replacement
 }
 
 BOOST_FIXTURE_TEST_CASE(improves_feerate, TestChain100Setup)

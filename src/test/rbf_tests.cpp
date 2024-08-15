@@ -207,14 +207,30 @@ BOOST_FIXTURE_TEST_CASE(rbf_helper_functions, TestChain100Setup)
     BOOST_CHECK_EQUAL(all_conflicts.size(), 100);
     all_conflicts.clear();
 
-    // Even if we treat all conflicts as being direct conflicts, then we should exceed the replacement limit.
+    // Even if we treat all conflicts as being direct conflicts, we should not exceed the replacement limit.
     add_descendants(tx8, 1, pool);
     BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_parents, all_conflicts) == std::nullopt);
     BOOST_CHECK_EQUAL(all_conflicts.size(), 101);
     CTxMemPool::setEntries dummy;
     BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_conflicts, dummy) == std::nullopt);
 
-    // TODO conflict against 101 clusters to fail replacement
+    // Make 101 clusters with 2 transactions each
+    CTxMemPool::setEntries all_clusters;
+    std::vector<CTransactionRef> cluster_txns;
+    for (int i = 0; i < 101; i++) {
+        // 90th coinbase to 191st
+        cluster_txns.push_back(make_tx(/*inputs=*/ {m_coinbase_txns[i + 89]}, /*output_values=*/ {10 * COIN}));
+        pool.addUnchecked(entry.Fee(low_fee).FromTx(cluster_txns.back()));
+        add_descendants(cluster_txns.back(), 1, pool);
+        const auto cluster_entry = pool.GetIter(cluster_txns.back()->GetHash()).value();
+        all_clusters.insert(cluster_entry);
+
+        if (i == 100) {
+            BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_clusters, dummy).has_value());
+        } else {
+            BOOST_CHECK(GetEntriesForConflicts(*conflicts_with_parents.get(), pool, all_clusters, dummy) == std::nullopt);
+        }
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(improves_feerate, TestChain100Setup)

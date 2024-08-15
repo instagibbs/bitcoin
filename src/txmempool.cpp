@@ -298,6 +298,8 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
     // TODO: Look through processed_txids, see if any are small enough
     // and topologically valid to remove from the list
 
+    // This isn't needed if max conflicts are checked against effected
+    // clusters.
     for (const auto eviction_candidate : processed_txids) {
         // Only keep candidates who have no parent in the conflicts list
         const auto parents = GetParents(*GetEntry(eviction_candidate));
@@ -314,7 +316,6 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
     }
 
     if (eviction_candidates.empty()) return std::nullopt;
-    if (total_count_removed < exceed_count || total_vsize_removed < exceed_size) return std::nullopt;
 
     return eviction_candidates;
 

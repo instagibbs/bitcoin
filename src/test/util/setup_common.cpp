@@ -353,14 +353,14 @@ TestChain100Setup::TestChain100Setup(
         {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}};
     coinbaseKey.Set(vchKey.begin(), vchKey.end(), true);
 
-    // Generate a 100-block chain:
-    this->mineBlocks(COINBASE_MATURITY);
+    // Generate a 200-block chain:
+    this->mineBlocks(COINBASE_MATURITY * 2);
 
     {
         LOCK(::cs_main);
         assert(
             m_node.chainman->ActiveChain().Tip()->GetBlockHash().ToString() ==
-            "571d80a9967ae599cec0448b0b0ba1cfb606f584d8069bd7166b86854ba7a191");
+            "0590e3cd33c89d3aa5a2e5c1c33a3eb21f0d3e854749f95d5ffad2e5dd39dfc7");
     }
 }
 

@@ -792,6 +792,25 @@ class MempoolTRUC(BitcoinTestFramework):
         combiner_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[tx_parent_A["new_utxos"][-1], tx_parent_B["new_utxos"][-1]], version=2, target_weight=400000 - (parent_vsize * 4), fee_per_output=1000000)
         node.sendrawtransaction(combiner_tx["hex"])
 
+        self.generate(self.wallet, 1)
+        self.check_mempool([])
+
+        self.log.info("Test that sibling eviction still occurs even if trimming target isn't hit due to splitting the cluster")
+        # Make a cluster that is a trellis of parent A, parent B and a single joint child. Parent A is large and very high fee.
+        tx_parent_A = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=1, version=2, confirmed_only=True, target_weight=400000 - 3, fee_per_output=10000000)
+        tx_parent_B = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, version=2, confirmed_only=True)
+
+        # Child spends first utxos of parent A and B at set fee
+        child_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[tx_parent_A["new_utxos"][0], tx_parent_B["new_utxos"][0]], version=2, fee_per_output=200)
+        child_txid = node.sendrawtransaction(child_tx["hex"])
+
+        # Second child spending second output from parent B is made and would cause cluster size limits to be hit, sibling eviction
+        # should simply evict the first child which splits the cluster. Note that fee_per_output is two orders of magnitude lower than parent A
+        evicting_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=[tx_parent_B["new_utxos"][1]], version=2, target_weight=400000 - 3, fee_per_output=200000)
+        evicting_txid = node.sendrawtransaction(evicting_tx["hex"])
+
+        self.check_mempool([tx_parent_A["txid"], tx_parent_B["txid"], evicting_tx["txid"]])
+
         # FIXME more topos to test, test splitting clusters,
 
     def run_test(self):

@@ -256,9 +256,12 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
 
     // Start with sinks from descendant of ancestors, not including ancestors themselves
     const auto all_ancestors_descendants = txgraph.GetDescendants(all_ancestors);
-    std::unordered_set<Txid, SaltedTxidHasher> non_ancestor_sinks;
+    std::unordered_set<Txid, SaltedTxidHasher> all_ancestors_descendants_txids;
     for (const auto& descendant : all_ancestors_descendants) {
+
         const Txid descendant_txid = dynamic_cast<const CTxMemPoolEntry&>(descendant.get()).GetTx().GetHash();
+        all_ancestors_descendants_txids.insert(descendant_txid);
+
         if (all_ancestor_txids.contains(descendant_txid)) continue;
         if (descendant.get().GetTxEntryChildren().size() > 0) continue;
         to_process.push_back(descendant);
@@ -286,6 +289,9 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
 
             // Don't walk up parent if that's a topological requirement
             if (all_ancestor_txids.contains(parent_txid)) continue;
+
+            // Or if it's outside the search space
+            if (!all_ancestors_descendants_txids.contains(parent_txid)) continue;
 
             // Or if we've already visited it
             if (processed_txids.contains(parent_txid)) continue;

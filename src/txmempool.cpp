@@ -295,14 +295,11 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
         }
     }
 
-    // TODO: Look through processed_txids, see if any are small enough
-    // and topologically valid to remove from the list
-
-    // This isn't needed if max conflicts are checked against effected
-    // clusters.
+    /*
     for (const auto eviction_candidate : processed_txids) {
         // Only keep candidates who have no parent in the conflicts list
-        const auto parents = GetParents(*GetEntry(eviction_candidate));
+        const auto& entry = *GetEntry(eviction_candidate);
+        const auto parents = GetParents(entry);
         bool found_parent = false;
         for (const auto& parent : parents) {
             if (processed_txids.contains(parent.get().GetTx().GetHash())) {
@@ -311,8 +308,27 @@ std::optional<std::vector<Txid>> CTxMemPool::FindEvictionCandidates(const CTxMem
             }
         }
         if (!found_parent) {
+            // If this particular transaction can fit in the cluster, we don't evict it
+            // after all, and will add its children found in in processed_txids
+            if (total_vsize_removed > exceed_size && entry->GetTxSize() < total_vsize_removed - exceed_size) continue;
+
             eviction_candidates.push_back(eviction_candidate);
         }
+    }*/
+
+    // Direct conflicts don't have to be deduplicated
+    // Remove any transaction from the list that would actually fit
+    for (const auto eviction_candidate : processed_txids) {
+        // Only keep candidates who have no parent in the conflicts list
+        const auto& entry = *GetEntry(eviction_candidate);
+        // If this particular transaction can fit in the cluster, we don't evict it
+        // after all, and will add its children found in in processed_txids.
+        if (total_vsize_removed > exceed_size && total_vsize_removed > entry.GetTxSize() + exceed_size) {
+            total_vsize_removed -= entry.GetTxSize();
+            continue;
+        }
+
+        eviction_candidates.push_back(eviction_candidate);
     }
 
     if (eviction_candidates.empty()) return std::nullopt;

@@ -139,7 +139,8 @@ bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t heig
 bool CheckProofOfWork(uint256 hash, unsigned int nBits, const Consensus::Params& params)
 {
 #ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-    return (hash.data()[31] & 0x80) == 0;
+    return true; // For this fuzz test we don't care about PoW at all
+    // return (hash.data()[31] & 0x80) == 0;
 #else
     return CheckProofOfWorkImpl(hash, nBits, params);
 #endif

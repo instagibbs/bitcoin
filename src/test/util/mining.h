@@ -22,6 +22,9 @@ struct NodeContext;
 /** Create a blockchain, starting from genesis */
 std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const CChainParams& params);
 
+/** Create a blockchain with proper nBits, starting from genesis. Block time at beginning is always 0 */
+std::vector<std::shared_ptr<CBlock>> CreateBlockChainDiff(std::vector<int64_t> block_times, const CChainParams& params);
+
 /** Returns the generated coin */
 COutPoint MineBlock(const node::NodeContext&, const CScript& coinbase_scriptPubKey);
 

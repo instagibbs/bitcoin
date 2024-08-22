@@ -29,6 +29,32 @@ COutPoint generatetoaddress(const NodeContext& node, const std::string& address)
     return MineBlock(node, coinbase_script);
 }
 
+std::vector<std::shared_ptr<CBlock>> CreateBlockChainDiff(std::vector<int64_t> block_times, const CChainParams& params)
+{
+    size_t total_height = block_times.size();
+    std::vector<std::shared_ptr<CBlock>> ret{total_height};
+    for (size_t height{0}; height < total_height; ++height) {
+        CBlock& block{*(ret.at(height) = std::make_shared<CBlock>())};
+
+        CMutableTransaction coinbase_tx;
+        coinbase_tx.vin.resize(1);
+        coinbase_tx.vin[0].prevout.SetNull();
+        coinbase_tx.vout.resize(1);
+        coinbase_tx.vout[0].scriptPubKey = P2WSH_OP_TRUE;
+        coinbase_tx.vout[0].nValue = GetBlockSubsidy(height + 1, params.GetConsensus());
+        coinbase_tx.vin[0].scriptSig = CScript() << (height + 1) << OP_0;
+        block.vtx = {MakeTransactionRef(std::move(coinbase_tx))};
+
+        block.nVersion = VERSIONBITS_LAST_OLD_BLOCK_VERSION;
+        block.hashPrevBlock = (height >= 1 ? *ret.at(height - 1) : params.GenesisBlock()).GetHash();
+        block.hashMerkleRoot = BlockMerkleRoot(block);
+        block.nTime = block_times[height];
+        block.nBits = params.GenesisBlock().nBits;
+        block.nNonce = 0;
+    }
+    return ret;
+}
+
 std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const CChainParams& params)
 {
     std::vector<std::shared_ptr<CBlock>> ret{total_height};

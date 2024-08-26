@@ -539,7 +539,7 @@ public:
         consensus.powLimit = uint256{"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
         consensus.nPowTargetTimespan = 60 * 60; // one hour (for timewarp testing)
         consensus.nPowTargetSpacing = 10 * 60;
-        consensus.fPowAllowMinDifficultyBlocks = true;
+        consensus.fPowAllowMinDifficultyBlocks = false; // not needed since we aren't checking PoW
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = false; // for (timewarp attacks)
         consensus.nRuleChangeActivationThreshold = 108; // 75% for testchains

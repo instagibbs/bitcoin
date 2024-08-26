@@ -27,43 +27,49 @@ namespace {
 const std::vector<std::shared_ptr<CBlock>>* g_chain;
 static int high_water_mark{0};
 
-/* Makes a chain one difficulty period long, where each
-   block is +1 the previous. Should trigger maximal retarget. */
+/* FIXME put initial DIFF_PERIOD blocks here */
 void initialize_chain()
 {
-    /*
-    const auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
-
-    std::vector<int64_t> block_times(DIFF_PERIOD);
-    std::iota(block_times.begin(), block_times.end(), 1);
-    for (size_t i = 0; i < block_times.size(); i++) {
-        block_times[i] += params->GenesisBlock().nTime;
-    }
-
-    const auto chain{CreateBlockChainDiff(block_times, *params)};
-    g_chain = &chain;*/
 }
 
-/* Calculate the difficulty for a given block index.
- */
-double GetDifficulty(const CBlockIndex& blockindex)
+// step one second forward
+// step to MTP+1
+// step forward a DIFF_PERIOD
+// step backward a DIFF_PERIOD
+// step anytime MTP + 2 to end_time
+int64_t ChooseTimestampDelta(FuzzedDataProvider& fuzzed_data_provider, int64_t last_block_time, int64_t mediantimepast, int64_t end_time)
 {
-    int nShift = (blockindex.nBits >> 24) & 0xff;
-    double dDiff =
-        (double)0x0000ffff / (double)(blockindex.nBits & 0x00ffffff);
+    Assert(last_block_time >= mediantimepast);
+    Assert(end_time >= last_block_time);
 
-    while (nShift < 29)
-    {
-        dDiff *= 256.0;
-        nShift++;
-    }
-    while (nShift > 29)
-    {
-        dDiff /= 256.0;
-        nShift--;
+    int64_t TIME_SKIPS[6];
+    TIME_SKIPS[0] = 1; // Forward a second
+    TIME_SKIPS[1] = -(last_block_time - mediantimepast) + 1; // (back to) MTP + 1
+    TIME_SKIPS[2] = DIFF_PERIOD * 60 * 10; // ahead one period
+    TIME_SKIPS[3] = -(DIFF_PERIOD * 60 * 10); // back one period
+    TIME_SKIPS[4] = DIFF_PERIOD * 60 * 10 / 2; // ahead one half period
+    TIME_SKIPS[5] = -(DIFF_PERIOD * 60 * 10 / 2); // back one half period
+
+    // Starts as MTP + 2
+    int64_t random_lower_bound{TIME_SKIPS[1] + 1};
+    int64_t random_upper_bound{end_time - last_block_time};
+    if (random_lower_bound > random_upper_bound) {
+        random_lower_bound = random_upper_bound;
     }
 
-    return dDiff;
+    // Pick template or pick a delta time in legal bounds MTP + 2 to end time
+    auto time_delta = fuzzed_data_provider.ConsumeBool() ? fuzzed_data_provider.PickValueInArray(TIME_SKIPS) :
+        fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(random_lower_bound, random_upper_bound);;
+
+    if (time_delta < TIME_SKIPS[1]) {
+        // Delta has to reach MTP + 1
+        time_delta = TIME_SKIPS[1];
+    }
+    if (last_block_time + time_delta > end_time) {
+        // clamp to end of simulation
+        time_delta = end_time - last_block_time;
+    }
+    return time_delta;
 }
 
 FUZZ_TARGET(timewarp, .init = initialize_chain)
@@ -101,6 +107,11 @@ FUZZ_TARGET(timewarp, .init = initialize_chain)
 
     int block_height{0};
 
+    uint256 prev_block_hash;
+
+    // The value we have to exceed for next block
+    int64_t cur_MTP{start_time};
+
     // First, submit the first period to get new difficulty
     CBlockIndex* index{nullptr};
     for (const auto& block : *g_chain) {
@@ -113,12 +124,19 @@ FUZZ_TARGET(timewarp, .init = initialize_chain)
         }
         BlockValidationState dummy;
         bool processed{chainman.ProcessNewBlockHeaders({*block}, true, dummy)};
+        if (!processed) {
+            processed;
+        }
         Assert(processed);
         block_height++;
         index = WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(block->GetHash()));
         Assert(index);
 
-        const auto diff{GetDifficulty(*index)};
+        prev_block_hash = block->GetHash();
+
+        cur_time = block->nTime;
+        cur_MTP = index->GetMedianTimePast();
+
         const auto chainwork{index->nChainWork};
         arith_uint256 block_chainwork;
         block_chainwork.SetCompact(block->nBits);
@@ -156,11 +174,16 @@ FUZZ_TARGET(timewarp, .init = initialize_chain)
     Assert(index);
     std::vector<std::shared_ptr<CBlock>> new_blocks;
     while (true) {
-        // Make block time jump forward or back arbitrarily between start and end time
-        cur_time += fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(-(cur_time - start_time), end_time - cur_time);
+
+        // Can't make any more blocks(since we're always advancing a second); abort
+        if (cur_MTP == end_time) {
+            break;
+        }
+
+        cur_time += ChooseTimestampDelta(fuzzed_data_provider, cur_time, cur_MTP, end_time);
+
         int64_t block_time{cur_time};
 
-        uint256 prev_block_hash = new_blocks.empty() ? g_chain->back()->GetHash() : new_blocks.back()->GetHash();
         const auto& new_block{CreateBlockWithTime(block_time, prev_block_hash, /*prev_block_height=*/block_height, *params)};
 
         // Modify nBits since function just gives genesis nBits
@@ -184,17 +207,18 @@ FUZZ_TARGET(timewarp, .init = initialize_chain)
         bool processed{chainman.ProcessNewBlockHeaders({*new_block}, true, dummy)};
         // Rest of chain doesn't work for whatever reason
         if (!processed) {
-            break;
+            processed;
         }
+        Assert(processed);
 
         new_blocks.push_back(new_block);
-
-        // Should be way larger than genesis difficulty
-        const auto diff{GetDifficulty(*index)};
+        prev_block_hash = new_block->GetHash();
 
         block_height++;
         index = WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(new_block->GetHash()));
         Assert(index);
+
+        cur_MTP = index->GetMedianTimePast();
     }
 
     // Shouldn't see more than expected during simulation
@@ -204,7 +228,7 @@ FUZZ_TARGET(timewarp, .init = initialize_chain)
 
     if (block_height > high_water_mark) {
         high_water_mark = block_height;
-        fprintf(stderr, "Blocks accepted: %d\n", block_height);
+        fprintf(stderr, "Blocks accepted: %zu vs %d\n", attacker_mined_blocks, DIFF_PERIOD * NUM_PERIODS);
     }
 }
 } // namespace

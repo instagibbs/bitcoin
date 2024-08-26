@@ -74,9 +74,6 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
         bnNew.SetCompact(pindexLast->nBits);
     }
 
-    // Looks like this multiplication can cause overflow, which seems
-    // to result in way higher ramp ups in difficulty than normally
-    // possible?
     bnNew *= nActualTimespan;
     bnNew /= params.nPowTargetTimespan;
 

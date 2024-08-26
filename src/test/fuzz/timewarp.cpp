@@ -142,7 +142,7 @@ FUZZ_TARGET(timewarp, .init = initialize_chain)
     genesis_block_chainwork.SetCompact(g_chain->front()->nBits);
     genesis_block_chainwork = (~genesis_block_chainwork / (genesis_block_chainwork + 1)) + 1;
 
-    // 1800x difficulty adjustment...
+    // 1800x difficulty adjustment because of overflow on regtest nBits values
     Assert(per_block_chainwork >= genesis_block_chainwork * 1800);
 
     // 3 periods worth of new difficulty for miner to "spend"

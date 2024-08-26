@@ -25,6 +25,8 @@ std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const
 /** Create a blockchain with proper nBits, starting from genesis. Block time at beginning is always 0 */
 std::vector<std::shared_ptr<CBlock>> CreateBlockChainDiff(std::vector<int64_t> block_times, const CChainParams& params);
 
+std::shared_ptr<CBlock> CreateBlockWithTime(int64_t block_time, const uint256 prev_block_hash, int32_t prev_block_height, const CChainParams& params);
+
 /** Returns the generated coin */
 COutPoint MineBlock(const node::NodeContext&, const CScript& coinbase_scriptPubKey);
 

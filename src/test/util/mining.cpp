@@ -55,6 +55,29 @@ std::vector<std::shared_ptr<CBlock>> CreateBlockChainDiff(std::vector<int64_t> b
     return ret;
 }
 
+std::shared_ptr<CBlock> CreateBlockWithTime(int64_t block_time, const uint256 prev_block_hash, int32_t prev_block_height, const CChainParams& params)
+{
+    CBlock block;
+
+    CMutableTransaction coinbase_tx;
+    coinbase_tx.vin.resize(1);
+    coinbase_tx.vin[0].prevout.SetNull();
+    coinbase_tx.vout.resize(1);
+    coinbase_tx.vout[0].scriptPubKey = P2WSH_OP_TRUE;
+    coinbase_tx.vout[0].nValue = GetBlockSubsidy(prev_block_height + 1, params.GetConsensus());
+    coinbase_tx.vin[0].scriptSig = CScript() << (prev_block_height + 1) << OP_0;
+    block.vtx = {MakeTransactionRef(std::move(coinbase_tx))};
+
+    block.nVersion = VERSIONBITS_LAST_OLD_BLOCK_VERSION;
+    block.hashPrevBlock = prev_block_hash;
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    block.nTime = block_time;
+    block.nBits = params.GenesisBlock().nBits;
+    block.nNonce = 0;
+
+    return std::make_shared<CBlock>(block);
+}
+
 std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const CChainParams& params)
 {
     std::vector<std::shared_ptr<CBlock>> ret{total_height};

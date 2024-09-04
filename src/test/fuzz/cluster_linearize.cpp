@@ -223,10 +223,10 @@ std::vector<ClusterIndex> ReadLinearization(const DepGraph<BS>& depgraph, SpanRe
 
 } // namespace
 
-FUZZ_TARGET(clusterlin_add_dependency)
+FUZZ_TARGET(clusterlin_add_dependencies)
 {
     // Verify that computing a DepGraph from a cluster, or building it step by step using AddDependency
-    // have the same effect.
+    // and AddDependencies have the same effect.
 
     // Construct a cluster of a certain length, with no dependencies.
     FuzzedDataProvider provider(buffer.data(), buffer.size());
@@ -235,15 +235,36 @@ FUZZ_TARGET(clusterlin_add_dependency)
     // Construct the corresponding DepGraph object (also no dependencies).
     DepGraph depgraph(cluster);
     SanityCheck(depgraph);
-    // Read (parent, child) pairs, and add them to the cluster and depgraph.
+    // Read (parent, child) and (parents, child) pairs, and add them to the cluster and depgraph.
     LIMITED_WHILE(provider.remaining_bytes() > 0, TestBitSet::Size() * TestBitSet::Size()) {
-        auto parent = provider.ConsumeIntegralInRange<ClusterIndex>(0, num_tx - 1);
+        auto parent = provider.ConsumeIntegralInRange<uint64_t>(0, num_tx - 1 + (uint64_t{1} << num_tx) - 1);
         auto child = provider.ConsumeIntegralInRange<ClusterIndex>(0, num_tx - 2);
-        child += (child >= parent);
-        cluster[child].second.Set(parent);
-        depgraph.AddDependency(parent, child);
-        assert(depgraph.Ancestors(child)[parent]);
-        assert(depgraph.Descendants(parent)[child]);
+        if (parent < num_tx) {
+            // Parent in [0..num_tx), treat as individual parent for AddDependency.
+            child += (child >= parent);
+            cluster[child].second.Set(parent);
+            depgraph.AddDependency(parent, child);
+            assert(depgraph.Ancestors(child)[parent]);
+            assert(depgraph.Descendants(parent)[child]);
+        } else {
+            // Otherwise, treat (parent + 1 - num_tx) as bitmask of dependencies to add with AddDependencies.
+            TestBitSet deps;
+            uint64_t mask = parent - num_tx + 1;
+            for (ClusterIndex i = 0; i < num_tx; ++i) {
+                if (mask & 1) {
+                    deps.Set(i);
+                    cluster[child].second.Set(i);
+                }
+                mask >>= 1;
+            }
+            assert(deps.Any());
+            assert(mask == 0);
+            depgraph.AddDependencies(deps, child);
+            for (auto i : deps) {
+                assert(depgraph.Ancestors(child)[i]);
+                assert(depgraph.Descendants(i)[child]);
+            }
+        }
     }
     // Sanity check the result.
     SanityCheck(depgraph);

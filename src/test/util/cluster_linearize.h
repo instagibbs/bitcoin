@@ -264,9 +264,22 @@ void SanityCheck(const DepGraph<SetType>& depgraph)
         for (ClusterIndex j = 0; j < depgraph.TxCount(); ++j) {
             assert(depgraph.Ancestors(i)[j] == depgraph.Descendants(j)[i]);
         }
+        // No transaction is a parent or child of itself.
+        auto parents = depgraph.GetReducedParents(i);
+        auto children = depgraph.GetReducedChildren(i);
+        assert(!parents[i]);
+        assert(!children[i]);
+        // Parents of a transactions do not have ancestors inside those parents (except itself).
+        for (auto parent : parents) {
+            assert((depgraph.Ancestors(parent) & parents).IsSubsetOf(SetType::Singleton(parent)));
+        }
+        // Similar for children and descendants.
+        for (auto child : children) {
+            assert((depgraph.Descendants(child) & children).IsSubsetOf(SetType::Singleton(child)));
+        }
     }
-    // If DepGraph is acyclic, serialize + deserialize must roundtrip.
     if (IsAcyclic(depgraph)) {
+        // If DepGraph is acyclic, serialize + deserialize must roundtrip.
         std::vector<unsigned char> ser;
         VectorWriter writer(ser, 0);
         writer << Using<DepGraphFormatter>(depgraph);
@@ -284,6 +297,31 @@ void SanityCheck(const DepGraph<SetType>& depgraph)
         reader >> Using<DepGraphFormatter>(decoded_depgraph);
         assert(depgraph == decoded_depgraph);
         assert(reader.empty());
+
+        // In acyclic graphs, the union of parents with parents of parents etc. yields the
+        // full ancestor set (and similar for children and descendants).
+        std::vector<SetType> parents, children;
+        for (ClusterIndex i = 0; i < depgraph.TxCount(); ++i) {
+            parents.push_back(depgraph.GetReducedParents(i));
+            children.push_back(depgraph.GetReducedChildren(i));
+        }
+        for (ClusterIndex i = 0; i < depgraph.TxCount(); ++i) {
+            SetType par_union = SetType::Singleton(i);
+            while (true) {
+                SetType old = par_union;
+                for (auto j : par_union) par_union |= parents[j];
+                if (old == par_union) break;
+            }
+            assert(par_union == depgraph.Ancestors(i));
+
+            SetType chl_union = SetType::Singleton(i);
+            while (true) {
+                SetType old = chl_union;
+                for (auto j : chl_union) chl_union |= children[j];
+                if (old == chl_union) break;
+            }
+            assert(chl_union == depgraph.Descendants(i));
+        }
     }
 }
 

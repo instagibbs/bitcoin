@@ -184,6 +184,46 @@ public:
         }
     }
 
+    /** Compute the (reduced) set of parents of node i in this graph.
+     *
+     * This is the set of dependencies of i, excluding i itself, and excluding any parents of other
+     * dependencies.
+     *
+     * Complexity: O(N) where N=Ancestors(i).Count() (which is bounded by TxCount()).
+     */
+    SetType GetReducedParents(ClusterIndex i) const noexcept
+    {
+        SetType parents = Ancestors(i);
+        parents.Reset(i);
+        for (auto parent : parents) {
+            if (parents[parent]) {
+                parents -= Ancestors(parent);
+                parents.Set(parent);
+            }
+        }
+        return parents;
+    }
+
+    /** Compute the (reduced) set of children of node i in this graph.
+     *
+     * This is the set of descendants of i, excluding i itself, and excluding any children of other
+     * descendants.
+     *
+     * Complexity: O(N) where N=Descendants(i).Count() (which is bounded by TxCount()).
+     */
+    SetType GetReducedChildren(ClusterIndex i) const noexcept
+    {
+        SetType children = Descendants(i);
+        children.Reset(i);
+        for (auto child : children) {
+            if (children[child]) {
+                children -= Descendants(child);
+                children.Set(child);
+            }
+        }
+        return children;
+    }
+
     /** Compute the aggregate feerate of a set of nodes in this graph.
      *
      * Complexity: O(N) where N=elems.Count().

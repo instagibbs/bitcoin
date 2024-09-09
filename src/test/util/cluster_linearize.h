@@ -185,6 +185,21 @@ struct DepGraphFormatter
         /** Mapping from serialization order to cluster order, used later to reconstruct the
          *  cluster order. */
         std::vector<ClusterIndex> reordering;
+        /** How big the entries vector in the reconstructed depgraph will be (before the
+         *  introduction of holes in a further commit, this always equals reordering.size()). */
+        ClusterIndex total_size{0};
+
+        /** Update reordering and total_size according to (the remainder of the diff value) diff. */
+        auto insert_fn = [&](uint64_t diff) {
+            assert(reordering.size() < SetType::Size());
+            assert(total_size < SetType::Size());
+            diff %= total_size + 1;
+            // Insert the new transaction at distance diff back from the end.
+            for (auto& pos : reordering) {
+                pos += (pos >= total_size - diff);
+            }
+            reordering.push_back(total_size++ - diff);
+        };
 
         // Read transactions in topological order.
         try {
@@ -203,7 +218,8 @@ struct DepGraphFormatter
                 auto fee = UnsignedToSigned(coded_fee);
                 // Extend topo_depgraph with the new transaction (preliminarily at the end).
                 auto topo_idx = topo_depgraph.AddTransaction({fee, size});
-                reordering.push_back(reordering.size());
+                auto old_total_size{total_size};
+                insert_fn(0);
                 // Read dependency information.
                 uint64_t diff = 0; //!< How many potential parents we have to skip.
                 s >> VARINT(diff);
@@ -222,18 +238,15 @@ struct DepGraphFormatter
                         --diff;
                     }
                 }
-                // If we reach this point, we can interpret the remaining skip value as how far
-                // from the end of reordering the new transaction should be placed (wrapping
-                // around), so remove the preliminary position it was put in above (which was to
-                // make sure that if a deserialization exception occurs, the new transaction still
-                // has some entry in reordering).
+                // If we reach this point, we can interpret the remaining skip value as an
+                // instruction for where to place the new transaction in the resulting depgraph.
+                // First, undo the preliminary position it was put in above (which was to make sure
+                // that if a deserialization exception occurs, the new transaction still has some
+                // entry in reordering.
+                total_size = old_total_size;
                 reordering.pop_back();
-                ClusterIndex insert_distance = diff % (reordering.size() + 1);
-                // And then update reordering to reflect this new transaction's insertion.
-                for (auto& pos : reordering) {
-                    pos += (pos >= reordering.size() - insert_distance);
-                }
-                reordering.push_back(reordering.size() - insert_distance);
+                // Reinsert according to the remainder of diff.
+                insert_fn(diff);
             }
         } catch (const std::ios_base::failure&) {}
 

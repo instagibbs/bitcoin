@@ -57,9 +57,20 @@ class DepGraph
     /** Data for each transaction, in the same order as the Cluster it was constructed from. */
     std::vector<Entry> entries;
 
+    /** Which positions are used. */
+    SetType m_used;
+
 public:
     /** Equality operator (primarily for testing purposes). */
-    friend bool operator==(const DepGraph&, const DepGraph&) noexcept = default;
+    friend bool operator==(const DepGraph& a, const DepGraph& b) noexcept
+    {
+        if (a.m_used != b.m_used) return false;
+        // Only compare the used positions within the entries vector.
+        for (auto idx : a.m_used) {
+            if (a.entries[idx] != b.entries[idx]) return false;
+        }
+        return true;
+    }
 
     // Default constructors.
     DepGraph() noexcept = default;
@@ -80,6 +91,7 @@ public:
             entries[i].ancestors = SetType::Singleton(i);
             entries[i].descendants = SetType::Singleton(i);
         }
+        m_used = SetType::Fill(ntx);
     }
 
     /** Construct a DepGraph object given a cluster.
@@ -113,8 +125,12 @@ public:
         }
     }
 
+    /** Get the set of transactions positions in use. Complexity: O(1). */
+    const SetType& Positions() const noexcept { return m_used; }
+    /** Get the range of positions in this DepGraph. All entries in Positions() are in [0, PositionRange() - 1]. */
+    ClusterIndex PositionRange() const noexcept { return entries.size(); }
     /** Get the number of transactions in the graph. Complexity: O(1). */
-    auto TxCount() const noexcept { return entries.size(); }
+    auto TxCount() const noexcept { return m_used.Count(); }
     /** Get the feerate of a given transaction i. Complexity: O(1). */
     const FeeFrac& FeeRate(ClusterIndex i) const noexcept { return entries[i].feerate; }
     /** Get the mutable feerate of a given transaction i. Complexity: O(1). */
@@ -124,17 +140,53 @@ public:
     /** Get the descendants of a given transaction i. Complexity: O(1). */
     const SetType& Descendants(ClusterIndex i) const noexcept { return entries[i].descendants; }
 
-    /** Add a new unconnected transaction to this transaction graph (at the end), and return its
-     *  ClusterIndex.
+    /** Add a new unconnected transaction to this transaction graph (in the first available
+     *  position), and return its ClusterIndex.
      *
      * Complexity: O(1) (amortized, due to resizing of backing vector).
      */
     ClusterIndex AddTransaction(const FeeFrac& feefrac) noexcept
     {
-        Assume(TxCount() < SetType::Size());
-        ClusterIndex new_idx = TxCount();
-        entries.emplace_back(feefrac, SetType::Singleton(new_idx), SetType::Singleton(new_idx));
+        static constexpr auto ALL_POSITIONS = SetType::Fill(SetType::Size());
+        auto available = ALL_POSITIONS - m_used;
+        Assume(available.Any());
+        ClusterIndex new_idx = available.First();
+        if (new_idx == entries.size()) {
+            entries.emplace_back(feefrac, SetType::Singleton(new_idx), SetType::Singleton(new_idx));
+        } else {
+            entries[new_idx] = Entry(feefrac, SetType::Singleton(new_idx), SetType::Singleton(new_idx));
+        }
+        m_used.Set(new_idx);
         return new_idx;
+    }
+
+    /** Remove the specified positions from this DepGraph.
+     *
+     * The specified positions will no longer be part of Positions(), and dependencies with them are
+     * removed. Note that due to DepGraph only tracking ancestors/descendants (and not direct
+     * dependencies), if a parent is removed while a grandparent remains, the grandparent will
+     * remain an ancestor.
+     *
+     * Complexity: O(N) where N=TxCount().
+     */
+    void RemoveTransactions(const SetType& del) noexcept
+    {
+        m_used -= del;
+        // Remove now-unused trailing entries.
+        while (!entries.empty() && !m_used[entries.size() - 1]) {
+            entries.pop_back();
+        }
+        // Wipe the remaining deleted entries, and remove them from ancestors/descendants of
+        // the rest.
+        for (ClusterIndex idx = 0; idx < entries.size(); ++idx) {
+            if (m_used[idx]) {
+                entries[idx].ancestors &= m_used;
+                entries[idx].descendants &= m_used;
+            } else {
+                entries[idx].ancestors = {};
+                entries[idx].descendants = {};
+            }
+        }
     }
 
     /** Modify this transaction graph, adding a dependency between a specified parent and child.
@@ -278,7 +330,7 @@ public:
      *
      * Complexity: O(TxCount()).
      */
-    bool IsConnected() const noexcept { return IsConnected(SetType::Fill(TxCount())); }
+    bool IsConnected() const noexcept { return IsConnected(m_used); }
 
     /** Append the entries of select to list in a topologically valid order.
      *
@@ -520,11 +572,11 @@ public:
      */
     AncestorCandidateFinder(const DepGraph<SetType>& depgraph LIFETIMEBOUND) noexcept :
         m_depgraph(depgraph),
-        m_todo{SetType::Fill(depgraph.TxCount())},
-        m_ancestor_set_feerates(depgraph.TxCount())
+        m_todo{depgraph.Positions()},
+        m_ancestor_set_feerates(depgraph.PositionRange())
     {
         // Precompute ancestor-set feerates.
-        for (ClusterIndex i = 0; i < depgraph.TxCount(); ++i) {
+        for (ClusterIndex i : m_depgraph.Positions()) {
             /** The remaining ancestors for transaction i. */
             SetType anc_to_add = m_depgraph.Ancestors(i);
             FeeFrac anc_feerate;
@@ -620,7 +672,7 @@ public:
     SearchCandidateFinder(const DepGraph<SetType>& depgraph LIFETIMEBOUND, uint64_t rng_seed) noexcept :
         m_rng(rng_seed),
         m_depgraph(depgraph),
-        m_todo(SetType::Fill(depgraph.TxCount())) {}
+        m_todo(depgraph.Positions()) {}
 
     /** Check whether any unlinearized transactions remain. */
     bool AllDone() const noexcept
@@ -974,7 +1026,7 @@ void PostLinearize(const DepGraph<SetType>& depgraph, Span<ClusterIndex> lineari
     // During an even pass, the diagram above would correspond to linearization [2,3,0,1], with
     // groups [2] and [3,0,1].
 
-    std::vector<TxEntry> entries(linearization.size() + 1);
+    std::vector<TxEntry> entries(depgraph.PositionRange() + 1);
 
     // Perform two passes over the linearization.
     for (int pass = 0; pass < 2; ++pass) {

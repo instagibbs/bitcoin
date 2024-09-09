@@ -36,7 +36,7 @@ class SimpleCandidateFinder
 public:
     /** Construct an SimpleCandidateFinder for a given graph. */
     SimpleCandidateFinder(const DepGraph<SetType>& depgraph LIFETIMEBOUND) noexcept :
-        m_depgraph(depgraph), m_todo{SetType::Fill(depgraph.TxCount())} {}
+        m_depgraph(depgraph), m_todo{depgraph.Positions()} {}
 
     /** Remove a set of transactions from the set of to-be-linearized ones. */
     void MarkDone(SetType select) noexcept { m_todo -= select; }
@@ -106,7 +106,7 @@ class ExhaustiveCandidateFinder
 public:
     /** Construct an ExhaustiveCandidateFinder for a given graph. */
     ExhaustiveCandidateFinder(const DepGraph<SetType>& depgraph LIFETIMEBOUND) noexcept :
-        m_depgraph(depgraph), m_todo{SetType::Fill(depgraph.TxCount())} {}
+        m_depgraph(depgraph), m_todo{depgraph.Positions()} {}
 
     /** Remove a set of transactions from the set of to-be-linearized ones. */
     void MarkDone(SetType select) noexcept { m_todo -= select; }
@@ -152,7 +152,7 @@ std::pair<std::vector<ClusterIndex>, bool> SimpleLinearize(const DepGraph<SetTyp
 {
     std::vector<ClusterIndex> linearization;
     SimpleCandidateFinder finder(depgraph);
-    SetType todo = SetType::Fill(depgraph.TxCount());
+    SetType todo = depgraph.Positions();
     bool optimal = true;
     while (todo.Any()) {
         auto [candidate, iterations_done] = finder.FindCandidateSet(max_iterations);
@@ -188,7 +188,7 @@ template<typename BS>
 std::vector<ClusterIndex> ReadLinearization(const DepGraph<BS>& depgraph, SpanReader& reader)
 {
     std::vector<ClusterIndex> linearization;
-    TestBitSet todo = TestBitSet::Fill(depgraph.TxCount());
+    TestBitSet todo = depgraph.Positions();
     // In every iteration one topologically-valid transaction is appended to linearization.
     while (todo.Any()) {
         // Compute the set of transactions with no not-yet-included ancestors.
@@ -297,6 +297,17 @@ FUZZ_TARGET(clusterlin_cluster_serialization)
     // check for the serialization).
     DepGraph depgraph(cluster);
     VerifyDepGraphFromCluster(cluster, depgraph);
+
+    // Remove an arbitrary subset (in order to construct a graph with holes) and verify that it
+    // still sanity checks (incl. round-tripping serialization).
+    uint64_t del = provider.ConsumeIntegralInRange<uint64_t>(1, (uint64_t{1} << num_tx) - 1);
+    TestBitSet setdel;
+    for (ClusterIndex i : depgraph.Positions()) {
+        if (del & 1) setdel.Set(i);
+        del >>= 1;
+    }
+    depgraph.RemoveTransactions(setdel);
+    SanityCheck(depgraph);
 }
 
 FUZZ_TARGET(clusterlin_depgraph_serialization)
@@ -326,7 +337,7 @@ FUZZ_TARGET(clusterlin_components)
         reader >> Using<DepGraphFormatter>(depgraph);
     } catch (const std::ios_base::failure&) {}
 
-    TestBitSet todo = TestBitSet::Fill(depgraph.TxCount());
+    TestBitSet todo = depgraph.Positions();
     while (todo.Any()) {
         // Find a connected component inside todo.
         auto component = depgraph.FindConnectedComponent(todo);
@@ -337,7 +348,7 @@ FUZZ_TARGET(clusterlin_components)
 
         // If todo is the entire graph, and the entire graph is connected, then the component must
         // be the entire graph.
-        if (todo == TestBitSet::Fill(depgraph.TxCount())) {
+        if (todo == depgraph.Positions()) {
             assert((component == todo) == depgraph.IsConnected());
         }
 
@@ -374,7 +385,7 @@ FUZZ_TARGET(clusterlin_components)
             reader >> VARINT(subset_bits);
         } catch (const std::ios_base::failure&) {}
         TestBitSet subset;
-        for (ClusterIndex i = 0; i < depgraph.TxCount(); ++i) {
+        for (ClusterIndex i : depgraph.Positions()) {
             if (todo[i]) {
                 if (subset_bits & 1) subset.Set(i);
                 subset_bits >>= 1;
@@ -413,7 +424,7 @@ FUZZ_TARGET(clusterlin_chunking)
     }
 
     // Naively recompute the chunks (each is the highest-feerate prefix of what remains).
-    auto todo = TestBitSet::Fill(depgraph.TxCount());
+    auto todo = depgraph.Positions();
     for (const auto& chunk_feerate : chunking) {
         assert(todo.Any());
         SetInfo<TestBitSet> accumulator, best;
@@ -444,7 +455,7 @@ FUZZ_TARGET(clusterlin_ancestor_finder)
     } catch (const std::ios_base::failure&) {}
 
     AncestorCandidateFinder anc_finder(depgraph);
-    auto todo = TestBitSet::Fill(depgraph.TxCount());
+    auto todo = depgraph.Positions();
     while (todo.Any()) {
         // Call the ancestor finder's FindCandidateSet for what remains of the graph.
         assert(!anc_finder.AllDone());
@@ -503,7 +514,7 @@ FUZZ_TARGET(clusterlin_search_finder)
     ExhaustiveCandidateFinder exh_finder(depgraph);
     AncestorCandidateFinder anc_finder(depgraph);
 
-    auto todo = TestBitSet::Fill(depgraph.TxCount());
+    auto todo = depgraph.Positions();
     while (todo.Any()) {
         assert(!src_finder.AllDone());
         assert(!smp_finder.AllDone());
@@ -597,7 +608,7 @@ FUZZ_TARGET(clusterlin_linearization_chunking)
     } catch (const std::ios_base::failure&) {}
 
     // Retrieve a topologically-valid subset of depgraph.
-    auto todo = TestBitSet::Fill(depgraph.TxCount());
+    auto todo = depgraph.Positions();
     auto subset = SetInfo(depgraph, ReadTopologicalSet(depgraph, todo, reader));
 
     // Retrieve a valid linearization for depgraph.
@@ -763,8 +774,8 @@ FUZZ_TARGET(clusterlin_linearize)
 
         // Only for very small clusters, test every topologically-valid permutation.
         if (depgraph.TxCount() <= 7) {
-            std::vector<ClusterIndex> perm_linearization(depgraph.TxCount());
-            for (ClusterIndex i = 0; i < depgraph.TxCount(); ++i) perm_linearization[i] = i;
+            std::vector<ClusterIndex> perm_linearization;
+            for (ClusterIndex i : depgraph.Positions()) perm_linearization.push_back(i);
             // Iterate over all valid permutations.
             do {
                 // Determine whether perm_linearization is topological.
@@ -848,9 +859,16 @@ FUZZ_TARGET(clusterlin_postlinearize_tree)
     // Now construct a new graph, copying the nodes, but leaving only the first parent (even
     // direction) or the first child (odd direction).
     DepGraph<TestBitSet> depgraph_tree;
-    for (ClusterIndex i = 0; i < depgraph_gen.TxCount(); ++i) {
-        depgraph_tree.AddTransaction(depgraph_gen.FeeRate(i));
+    for (ClusterIndex i = 0; i < depgraph_gen.PositionRange(); ++i) {
+        if (depgraph_gen.Positions()[i]) {
+            depgraph_tree.AddTransaction(depgraph_gen.FeeRate(i));
+        } else {
+            // For holes, add a dummy transaction which is deleted below.
+            depgraph_tree.AddTransaction(FeeFrac{});
+        }
     }
+    depgraph_tree.RemoveTransactions(TestBitSet::Fill(depgraph_gen.PositionRange()) - depgraph_gen.Positions());
+
     if (direction & 1) {
         for (ClusterIndex i = 0; i < depgraph_gen.TxCount(); ++i) {
             auto children = depgraph_gen.GetReducedChildren(i);

@@ -233,43 +233,42 @@ FUZZ_TARGET(clusterlin_add_dependencies)
     auto num_tx = provider.ConsumeIntegralInRange<ClusterIndex>(2, 32);
     Cluster<TestBitSet> cluster(num_tx, std::pair{FeeFrac{0, 1}, TestBitSet{}});
     // Construct the corresponding DepGraph object (also no dependencies).
-    DepGraph depgraph(cluster);
-    SanityCheck(depgraph);
-    // Read (parent, child) and (parents, child) pairs, and add them to the cluster and depgraph.
+    DepGraph depgraph_individual(cluster);
+    DepGraph depgraph_batch(cluster);
+    SanityCheck(depgraph_individual);
+    SanityCheck(depgraph_batch);
+    // Read (parents bitmask, child) pairs, and add them to the cluster and depgraph
     LIMITED_WHILE(provider.remaining_bytes() > 0, TestBitSet::Size() * TestBitSet::Size()) {
-        auto parent = provider.ConsumeIntegralInRange<uint64_t>(0, num_tx - 1 + (uint64_t{1} << num_tx) - 1);
+        const auto parent_mask = provider.ConsumeIntegralInRange<uint64_t>(0, (uint64_t{1} << num_tx) - 1);
         auto child = provider.ConsumeIntegralInRange<ClusterIndex>(0, num_tx - 2);
-        if (parent < num_tx) {
-            // Parent in [0..num_tx), treat as individual parent for AddDependency.
-            child += (child >= parent);
-            cluster[child].second.Set(parent);
-            depgraph.AddDependency(parent, child);
-            assert(depgraph.Ancestors(child)[parent]);
-            assert(depgraph.Descendants(parent)[child]);
-        } else {
-            // Otherwise, treat (parent + 1 - num_tx) as bitmask of dependencies to add with AddDependencies.
-            TestBitSet deps;
-            uint64_t mask = parent - num_tx + 1;
-            for (ClusterIndex i = 0; i < num_tx; ++i) {
-                if (mask & 1) {
-                    deps.Set(i);
-                    cluster[child].second.Set(i);
-                }
-                mask >>= 1;
+
+        auto parent_mask_shifted = parent_mask;
+
+        TestBitSet deps;
+        for (ClusterIndex i = 0; i < num_tx; ++i) {
+            if (parent_mask_shifted & 1) {
+                deps.Set(i);
+                cluster[child].second.Set(i);
             }
-            assert(deps.Any());
-            assert(mask == 0);
-            depgraph.AddDependencies(deps, child);
-            for (auto i : deps) {
-                assert(depgraph.Ancestors(child)[i]);
-                assert(depgraph.Descendants(i)[child]);
-            }
+            parent_mask_shifted >>= 1;
+            if (parent_mask_shifted == 0) break;
+        }
+        assert(parent_mask != 0 == deps.Any());
+        assert(parent_mask_shifted == 0);
+        for (auto dep : deps) {
+            depgraph_individual.AddDependency(dep, child);
+        }
+        depgraph_batch.AddDependencies(deps, child);
+        for (auto i : deps) {
+            assert(depgraph_batch.Ancestors(child)[i]);
+            assert(depgraph_batch.Descendants(i)[child]);
         }
     }
     // Sanity check the result.
-    SanityCheck(depgraph);
-    // Verify that the resulting DepGraph matches one recomputed from the cluster.
-    assert(DepGraph(cluster) == depgraph);
+    SanityCheck(depgraph_individual);
+    // Verify that the resulting DepGraph matches one recomputed from the cluster and by batch addition.
+    assert(depgraph_individual == depgraph_batch);
+    assert(DepGraph(cluster) == depgraph_batch);
 }
 
 FUZZ_TARGET(clusterlin_cluster_serialization)

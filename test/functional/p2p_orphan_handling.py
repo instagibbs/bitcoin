@@ -5,6 +5,7 @@
 
 import time
 
+from test_framework.blocktools import MAX_STANDARD_TX_WEIGHT
 from test_framework.messages import (
     CInv,
     CTxInWitness,
@@ -113,7 +114,7 @@ class PeerTxRelayer(P2PTxInvStore):
 class OrphanHandlingTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [[]]
+        self.extra_args = [["-datacarriersize=100000"]]
 
     def create_parent_and_child(self):
         """Create package with 1 parent and 1 child, normal fees (no cpfp)."""
@@ -566,6 +567,39 @@ class OrphanHandlingTest(BitcoinTestFramework):
         assert tx_child["txid"] in node_mempool
         assert_equal(node.getmempoolentry(tx_child["txid"])["wtxid"], tx_child["wtxid"])
 
+    @cleanup
+    def test_oversized_orphan(self):
+        self.log.info("Check node does store almost-overly-large orphan")
+        node = self.nodes[0]
+
+        peer = node.add_p2p_connection(P2PInterface())
+
+        tx_parent = self.wallet.create_self_transfer()
+
+        borderline_orphan_tx = self.wallet.create_self_transfer(utxo_to_spend=tx_parent["new_utxo"], target_vsize=MAX_STANDARD_TX_WEIGHT // 4)
+        orphan_info = node.getorphantxs()
+        assert borderline_orphan_tx["txid"] not in orphan_info
+        peer.send_and_ping(msg_tx(borderline_orphan_tx["tx"]))
+        node.bumpmocktime(TXREQUEST_TIME_SKIP)
+
+        # Made it into orphanage
+        orphan_info = node.getorphantxs()
+        assert borderline_orphan_tx["txid"] in orphan_info
+
+        # Fetches parent as well
+        parent_txid_int = int(tx_parent["txid"], 16)
+        peer.wait_for_getdata([parent_txid_int])
+
+        self.log.info("Check node does not store overly-large orphan")
+
+        oversize_orphan_tx = self.wallet.create_self_transfer(utxo_to_spend=tx_parent["new_utxo"], target_vsize=(MAX_STANDARD_TX_WEIGHT // 4) + 1)
+        peer.send_and_ping(msg_tx(oversize_orphan_tx["tx"]))
+
+        orphan_info = node.getorphantxs()
+        assert borderline_orphan_tx["txid"] in orphan_info
+        assert oversize_orphan_tx["txid"] not in orphan_info
+
+        assert_equal(node.getrawmempool(), [])
 
     def run_test(self):
         self.nodes[0].setmocktime(int(time.time()))
@@ -573,6 +607,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.generate(self.wallet_nonsegwit, 10)
         self.wallet = MiniWallet(self.nodes[0])
         self.generate(self.wallet, 160)
+        self.test_oversized_orphan()
         self.test_arrival_timing_orphan()
         self.test_orphan_rejected_parents_exceptions()
         self.test_orphan_multiple_parents()

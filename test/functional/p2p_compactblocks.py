@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test compact blocks (BIP 152)."""
 import random
+import time
 
 from test_framework.blocktools import (
     COINBASE_MATURITY,
@@ -834,6 +835,9 @@ class CompactBlocksTest(BitcoinTestFramework):
         node = self.nodes[0]
         assert len(self.utxos)
 
+        self.mocktime = int(time.time())
+        node.setmocktime(self.mocktime)
+
         def announce_cmpct_block(node, peer, txn_count):
             utxo = self.utxos.pop(0)
             block = self.build_block_with_transactions(node, utxo, txn_count)
@@ -857,7 +861,8 @@ class CompactBlocksTest(BitcoinTestFramework):
             peer.clear_getblocktxn()
 
         # Test the simple parallel download case...
-        for num_missing in [1, 5, 20]:
+        # if include_header_ann, 3rd and 4th attempts will be via header announcement 30 seconds later
+        for num_missing, include_header_ann in [(1, True), (1, False), (5, False), (20, False)]:
 
             # Remaining low-bandwidth peer is stalling_peer, who announces first
             assert_equal([peer['bip152_hb_to'] for peer in node.getpeerinfo()], [False, True, True, True])
@@ -870,17 +875,40 @@ class CompactBlocksTest(BitcoinTestFramework):
                 assert "getblocktxn" in delivery_peer.last_message
             assert int(node.getbestblockhash(), 16) != block.sha256
 
-            inbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
-            with p2p_lock:
-                # The third inbound peer to announce should *not* get a getblocktxn
-                assert "getblocktxn" not in inbound_peer.last_message
-            assert int(node.getbestblockhash(), 16) != block.sha256
+            if include_header_ann:
+                inbound_peer.send_header_for_blocks([cmpct_block.header])
+                # wait for near-tip fetch of full block
+                self.mocktime += 31
+                node.setmocktime(self.mocktime)
+                inbound_peer.sync_with_ping()
+                self.wait_until(lambda: "getdata" in inbound_peer.last_message)
+                with p2p_lock:
+                    # the third peer to announce should get a getdata for the right block
+                    assert_equal(inbound_peer.last_message["getdata"].inv[0].hash, cmpct_block.header.sha256)
+            else:
+                inbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+                with p2p_lock:
+                    # The third inbound peer to announce should *not* get a getblocktxn
+                    assert "getblocktxn" not in inbound_peer.last_message
+                assert int(node.getbestblockhash(), 16) != block.sha256
 
-            outbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
-            with p2p_lock:
-                # The third peer to announce should get a getblocktxn if outbound
-                assert "getblocktxn" in outbound_peer.last_message
-            assert int(node.getbestblockhash(), 16) != block.sha256
+            if include_header_ann:
+                outbound_peer.send_header_for_blocks([cmpct_block.header])
+                # wait for near-tip fetch of full block
+                self.mocktime += 31
+                node.setmocktime(self.mocktime)
+                outbound_peer.sync_with_ping()
+                with p2p_lock:
+                    # the third peer to announce should not get a getdata
+                    # since we've already have three outstanding requests
+                    # for the same block
+                    assert "getdata" not in outbound_peer.last_message
+            else:
+                outbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+                with p2p_lock:
+                    # The third peer to announce should get a getblocktxn if outbound
+                    assert "getblocktxn" in outbound_peer.last_message
+                assert int(node.getbestblockhash(), 16) != block.sha256
 
             # Second peer completes the compact block first
             msg = msg_blocktxn()

@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test compact blocks (BIP 152)."""
 import random
+import time
 
 from test_framework.blocktools import (
     COINBASE_MATURITY,
@@ -108,6 +109,10 @@ class TestP2PConn(P2PInterface):
     def clear_getblocktxn(self):
         with p2p_lock:
             self.last_message.pop("getblocktxn", None)
+
+    def clear_getdata(self):
+        with p2p_lock:
+            self.last_message.pop("getdata", None)
 
     def get_headers(self, locator, hashstop):
         msg = msg_getheaders()
@@ -834,6 +839,9 @@ class CompactBlocksTest(BitcoinTestFramework):
         node = self.nodes[0]
         assert len(self.utxos)
 
+        self.mocktime = int(time.time())
+        node.setmocktime(self.mocktime)
+
         def announce_cmpct_block(node, peer, txn_count):
             utxo = self.utxos.pop(0)
             block = self.build_block_with_transactions(node, utxo, txn_count)
@@ -854,7 +862,10 @@ class CompactBlocksTest(BitcoinTestFramework):
             msg.block_transactions.transactions = block.vtx[1:]
             peer.send_and_ping(msg)
             assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+
+        for peer in self.all_peers:
             peer.clear_getblocktxn()
+            peer.clear_getdata()
 
         # Test the simple parallel download case...
         for num_missing in [1, 5, 20]:
@@ -864,12 +875,15 @@ class CompactBlocksTest(BitcoinTestFramework):
 
             block, cmpct_block = announce_cmpct_block(node, stalling_peer, num_missing)
 
+            non_fetched_peer = None
+
             inbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
             with p2p_lock:
                 # The inbound peer to announce should *not* get a getblocktxn
                 # unless first peer was already outbound
                 if staller_inbound:
                     assert "getblocktxn" not in inbound_peer.last_message
+                    non_fetched_peer = inbound_peer
                 else:
                      assert "getblocktxn" in inbound_peer.last_message
             assert int(node.getbestblockhash(), 16) != block.sha256
@@ -882,7 +896,18 @@ class CompactBlocksTest(BitcoinTestFramework):
                     assert "getblocktxn" in outbound_peer.last_message
                 else:
                     assert "getblocktxn" not in outbound_peer.last_message
+                    non_fetched_peer = outbound_peer
             assert int(node.getbestblockhash(), 16) != block.sha256
+
+            # If we wait 30 seconds, getdata for full block should be emitted
+            # to a peer not already selected for download      
+
+            # No blocks have been directly fetched yet
+            assert_equal(sum("getdata" in peer.last_message for peer in self.all_peers), 0)
+            self.mocktime += 31
+            node.setmocktime(self.mocktime)
+            self.wait_until(lambda: "getdata" in non_fetched_peer.last_message)
+            self.wait_until(lambda: sum("getdata" in peer.last_message for peer in self.all_peers) == 1)
 
             # Non staller peer that was requested completes the compact block first
             msg = msg_blocktxn()
@@ -898,9 +923,9 @@ class CompactBlocksTest(BitcoinTestFramework):
             stalling_peer.send_and_ping(msg)
             self.utxos.append([block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue])
 
-            inbound_peer.clear_getblocktxn()
-            outbound_peer.clear_getblocktxn()
-
+            for peer in self.all_peers:
+                peer.clear_getblocktxn()
+                peer.clear_getdata()
 
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
@@ -911,6 +936,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.onemore_inbound_node = self.nodes[0].add_p2p_connection(TestP2PConn())
         self.outbound_node = self.nodes[0].add_outbound_p2p_connection(TestP2PConn(), p2p_idx=3, connection_type="outbound-full-relay")
         self.additional_outbound_node = self.nodes[0].add_outbound_p2p_connection(TestP2PConn(), p2p_idx=4, connection_type="outbound-full-relay")
+        self.all_peers = [self.segwit_node, self.additional_segwit_node, self.onemore_inbound_node, self.outbound_node, self.additional_outbound_node]
 
         # We will need UTXOs to construct transactions in later tests.
         self.make_utxos()

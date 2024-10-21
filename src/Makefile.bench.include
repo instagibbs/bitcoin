@@ -40,6 +40,7 @@ bench_bench_bitcoin_SOURCES = \
   bench/load_external.cpp \
   bench/lockedpool.cpp \
   bench/logging.cpp \
+  bench/mempool_ephemeral_spends.cpp \
   bench/mempool_eviction.cpp \
   bench/mempool_stress.cpp \
   bench/merkle_root.cpp \

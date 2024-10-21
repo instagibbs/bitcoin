@@ -5,30 +5,34 @@
 #include<policy/ephemeral_policy.h>
 #include<policy/policy.h>
 
-bool CheckValidEphemeralTx(const CTransactionRef& tx, CFeeRate dust_relay_fee, CAmount base_fee, CAmount mod_fee, TxValidationState& state)
+bool CheckValidEphemeralTx(const CTransactionRef& tx, CFeeRate dust_relay_fee, CAmount base_fee, CAmount mod_fee, std::vector<uint32_t>& dust_indexes, TxValidationState& state)
 {
+    dust_indexes.clear();
+    for (size_t i = 0; i < tx->vout.size(); ++i) {
+        const auto& output = tx->vout[i];
+        if (IsDust(output, dust_relay_fee)) dust_indexes.push_back(i);
+    }
+
     // We never want to give incentives to mine this transaction alone
     if ((base_fee != 0 || mod_fee != 0) &&
-        std::any_of(tx->vout.cbegin(), tx->vout.cend(), [&](const auto& output) { return IsDust(output, dust_relay_fee); })) {
+        !dust_indexes.empty()) {
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "dust", "tx with dust output must be 0-fee");
     }
 
     return true;
 }
 
-std::optional<Txid> CheckEphemeralSpends(const Package& package, CFeeRate dust_relay_rate, const CTxMemPool& tx_pool)
+std::optional<Txid> CheckEphemeralSpends(const std::vector<CTxMemPoolEntry*>& package_entries, CFeeRate dust_relay_rate, const CTxMemPool& tx_pool)
 {
-    if (!Assume(std::all_of(package.cbegin(), package.cend(), [](const auto& tx){return tx != nullptr;}))) {
-        // Bail out of spend checks if caller gave us an invalid package
-        return std::nullopt;
+    std::map<Txid, CTxMemPoolEntry*> map_txid_ref;
+    for (const auto& entry : package_entries) {
+        const auto& tx = entry->GetSharedTx();
+        map_txid_ref[tx->GetHash()] = entry;
     }
 
-    std::map<Txid, CTransactionRef> map_txid_ref;
-    for (const auto& tx : package) {
-        map_txid_ref[tx->GetHash()] = tx;
-    }
+    for (const auto& entry : package_entries) {
+        const auto& tx = entry->GetSharedTx();
 
-    for (const auto& tx : package) {
         Txid txid = tx->GetHash();
         std::unordered_set<Txid, SaltedTxidHasher> processed_parent_set;
         std::unordered_set<COutPoint, SaltedOutpointHasher> unspent_parent_dust;
@@ -39,21 +43,13 @@ std::optional<Txid> CheckEphemeralSpends(const Package& package, CFeeRate dust_r
             if (processed_parent_set.contains(parent_txid)) continue;
 
             // We look for an in-package or in-mempool dependency
-            CTransactionRef parent_ref = nullptr;
-            if (map_txid_ref.contains(parent_txid)) {
-                parent_ref = map_txid_ref[parent_txid];
-            } else {
-                parent_ref = tx_pool.get(parent_txid);
-            }
+            const CTxMemPoolEntry* parent_entry = map_txid_ref.contains(parent_txid) ? map_txid_ref[parent_txid] : tx_pool.GetEntry(parent_txid);
 
-            // Check for dust on parents
-            if (parent_ref) {
-                for (uint32_t out_index = 0; out_index < parent_ref->vout.size(); out_index++) {
-                    const auto& tx_output = parent_ref->vout[out_index];
-                    if (IsDust(tx_output, dust_relay_rate)) {
-                        unspent_parent_dust.insert(COutPoint(parent_txid, out_index));
-                    }
-                }
+            // Accumulate dust from parents
+            if (parent_entry) {
+                for (const auto& dust_index : parent_entry->GetDustIndexes()) {
+                    unspent_parent_dust.insert(COutPoint(parent_txid, dust_index));
+                }                
             }
 
             processed_parent_set.insert(parent_txid);

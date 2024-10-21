@@ -24,6 +24,7 @@ struct TestMemPoolEntryHelper {
     uint64_t m_sequence{0};
     bool spendsCoinbase{false};
     unsigned int sigOpCost{4};
+    std::vector<uint32_t> m_dust_indexes;
     LockPoints lp;
 
     CTxMemPoolEntry FromTx(const CMutableTransaction& tx) const;

@@ -928,19 +928,20 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         }
     }
 
+    // Enforces 0-fee for dust transactions, no incentive to be mined alone
+    std::vector<uint32_t> dust_indexes;
+    if (m_pool.m_opts.require_standard) {
+        if (!CheckValidEphemeralTx(ptx, m_pool.m_opts.dust_relay_feerate, ws.m_base_fees, ws.m_modified_fees, dust_indexes, state)) {
+            return false; // state filled in by CheckValidEphemeralTx
+        }
+    }
+
     // Set entry_sequence to 0 when bypass_limits is used; this allows txs from a block
     // reorg to be marked earlier than any child txs that were already in the mempool.
     const uint64_t entry_sequence = bypass_limits ? 0 : m_pool.GetSequence();
     entry.reset(new CTxMemPoolEntry(ptx, ws.m_base_fees, nAcceptTime, m_active_chainstate.m_chain.Height(), entry_sequence,
-                                    fSpendsCoinbase, nSigOpsCost, lock_points.value()));
+                                    fSpendsCoinbase, dust_indexes, nSigOpsCost, lock_points.value()));
     ws.m_vsize = entry->GetTxSize();
-
-    // Enforces 0-fee for dust transactions, no incentive to be mined alone
-    if (m_pool.m_opts.require_standard) {
-        if (!CheckValidEphemeralTx(ptx, m_pool.m_opts.dust_relay_feerate, ws.m_base_fees, ws.m_modified_fees, state)) {
-            return false; // state filled in by CheckValidEphemeralTx
-        }
-    }
 
     if (nSigOpsCost > MAX_STANDARD_TX_SIGOPS_COST)
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-too-many-sigops",
@@ -1463,7 +1464,9 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     }
 
     if (m_pool.m_opts.require_standard) {
-        if (const auto ephemeral_violation{CheckEphemeralSpends(/*package=*/{ptx}, m_pool.m_opts.dust_relay_feerate, m_pool)}) {
+        std::vector<CTxMemPoolEntry*> package_entries;
+        package_entries.push_back(ws.m_entry.get());
+        if (const auto ephemeral_violation{CheckEphemeralSpends(package_entries, m_pool.m_opts.dust_relay_feerate, m_pool)}) {
             const Txid& txid = ephemeral_violation.value();
             Assume(txid == ptx->GetHash());
             ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "missing-ephemeral-spends",
@@ -1612,7 +1615,10 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
 
     // Now that we've bounded the resulting possible ancestry count, check parents for dust spends
     if (m_pool.m_opts.require_standard) {
-        if (const auto ephemeral_violation{CheckEphemeralSpends(txns, m_pool.m_opts.dust_relay_feerate, m_pool)}) {
+        std::vector<CTxMemPoolEntry*> package_entries;
+        for (const auto& ws : workspaces) package_entries.push_back(ws.m_entry.get());
+
+        if (const auto ephemeral_violation{CheckEphemeralSpends(package_entries, m_pool.m_opts.dust_relay_feerate, m_pool)}) {
             const Txid& parent_txid = ephemeral_violation.value();
             TxValidationState child_state;
             child_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "missing-ephemeral-spends",

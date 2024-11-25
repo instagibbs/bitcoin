@@ -289,6 +289,8 @@ private:
 
     /** Index of ChunkData objects. */
     ChunkIndex m_chunkindex;
+    /** Number of index-observing objects in existence. */
+    size_t m_chunkindex_observers{0};
 
     /** A Locator that describes whether, where, and in which Cluster an Entry appears.
      *  Every Entry has MAX_LEVELS locators, as it may appear in one Cluster per level.
@@ -423,6 +425,7 @@ public:
     {
         auto& entry = m_entries[idx];
         Assume(entry.m_ref != nullptr);
+        Assume(m_chunkindex_observers == 0 || !entry.m_locator[0].IsPresent());
         entry.m_ref = nullptr;
         // Mark the transaction as to be removed in all levels where it explicitly or implicitly
         // exists.
@@ -551,6 +554,7 @@ void TxGraphImpl::ClearLocator(int level, GraphIndex idx) noexcept
         }
     }
     if (level == 0 && entry.m_chunkindex_iterator != m_chunkindex.end()) {
+        Assume(m_chunkindex_observers == 0);
         m_chunkindex.erase(entry.m_chunkindex_iterator);
         entry.m_chunkindex_iterator = m_chunkindex.end();
     }
@@ -564,6 +568,7 @@ void Cluster::Updated(TxGraphImpl& graph) noexcept
         if (m_level == 0 && entry.m_chunkindex_iterator != graph.m_chunkindex.end()) {
             // Destroy any potential ChunkData prior to modifying the Cluster (as that could
             // invalidate its ordering).
+            Assume(graph.m_chunkindex_observers == 0);
             graph.m_chunkindex.erase(entry.m_chunkindex_iterator);
             entry.m_chunkindex_iterator = graph.m_chunkindex.end();
         }
@@ -857,6 +862,7 @@ void Cluster::Merge(TxGraphImpl& graph, Cluster& other) noexcept
         if (m_level == 0 && entry.m_chunkindex_iterator != graph.m_chunkindex.end()) {
             // Destroy any potential ChunkData prior to modifying the Cluster (as that could
             // invalidate its ordering).
+            Assume(graph.m_chunkindex_observers == 0);
             graph.m_chunkindex.erase(entry.m_chunkindex_iterator);
             entry.m_chunkindex_iterator = graph.m_chunkindex.end();
         }
@@ -1485,6 +1491,7 @@ Cluster::Cluster(TxGraphImpl& graph, const FeePerWeight& feerate, GraphIndex gra
 
 TxGraph::Ref TxGraphImpl::AddTransaction(const FeePerWeight& feerate) noexcept
 {
+    Assume(m_chunkindex_observers == 0 || GetTopLevel() != 0);
     // Construct a new Ref.
     Ref ret;
     // Construct a new Entry, and link it with the Ref.
@@ -1513,6 +1520,7 @@ void TxGraphImpl::RemoveTransaction(const Ref& arg) noexcept
     // having been removed).
     if (GetRefGraph(arg) == nullptr) return;
     Assume(GetRefGraph(arg) == this);
+    Assume(m_chunkindex_observers == 0 || GetTopLevel() != 0);
     // Find the Cluster the transaction is in, and stop if it isn't in any.
     int level = GetTopLevel();
     auto cluster = FindCluster(GetRefIndex(arg), level);
@@ -1531,6 +1539,7 @@ void TxGraphImpl::AddDependency(const Ref& parent, const Ref& child) noexcept
     // removed).
     if (GetRefGraph(parent) == nullptr || GetRefGraph(child) == nullptr) return;
     Assume(GetRefGraph(parent) == this && GetRefGraph(child) == this);
+    Assume(m_chunkindex_observers == 0 || GetTopLevel() != 0);
     // Don't do anything if this is a dependency on self.
     if (GetRefIndex(parent) == GetRefIndex(child)) return;
     // Find the Cluster the parent and child transaction are in, and stop if either appears to be
@@ -1867,6 +1876,7 @@ void TxGraphImpl::CommitStaging() noexcept
 {
     // Staging must exist.
     Assume(m_staging_clusterset.has_value());
+    Assume(m_chunkindex_observers == 0);
     // Delete all conflicting Clusters in main, to make place for moving the staging ones
     // there. All of these have been copied to staging in PullIn().
     auto conflicts = GetConflicts();
@@ -1919,6 +1929,7 @@ void TxGraphImpl::SetTransactionFee(const Ref& ref, int64_t fee) noexcept
     // Don't do anything if the passed Ref is empty.
     if (GetRefGraph(ref) == nullptr) return;
     Assume(GetRefGraph(ref) == this);
+    Assume(m_chunkindex_observers == 0);
     // Find the entry, its locator, and inform its Cluster about the new feerate, if any.
     auto& entry = m_entries[GetRefIndex(ref)];
     for (int level = 0; level < MAX_LEVELS; ++level) {
@@ -2215,7 +2226,9 @@ void TxGraphImpl::SanityCheck() const
 void TxGraphImpl::DoWork() noexcept
 {
     for (int level = 0; level <= GetTopLevel(); ++level) {
-        MakeAllAcceptable(level);
+        if (level > 0 || m_chunkindex_observers == 0) {
+            MakeAllAcceptable(level);
+        }
     }
 }
 

@@ -8,6 +8,8 @@
 #include <util/bitset.h>
 #include <util/feefrac.h>
 
+#include <queue>
+
 #include <boost/test/unit_test.hpp>
 
 BOOST_FIXTURE_TEST_SUITE(siblingeviction_tests, TestingSetup)
@@ -120,30 +122,112 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/false), 5);
     BOOST_CHECK(graph->IsOversized(/*main_only=*/false));
 
+    // FIXME
+    // What about scenario where RBF is happening as well
+    // and package still busts limits? Need to make sure
+    // we don't think we can sibling evict a regular conflict
+    // TODO rebase once vsize limits are also enforced
+
     // Oversized, time to figure out what we can do to propose an RBF
 
     // Can we do this with staging going the entire time?
 
+    std::vector<TxGraph::Ref> parents;
+
     // Gather all in-main parents of package (parent ref already held)
-    auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
-    std::set<TxGraph::Ref*> all_ancestors(ancestors.begin(), ancestors.end());
+    // Only one parent for now
+    parents.push_back(std::move(parent));
+    std::set<TxGraph::Ref*> all_ancestors;
+
+    // One tx could be joining MAX_CLUSTER_COUNT_LIMIT - 1 clusters
+    // each with MAX_CLUSTER_COUNT_LIMIT txns themselves
+    // where removing MAX_CLUSTER_COUNT_LIMIT - 1 transactions,
+    // one from each cluster, would result in properly sized
+    // clusters. Roughly MAX_CLUSTER_COUNT_LIMIT^2 may get
+    // removed if greedily removing 
+    // That's 4032 possible removals vs 100*64 total RBFs.
+    // Needs to be computed in same bucket of conflicts before
+    // asking for diagrams.
+    // TODO add explicit conflict
+
+    // GetCluster will return think in CFR order, so we can
+    // walk each vector backwards, deleting transactions
+    // via a minheap until no oversized. We should stop
+    // after MAX_CLUSTER_COUNT_LIMIT removals; 
+    std::vector<std::vector<TxGraph::Ref*>> affected_clusters;
+
+    using RefCmp = std::pair<TxGraph::Ref*, uint32_t>;
+    auto ref_cmp = [&graph](RefCmp lhs, RefCmp rhs) {
+        const auto lhs_prio = graph->GetMainChunkFeerate(*lhs.first);
+        const auto rhs_prio = graph->GetMainChunkFeerate(*rhs.first);
+        return lhs_prio > rhs_prio || (lhs_prio == rhs_prio && lhs.second > rhs.second); // Min-heap: smallest priority first
+    };
+
+/*
+    using MinHeap = std::priority_queue<
+        TxGraph::Ref*,
+        std::vector<TxGraph::Ref*>,
+        decltype(cmp)
+    >;
+*/
+//    MinHeap chunk_min_heap(cmp);
+
+    // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
+    std::set<TxGraph::Ref*> affected_clusters_prefix;
+
+    // We're building a topo-valid heap, could also just
+    // build a heap that keeps track of tail of clusters
+    std::vector<RefCmp> heap_refs;
+
+    for (const auto& parent : parents) {
+        // Gather all ancestors (they can not be evicted)
+        auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
+        all_ancestors.insert(ancestors.begin(), ancestors.end());
+
+        const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
+        // If new cluster, append to cluster list
+        if (!cluster.empty() && affected_clusters_prefix.insert(cluster[0]).second) {
+            affected_clusters.push_back(cluster);
+            for (const auto& ref : cluster) {
+                // Add size to give topo-valid tie-breaker in heap
+                heap_refs.emplace_back(ref, heap_refs.size());
+            }
+            //heap_refs.insert(heap_refs.back(), cluster.begin(), cluster.end());
+        }
+    }
+
     BOOST_CHECK_EQUAL(all_ancestors.size(), 1);
 
-    // Loop over all in-main parents of package, gather Clusters (only one parent here)
-    std::vector<TxGraph::Ref*> affected_cluster{graph->GetCluster(parent, /*main_only=*/true)};
+    // Make heap FIXME not STABLE, won't result in topo-valid
+    // order unless secondary key is added.
+    std::make_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
+
+/*
+    // Warm up the minheap with tail of affected clusters
+    for (const auto& affected_cluster : affected_clusters) {
+        chunk_min_heap.push(affected_cluster.back());
+    }
+*/
+
+    BOOST_CHECK(graph->HaveStaging());
+
+    // Nothing possible so exit with "failure"
+    if (heap_refs.empty()) return;
 
     // STRATEGY 1: Evict any non-ancestors from effected clusters
     FeeFrac last_feerate;
     do {
-        const auto ref = affected_cluster.back();
-        affected_cluster.pop_back();
+        std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
+        TxGraph::Ref* ref = heap_refs.back().first;
+        heap_refs.pop_back();
+
+        // TODO could filter affected_cluster to require an ancestor to be in all_ancestors
 
         // We can't evict our package ancestors
-        if (all_ancestors.contains(ref)) continue;
+        if (all_ancestors.count(ref) > 0) continue;
 
         graph->RemoveTransaction(*ref);
 
-        // If I remove the child does it immediately cause recomputing of the chunk?
         auto cfr{graph->GetMainChunkFeerate(*ref)};
         if (last_feerate.IsEmpty()) {
             last_feerate = cfr;
@@ -151,7 +235,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
             BOOST_CHECK(last_feerate <= cfr);
             last_feerate = cfr;
         }
-    } while (!affected_cluster.empty() && graph->IsOversized(/*main_only=*/false));
+    } while (!heap_refs.empty() && graph->IsOversized(/*main_only=*/false));
 
     // We're good to go
     BOOST_CHECK(!graph->IsOversized(/*main_only=*/false));

@@ -262,6 +262,8 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         // TODO need to also count how many newly-affected clusters
         // are occuring to reduce computational churn, <= 100 total
 
+        // Resubmission strategies? Unclear.
+
         auto cfr{graph->GetMainChunkFeerate(*ref)};
         if (last_feerate.IsEmpty()) {
             last_feerate = cfr;

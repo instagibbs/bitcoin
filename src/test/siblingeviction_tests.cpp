@@ -19,7 +19,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     /** Variable used whenever an empty TxGraph::Ref is needed. */
     TxGraph::Ref empty_ref;
 
-    const int32_t max_count = 3;
+    const int32_t max_count = 6;
 
     auto graph = MakeTxGraph(max_count);
 
@@ -85,58 +85,78 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     std::vector<TxGraph::Ref*> removed = graph->Cleanup();
     BOOST_CHECK_EQUAL(removed.size(), 2);
 
-    // Parent with two children, one a cpfp, one dead weight
     BOOST_CHECK(!graph->HaveStaging());
-    TxGraph::Ref parent = graph->AddTransaction(feerate1);
+
+    // Parent with two children, one a cpfp, one dead weight
+    TxGraph::Ref parent_1 = graph->AddTransaction(feerate1);
     TxGraph::Ref child_cpfp = graph->AddTransaction(feerate2);
     TxGraph::Ref child_moocher = graph->AddTransaction(feerate3);
 
-    graph->AddDependency(parent, child_cpfp);
+    graph->AddDependency(parent_1, child_cpfp);
     graph->AddDependency(child_cpfp, child_moocher);
-    graph->AddDependency(parent, child_moocher);
+    graph->AddDependency(parent_1, child_moocher);
+
+    // Second parent to cpfp and child_low_fee
+    TxGraph::Ref parent_2 = graph->AddTransaction(feerate1);
+    TxGraph::Ref child_low_fee = graph->AddTransaction(feerate3);
+
+    graph->AddDependency(parent_2, child_cpfp);
+    graph->AddDependency(parent_2, child_low_fee);
+
+    // Third parent to its own cluster which will be joined
+    // via new package
+    TxGraph::Ref parent_3 = graph->AddTransaction(feerate1);
 
     // Just at size.
     BOOST_CHECK(!graph->IsOversized(/*main_only=*/true));
 
-    // New package of 2 comes in
     const FeeFrac feerate_high{20, 1};
-    auto pkg_graph = MakeTxGraph(max_count);
+    // New package of 2 comes in, we make a graph for just itself
+    {
+        auto pkg_graph = MakeTxGraph(max_count);
 
-    TxGraph::Ref child_low_fee = pkg_graph->AddTransaction(feerate3);
-    TxGraph::Ref grandchild_cpfp = pkg_graph->AddTransaction(feerate_high);
-    pkg_graph->AddDependency(child_low_fee, grandchild_cpfp);
-    BOOST_CHECK(!pkg_graph->IsOversized(/*main_only=*/true));
+        // Conflicts with child_moocher under the hood
+        TxGraph::Ref new_child_low_fee = pkg_graph->AddTransaction(feerate3);
+        TxGraph::Ref grandchild_cpfp = pkg_graph->AddTransaction(feerate_high);
+        pkg_graph->AddDependency(new_child_low_fee, grandchild_cpfp);
+        BOOST_CHECK(!pkg_graph->IsOversized(/*main_only=*/true));
 
-    // Per-chunk processing ???
-    // No great way to introspect which chunks are made
-    // We "just know" this package is good, so let's
-    // try and add to main graph
+        // TODO Per-chunk processing: Could use mining interface here
+        // on fresh and tiny graph. Each package just thrown in here
+        // then run acceptance sub-routine for each chunk or ditch
+        // on failure.
+    }
 
     // We will attempt to add to staging
     graph->StartStaging();
 
-    TxGraph::Ref child_low_fee_2 = graph->AddTransaction(feerate3);
+    // RBFs: We remove from staging area
+    // Things we need to RemoveTransaction for due to direct conflicts
+    // and all the conflicted descendants
+    // Only one RBF, simulated for now. Moocher out.
+    graph->RemoveTransaction(child_moocher);
+
+    // New child has two parents and one grandchild
+    TxGraph::Ref new_child_low_fee_2 = graph->AddTransaction(feerate3);
     TxGraph::Ref grandchild_cpfp_2 = graph->AddTransaction(feerate_high);
-    graph->AddDependency(parent, child_low_fee_2);
-    graph->AddDependency(child_low_fee_2, grandchild_cpfp_2);
-    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/false), 5);
+    graph->AddDependency(parent_1, new_child_low_fee_2);
+    graph->AddDependency(parent_3, new_child_low_fee_2);
+    graph->AddDependency(new_child_low_fee_2, grandchild_cpfp_2);
+
+    // Staged area is now oversized, time to inspect main graph
+    // to decide what to remove before attempting RBF since it has
+    // access to chunk feerates
+    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/false), 7);
     BOOST_CHECK(graph->IsOversized(/*main_only=*/false));
-
-    // FIXME
-    // What about scenario where RBF is happening as well
-    // and package still busts limits? Need to make sure
-    // we don't think we can sibling evict a regular conflict
-    // TODO rebase once vsize limits are also enforced
-
-    // Oversized, time to figure out what we can do to propose an RBF
-
-    // Can we do this with staging going the entire time?
+    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 6);
 
     std::vector<TxGraph::Ref> parents;
 
     // Gather all in-main parents of package (parent ref already held)
     // Only one parent for now
-    parents.push_back(std::move(parent));
+    parents.push_back(std::move(parent_1));
+    parents.push_back(std::move(parent_3));
+
     std::set<TxGraph::Ref*> all_ancestors;
 
     // One tx could be joining MAX_CLUSTER_COUNT_LIMIT - 1 clusters
@@ -148,7 +168,6 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     // That's 4032 possible removals vs 100*64 total RBFs.
     // Needs to be computed in same bucket of conflicts before
     // asking for diagrams.
-    // TODO add explicit conflict
 
     // GetCluster will return think in CFR order, so we can
     // walk each vector backwards, deleting transactions
@@ -162,15 +181,6 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         const auto rhs_prio = graph->GetMainChunkFeerate(*rhs.first);
         return lhs_prio > rhs_prio || (lhs_prio == rhs_prio && lhs.second > rhs.second); // Min-heap: smallest priority first
     };
-
-/*
-    using MinHeap = std::priority_queue<
-        TxGraph::Ref*,
-        std::vector<TxGraph::Ref*>,
-        decltype(cmp)
-    >;
-*/
-//    MinHeap chunk_min_heap(cmp);
 
     // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
     std::set<TxGraph::Ref*> affected_clusters_prefix;
@@ -192,22 +202,13 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
                 // Add size to give topo-valid tie-breaker in heap
                 heap_refs.emplace_back(ref, heap_refs.size());
             }
-            //heap_refs.insert(heap_refs.back(), cluster.begin(), cluster.end());
         }
     }
 
-    BOOST_CHECK_EQUAL(all_ancestors.size(), 1);
+    // 2 parents with just themselves
+    BOOST_CHECK_EQUAL(all_ancestors.size(), 2);
 
-    // Make heap FIXME not STABLE, won't result in topo-valid
-    // order unless secondary key is added.
     std::make_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
-
-/*
-    // Warm up the minheap with tail of affected clusters
-    for (const auto& affected_cluster : affected_clusters) {
-        chunk_min_heap.push(affected_cluster.back());
-    }
-*/
 
     BOOST_CHECK(graph->HaveStaging());
 
@@ -221,11 +222,12 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         TxGraph::Ref* ref = heap_refs.back().first;
         heap_refs.pop_back();
 
-        // TODO could filter affected_cluster to require an ancestor to be in all_ancestors
+        // TODO Could check if ref is a descendant of any all_ancestors, and continue if not
 
         // We can't evict our package ancestors
         if (all_ancestors.count(ref) > 0) continue;
 
+        // The tx might already be removed in staging from direct conflict, no-op in that case
         graph->RemoveTransaction(*ref);
 
         auto cfr{graph->GetMainChunkFeerate(*ref)};
@@ -239,10 +241,15 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
     // We're good to go
     BOOST_CHECK(!graph->IsOversized(/*main_only=*/false));
+
+    // Do we want it regardless?
+    const auto diagrams = graph->GetMainStagingDiagrams();
+
     graph->CommitStaging();
 
-    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 3);
-
+    // One cluster remaining since package joined everything
+    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 6);
+    BOOST_CHECK_EQUAL(graph->GetCluster(parents[0]).size(), 6);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

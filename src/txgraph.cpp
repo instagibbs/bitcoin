@@ -208,7 +208,9 @@ private:
         /** How many transactions the chunk contains (-1 = singleton tail of cluster). */
         LinearizationIndex m_chunk_count;
 
-        ChunkData(GraphIndex graph_index, LinearizationIndex chunk_count) noexcept :
+    // TODO what's this used for
+     std::vector<std::unique_ptr<Cluster>> m_clusters[int(QualityLevel::NONE)];
+   ChunkData(GraphIndex graph_index, LinearizationIndex chunk_count) noexcept :
             m_graph_index{graph_index}, m_chunk_count{chunk_count} {}
     };
 
@@ -279,7 +281,7 @@ private:
         /** Iterator to the corresponding ChunkData, if any. */
         ChunkIndex::iterator m_chunkindex_iterator;
         /** Which Cluster and position therein this Entry appears in. ([0] = main, [1] = staged). */
-        Locator m_locator[MAX_LEVELS];
+        Locator m_locator[MAX_LEVELS]; // TODO this vs lin_index below? I assume this is some topo-valid order only?
         /** The chunk feerate of this transaction in main (if present in m_locator[0]) */
         FeeFrac m_main_chunk_feerate;
         /** The position this transaction in the main linearization (if present). /*/
@@ -298,7 +300,7 @@ private:
     /** The set of all transactions (in any level). */
     std::vector<Entry> m_entries;
 
-    /** Set of Entries that have no IsPresent locators left, and need to be cleaned up. */
+    /** Set of Entries that have no IsPresent locators left, and needs to be Clean() up. */
     std::vector<GraphIndex> m_wiped;
 
 public:
@@ -481,9 +483,9 @@ void TxGraphImpl::ClearChunkData(Entry& entry) noexcept
 void TxGraphImpl::CreateChunkData(GraphIndex idx, LinearizationIndex chunk_count) noexcept
 {
     auto& entry = m_entries[idx];
-    if (!m_chunkindex_discarded.empty()) {
+    if (!m_chunkindex_discarded.empty()) { // TODO test what kind of performance boost this gives
         // Reuse an discarded node handle.
-        auto& node = m_chunkindex_discarded.back().value();
+        ChunkData& node = m_chunkindex_discarded.back().value();
         node.m_graph_index = idx;
         node.m_chunk_count = chunk_count;
         auto insert_result = m_chunkindex.insert(std::move(m_chunkindex_discarded.back()));

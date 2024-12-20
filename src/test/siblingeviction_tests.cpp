@@ -125,6 +125,12 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         // on fresh and tiny graph. Each package just thrown in here
         // then run acceptance sub-routine for each chunk or ditch
         // on failure.
+        auto builder = pkg_graph->GetBlockBuilder();
+        //BOOST_CHECK(builder);
+        auto cfr = builder->GetCurrentChunkFeerate();
+        auto chunk = builder->GetCurrentChunk();
+        BOOST_CHECK_EQUAL(chunk.size(), 2);
+        BOOST_CHECK(feerate3 + feerate_high == cfr);
     }
 
     // We will attempt to add to staging

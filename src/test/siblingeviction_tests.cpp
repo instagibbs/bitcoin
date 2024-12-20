@@ -136,11 +136,14 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     // We will attempt to add to staging
     graph->StartStaging();
 
+    std::set<TxGraph::Ref*> all_conflicts;
+
     // RBFs: We remove from staging area
     // Things we need to RemoveTransaction for due to direct conflicts
     // and all the conflicted descendants
     // Only one RBF, simulated for now. Moocher out.
     graph->RemoveTransaction(child_moocher);
+    all_conflicts.insert(&child_moocher);
 
     // New child has two parents and one grandchild
     TxGraph::Ref new_child_low_fee_2 = graph->AddTransaction(feerate3);
@@ -214,12 +217,25 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     // 2 parents with just themselves
     BOOST_CHECK_EQUAL(all_ancestors.size(), 2);
 
+    std::set<TxGraph::Ref*> all_ancestors_descendants;
+    for (const auto ancestor : all_ancestors) {
+        const auto desc = graph->GetDescendants(*ancestor, /*main_only=*/true);
+        all_ancestors_descendants.insert(desc.begin(), desc.end());
+    }
+    // Two parents, two children
+    BOOST_CHECK_EQUAL(all_ancestors_descendants.size(), 4);
+
     std::make_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
 
     BOOST_CHECK(graph->HaveStaging());
 
     // Nothing possible so exit with "failure"
     if (heap_refs.empty()) return;
+
+    std::vector<TxGraph::Ref*> sibling_evicted;
+
+    // Switch this to change eviction strategy
+    bool filter_for_desc_of_anc = false;
 
     // STRATEGY 1: Evict any non-ancestors from effected clusters
     FeeFrac last_feerate;
@@ -228,13 +244,20 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         TxGraph::Ref* ref = heap_refs.back().first;
         heap_refs.pop_back();
 
-        // TODO Could check if ref is a descendant of any all_ancestors, and continue if not
+        // Only evict things that are descendants of ancestors of package
+        // This results in a slightly more "local" eviction, which may
+        // or may not be cheaper.
+        if (filter_for_desc_of_anc && !all_ancestors_descendants.contains(ref)) continue;
 
         // We can't evict our package ancestors
         if (all_ancestors.count(ref) > 0) continue;
 
         // The tx might already be removed in staging from direct conflict, no-op in that case
+        // For logging purposes we skip
+        if (all_conflicts.contains(ref)) continue;
+
         graph->RemoveTransaction(*ref);
+        sibling_evicted.push_back(std::move(ref));
 
         auto cfr{graph->GetMainChunkFeerate(*ref)};
         if (last_feerate.IsEmpty()) {
@@ -255,7 +278,10 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
     // One cluster remaining since package joined everything
     BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 6);
-    BOOST_CHECK_EQUAL(graph->GetCluster(parents[0]).size(), 6);
+    const auto parent_1_cluster = graph->GetCluster(parents[0]);
+    BOOST_CHECK_EQUAL(parent_1_cluster.size(), filter_for_desc_of_anc ? 4 : 6);
+    BOOST_CHECK_EQUAL(sibling_evicted.size(), 1);
+    BOOST_CHECK(filter_for_desc_of_anc ? sibling_evicted[0] == &child_cpfp : sibling_evicted[0] == &child_low_fee);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

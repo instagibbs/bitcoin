@@ -259,6 +259,9 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         graph->RemoveTransaction(*ref);
         sibling_evicted.push_back(std::move(ref));
 
+        // TODO need to also count how many newly-affected clusters
+        // are occuring to reduce computational churn, <= 100 total
+
         auto cfr{graph->GetMainChunkFeerate(*ref)};
         if (last_feerate.IsEmpty()) {
             last_feerate = cfr;

@@ -670,6 +670,47 @@ class OrphanHandlingTest(BitcoinTestFramework):
         peer_inbound.wait_for_parent_requests([int(parent_tx.rehash(), 16)])
 
     @cleanup
+    def test_outbound_protected(self):
+        self.log.info("Test that the node protects orphans from outbound peers")
+        node = self.nodes[0]
+
+        peer_inbound = node.add_p2p_connection(PeerTxRelayer())
+        peer_outbound = node.add_outbound_p2p_connection(PeerTxRelayer(), p2p_idx=1)
+
+        orphan_wtxids = []
+        orphan_txs = []
+        orphan_invs = []
+        # Fill up orphanage to almost full by outbound
+        for _ in range(DEFAULT_MAX_ORPHAN_TRANSACTIONS - 1):
+            orphan_wtxid, orphan_tx, parent_tx = self.create_parent_and_child()
+            orphan_inv = CInv(t=MSG_WTX, h=int(orphan_wtxid, 16))
+            orphan_wtxids.append(orphan_wtxid)
+            orphan_txs.append(orphan_tx)
+            orphan_invs.append(orphan_inv)
+
+            # Outbound peer relays the transactions.
+            peer_outbound.send_and_ping(msg_tx(orphan_tx))
+
+
+        # Inbound tries to churn orphanage, can't
+        for _ in range(DEFAULT_MAX_ORPHAN_TRANSACTIONS * 2):
+            orphan_wtxid, orphan_tx, parent_tx = self.create_parent_and_child()
+            orphan_inv = CInv(t=MSG_WTX, h=int(orphan_wtxid, 16))
+
+            # Inbound peer relays the transactions.
+            peer_inbound.send_and_ping(msg_tx(orphan_tx))
+
+        from pdb import set_trace
+        set_trace()
+
+        orphanage = node.getorphantxs()
+        for orphan in orphan_wtxids:
+            assert orphan in set(orphanage)
+        
+        from pdb import set_trace
+        set_trace()
+
+    @cleanup
     def test_announcers_before_and_after(self):
         self.log.info("Test that the node uses all peers who announced the tx prior to realizing it's an orphan")
         node = self.nodes[0]
@@ -803,8 +844,9 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.wallet_nonsegwit = MiniWallet(self.nodes[0], mode=MiniWalletMode.RAW_P2PK)
         self.generate(self.wallet_nonsegwit, 10)
         self.wallet = MiniWallet(self.nodes[0])
-        self.generate(self.wallet, 160)
+        self.generate(self.wallet, 500)
 
+        self.test_outbound_protected()
         self.test_arrival_timing_orphan()
         self.test_orphan_rejected_parents_exceptions()
         self.test_orphan_multiple_parents()

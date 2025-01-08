@@ -126,7 +126,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         tx.vout[0].nValue = i*CENT;
         tx.vout[0].scriptPubKey = GetScriptForDestination(PKHash(key.GetPubKey()));
 
-        orphanage.AddTx(MakeTransactionRef(tx), i);
+        orphanage.AddTx(MakeTransactionRef(tx), i, /*preferred_peer=*/false);
     }
 
     // ... and 50 that depend on other orphans:
@@ -144,7 +144,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         SignatureData empty;
         BOOST_CHECK(SignSignature(keystore, *txPrev, tx, 0, SIGHASH_ALL, empty));
 
-        orphanage.AddTx(MakeTransactionRef(tx), i);
+        orphanage.AddTx(MakeTransactionRef(tx), i, /*preferred_peer=*/false);
     }
 
     // This really-big orphan should be ignored:
@@ -169,7 +169,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         for (unsigned int j = 1; j < tx.vin.size(); j++)
             tx.vin[j].scriptSig = tx.vin[0].scriptSig;
 
-        BOOST_CHECK(!orphanage.AddTx(MakeTransactionRef(tx), i));
+        BOOST_CHECK(!orphanage.AddTx(MakeTransactionRef(tx), i, /*preferred_peer=*/false));
     }
 
     size_t expected_num_orphans = orphanage.CountOrphans();
@@ -204,7 +204,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
 
     // Add one more orphan, check timeout logic
     auto timeout_tx = MakeTransactionSpending(/*outpoints=*/{}, rng);
-    orphanage.AddTx(timeout_tx, 0);
+    orphanage.AddTx(timeout_tx, 0, /*preferred_peer=*/false);
     orphanage.LimitOrphans(1, rng);
     BOOST_CHECK_EQUAL(orphanage.CountOrphans(), 1);
 
@@ -237,7 +237,7 @@ BOOST_AUTO_TEST_CASE(same_txid_diff_witness)
     const auto& mutated_wtxid = child_mutated->GetWitnessHash();
     BOOST_CHECK(normal_wtxid != mutated_wtxid);
 
-    BOOST_CHECK(orphanage.AddTx(child_normal, peer));
+    BOOST_CHECK(orphanage.AddTx(child_normal, peer, /*preferred_peer=*/false));
     // EraseTx fails as transaction by this wtxid doesn't exist.
     BOOST_CHECK_EQUAL(orphanage.EraseTx(mutated_wtxid), 0);
     BOOST_CHECK(orphanage.HaveTx(normal_wtxid));
@@ -246,7 +246,7 @@ BOOST_AUTO_TEST_CASE(same_txid_diff_witness)
     BOOST_CHECK(orphanage.GetTx(mutated_wtxid) == nullptr);
 
     // Must succeed. Both transactions should be present in orphanage.
-    BOOST_CHECK(orphanage.AddTx(child_mutated, peer));
+    BOOST_CHECK(orphanage.AddTx(child_mutated, peer, /*preferred_peer=*/false));
     BOOST_CHECK(orphanage.HaveTx(normal_wtxid));
     BOOST_CHECK(orphanage.HaveTx(mutated_wtxid));
 
@@ -292,10 +292,10 @@ BOOST_AUTO_TEST_CASE(get_children)
     // All orphans provided by node1
     {
         TxOrphanage orphanage;
-        BOOST_CHECK(orphanage.AddTx(child_p1n0, node1));
-        BOOST_CHECK(orphanage.AddTx(child_p2n1, node1));
-        BOOST_CHECK(orphanage.AddTx(child_p1n0_p1n1, node1));
-        BOOST_CHECK(orphanage.AddTx(child_p1n0_p2n0, node1));
+        BOOST_CHECK(orphanage.AddTx(child_p1n0, node1, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddTx(child_p2n1, node1, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddTx(child_p1n0_p1n1, node1, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddTx(child_p1n0_p2n0, node1, /*preferred_peer=*/false));
 
         std::set<CTransactionRef> expected_parent1_children{child_p1n0, child_p1n0_p2n0, child_p1n0_p1n1};
         std::set<CTransactionRef> expected_parent2_children{child_p2n1, child_p1n0_p2n0};
@@ -315,10 +315,10 @@ BOOST_AUTO_TEST_CASE(get_children)
     // Orphans provided by node1 and node2
     {
         TxOrphanage orphanage;
-        BOOST_CHECK(orphanage.AddTx(child_p1n0, node1));
-        BOOST_CHECK(orphanage.AddTx(child_p2n1, node1));
-        BOOST_CHECK(orphanage.AddTx(child_p1n0_p1n1, node2));
-        BOOST_CHECK(orphanage.AddTx(child_p1n0_p2n0, node2));
+        BOOST_CHECK(orphanage.AddTx(child_p1n0, node1, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddTx(child_p2n1, node1, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddTx(child_p1n0_p1n1, node2, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddTx(child_p1n0_p2n0, node2, /*preferred_peer=*/false));
 
         // +----------------+---------------+----------------------------------+
         // |                | sender=node1  |           sender=node2           |
@@ -366,12 +366,12 @@ BOOST_AUTO_TEST_CASE(too_large_orphan_tx)
     // check that txs larger than MAX_STANDARD_TX_WEIGHT are not added to the orphanage
     BulkTransaction(tx, MAX_STANDARD_TX_WEIGHT + 4);
     BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(tx)), MAX_STANDARD_TX_WEIGHT + 4);
-    BOOST_CHECK(!orphanage.AddTx(MakeTransactionRef(tx), 0));
+    BOOST_CHECK(!orphanage.AddTx(MakeTransactionRef(tx), 0, /*preferred_peer=*/false));
 
     tx.vout.clear();
     BulkTransaction(tx, MAX_STANDARD_TX_WEIGHT);
     BOOST_CHECK_EQUAL(GetTransactionWeight(CTransaction(tx)), MAX_STANDARD_TX_WEIGHT);
-    BOOST_CHECK(orphanage.AddTx(MakeTransactionRef(tx), 0));
+    BOOST_CHECK(orphanage.AddTx(MakeTransactionRef(tx), 0, /*preferred_peer=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(process_block)
@@ -392,10 +392,10 @@ BOOST_AUTO_TEST_CASE(process_block)
     const NodeId node{0};
 
     auto control_tx = MakeTransactionSpending({}, det_rand);
-    BOOST_CHECK(orphanage.AddTx(control_tx, node));
+    BOOST_CHECK(orphanage.AddTx(control_tx, node, /*preferred_peer=*/false));
 
     auto bo_tx_same_txid = MakeTransactionSpending({outpoints.at(0)}, det_rand);
-    BOOST_CHECK(orphanage.AddTx(bo_tx_same_txid, node));
+    BOOST_CHECK(orphanage.AddTx(bo_tx_same_txid, node, /*preferred_peer=*/false));
     block.vtx.emplace_back(bo_tx_same_txid);
 
     // 2 transactions with the same txid but different witness
@@ -403,21 +403,21 @@ BOOST_AUTO_TEST_CASE(process_block)
     block.vtx.emplace_back(b_tx_same_txid_diff_witness);
 
     auto o_tx_same_txid_diff_witness = MakeMutation(b_tx_same_txid_diff_witness);
-    BOOST_CHECK(orphanage.AddTx(o_tx_same_txid_diff_witness, node));
+    BOOST_CHECK(orphanage.AddTx(o_tx_same_txid_diff_witness, node, /*preferred_peer=*/false));
 
     // 2 different transactions that spend the same input.
     auto b_tx_conflict = MakeTransactionSpending({outpoints.at(2)}, det_rand);
     block.vtx.emplace_back(b_tx_conflict);
 
     auto o_tx_conflict = MakeTransactionSpending({outpoints.at(2)}, det_rand);
-    BOOST_CHECK(orphanage.AddTx(o_tx_conflict, node));
+    BOOST_CHECK(orphanage.AddTx(o_tx_conflict, node, /*preferred_peer=*/false));
 
     // 2 different transactions that have 1 overlapping input.
     auto b_tx_conflict_partial = MakeTransactionSpending({outpoints.at(3), outpoints.at(4)}, det_rand);
     block.vtx.emplace_back(b_tx_conflict_partial);
 
     auto o_tx_conflict_partial_2 = MakeTransactionSpending({outpoints.at(4), outpoints.at(5)}, det_rand);
-    BOOST_CHECK(orphanage.AddTx(o_tx_conflict_partial_2, node));
+    BOOST_CHECK(orphanage.AddTx(o_tx_conflict_partial_2, node, /*preferred_peer=*/false));
 
     orphanage.EraseForBlock(block);
     for (const auto& expected_removed : {bo_tx_same_txid, o_tx_same_txid_diff_witness, o_tx_conflict, o_tx_conflict_partial_2}) {
@@ -443,33 +443,33 @@ BOOST_AUTO_TEST_CASE(multiple_announcers)
     {
         auto ptx = MakeTransactionSpending({}, det_rand);
         const auto& wtxid = ptx->GetWitnessHash();
-        BOOST_CHECK(orphanage.AddTx(ptx, node0));
+        BOOST_CHECK(orphanage.AddTx(ptx, node0, /*preferred_peer=*/false));
         BOOST_CHECK(orphanage.HaveTx(wtxid));
         expected_total_count += 1;
         BOOST_CHECK_EQUAL(orphanage.Size(), expected_total_count);
 
         // Adding again should do nothing.
-        BOOST_CHECK(!orphanage.AddTx(ptx, node0));
+        BOOST_CHECK(!orphanage.AddTx(ptx, node0, /*preferred_peer=*/false));
         BOOST_CHECK_EQUAL(orphanage.Size(), expected_total_count);
 
         // We can add another tx with the same txid but different witness.
         auto ptx_mutated{MakeMutation(ptx)};
-        BOOST_CHECK(orphanage.AddTx(ptx_mutated, node0));
+        BOOST_CHECK(orphanage.AddTx(ptx_mutated, node0, /*preferred_peer=*/false));
         BOOST_CHECK(orphanage.HaveTx(ptx_mutated->GetWitnessHash()));
         expected_total_count += 1;
 
-        BOOST_CHECK(!orphanage.AddTx(ptx, node0));
+        BOOST_CHECK(!orphanage.AddTx(ptx, node0, /*preferred_peer=*/false));
 
         // Adding a new announcer should not change overall accounting.
-        BOOST_CHECK(orphanage.AddAnnouncer(ptx->GetWitnessHash(), node2));
+        BOOST_CHECK(orphanage.AddAnnouncer(ptx->GetWitnessHash(), node2, /*preferred_peer*/false));
         BOOST_CHECK_EQUAL(orphanage.Size(), expected_total_count);
 
         // If we already have this announcer, AddAnnouncer returns false.
         BOOST_CHECK(orphanage.HaveTxFromPeer(ptx->GetWitnessHash(), node2));
-        BOOST_CHECK(!orphanage.AddAnnouncer(ptx->GetWitnessHash(), node2));
+        BOOST_CHECK(!orphanage.AddAnnouncer(ptx->GetWitnessHash(), node2, /*preferred_peer*/false));
 
         // Same with using AddTx for an existing tx, which is equivalent to using AddAnnouncer
-        BOOST_CHECK(!orphanage.AddTx(ptx, node1));
+        BOOST_CHECK(!orphanage.AddTx(ptx, node1, /*preferred_peer=*/false));
         BOOST_CHECK_EQUAL(orphanage.Size(), expected_total_count);
 
         // if EraseForPeer is called for an orphan with multiple announcers, the orphanage should only
@@ -497,8 +497,8 @@ BOOST_AUTO_TEST_CASE(multiple_announcers)
         CBlock block;
         auto tx_block = MakeTransactionSpending({}, det_rand);
         block.vtx.emplace_back(tx_block);
-        BOOST_CHECK(orphanage.AddTx(tx_block, node0));
-        BOOST_CHECK(!orphanage.AddTx(tx_block, node1));
+        BOOST_CHECK(orphanage.AddTx(tx_block, node0, /*preferred_peer=*/false));
+        BOOST_CHECK(!orphanage.AddTx(tx_block, node1, /*preferred_peer=*/false));
 
         expected_total_count += 1;
 
@@ -525,9 +525,9 @@ BOOST_AUTO_TEST_CASE(peer_worksets)
         const auto& orphan_wtxid = tx_orphan->GetWitnessHash();
 
         // All 3 peers are announcers.
-        BOOST_CHECK(orphanage.AddTx(tx_orphan, node0));
-        BOOST_CHECK(!orphanage.AddTx(tx_orphan, node1));
-        BOOST_CHECK(orphanage.AddAnnouncer(orphan_wtxid, node2));
+        BOOST_CHECK(orphanage.AddTx(tx_orphan, node0, /*preferred_peer=*/false));
+        BOOST_CHECK(!orphanage.AddTx(tx_orphan, node1, /*preferred_peer=*/false));
+        BOOST_CHECK(orphanage.AddAnnouncer(orphan_wtxid, node2, /*preferred_peer*/false));
         for (NodeId node = node0; node <= node2; ++node) {
             BOOST_CHECK(orphanage.HaveTxFromPeer(orphan_wtxid, node));
         }

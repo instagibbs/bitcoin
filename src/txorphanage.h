@@ -28,10 +28,10 @@ static constexpr auto ORPHAN_TX_EXPIRE_INTERVAL{5min};
 class TxOrphanage {
 public:
     /** Add a new orphan transaction */
-    bool AddTx(const CTransactionRef& tx, NodeId peer);
+    bool AddTx(const CTransactionRef& tx, NodeId peer, bool preferred_peer);
 
     /** Add an additional announcer to an orphan if it exists. Otherwise, do nothing. */
-    bool AddAnnouncer(const Wtxid& wtxid, NodeId peer);
+    bool AddAnnouncer(const Wtxid& wtxid, NodeId peer, bool preferred_peer);
 
     CTransactionRef GetTx(const Wtxid& wtxid) const;
 
@@ -87,6 +87,12 @@ public:
 
     std::vector<OrphanTxBase> GetOrphanTransactions() const;
 
+    /** Return wtxids of orphans that cannot be evicted randomly */
+    std::set<Wtxid> GetProtectedOrphans();
+
+    /** Add wtxid to protected m_preferred_peer_to_wtxid map. FIXME Prunes if overly large. */
+    void ProtectOrphanFromRandomEviction(NodeId peer, const Wtxid& wtxid);
+
 protected:
     struct OrphanTx : public OrphanTxBase {
         size_t list_pos;
@@ -98,6 +104,9 @@ protected:
 
     /** Which peer provided the orphans that need to be reconsidered */
     std::map<NodeId, std::set<Wtxid>> m_peer_work_set;
+
+    /* Which preferred peers protect which transactions. FIXME Vector must be size-limited. */
+    std::map<NodeId, std::vector<Wtxid>> m_preferred_peer_to_wtxid;
 
     using OrphanMap = decltype(m_orphans);
 

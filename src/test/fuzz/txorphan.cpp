@@ -110,13 +110,13 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     // AddTx should return false if tx is too big or already have it
                     // tx weight is unknown, we only check when tx is already in orphanage
                     {
-                        bool add_tx = orphanage.AddTx(tx, peer_id);
+                        bool add_tx = orphanage.AddTx(tx, peer_id, /*preferred_peer=*/false);
                         // have_tx == true -> add_tx == false
                         Assert(!have_tx || !add_tx);
                     }
                     have_tx = orphanage.HaveTx(tx->GetWitnessHash());
                     {
-                        bool add_tx = orphanage.AddTx(tx, peer_id);
+                        bool add_tx = orphanage.AddTx(tx, peer_id, /*preferred_peer=*/false));
                         // if have_tx is still false, it must be too big
                         Assert(!have_tx == (GetTransactionWeight(*tx) > MAX_STANDARD_TX_WEIGHT));
                         Assert(!have_tx || !add_tx);
@@ -127,7 +127,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     bool have_tx_and_peer = orphanage.HaveTxFromPeer(tx->GetWitnessHash(), peer_id);
                     // AddAnnouncer should return false if tx doesn't exist or we already HaveTxFromPeer.
                     {
-                        bool added_announcer = orphanage.AddAnnouncer(tx->GetWitnessHash(), peer_id);
+                        bool added_announcer = orphanage.AddAnnouncer(tx->GetWitnessHash(), peer_id, /*preferred_peer*/false);
                         // have_tx == false -> added_announcer == false
                         Assert(have_tx || !added_announcer);
                         // have_tx_and_peer == true -> added_announcer == false

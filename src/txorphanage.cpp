@@ -12,12 +12,12 @@
 
 #include <cassert>
 
-bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer)
+bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer, bool preferred_peer)
 {
     const Txid& hash = tx->GetHash();
     const Wtxid& wtxid = tx->GetWitnessHash();
     if (auto it{m_orphans.find(wtxid)}; it != m_orphans.end()) {
-        AddAnnouncer(wtxid, peer);
+        AddAnnouncer(wtxid, peer, preferred_peer);
         // No new orphan entry was created. An announcer may have been added.
         return false;
     }
@@ -43,19 +43,30 @@ bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer)
         m_outpoint_to_orphan_it[txin.prevout].insert(ret.first);
     }
 
+    // Cache preferred-ness of peer for additional protections of orphan
+    if (preferred_peer) {
+        ProtectOrphanFromRandomEviction(peer, wtxid);
+    }
+
     LogDebug(BCLog::TXPACKAGES, "stored orphan tx %s (wtxid=%s), weight: %u (mapsz %u outsz %u)\n", hash.ToString(), wtxid.ToString(), sz,
              m_orphans.size(), m_outpoint_to_orphan_it.size());
     return true;
 }
 
-bool TxOrphanage::AddAnnouncer(const Wtxid& wtxid, NodeId peer)
+bool TxOrphanage::AddAnnouncer(const Wtxid& wtxid, NodeId peer, bool preferred_peer)
 {
     const auto it = m_orphans.find(wtxid);
     if (it != m_orphans.end()) {
         Assume(!it->second.announcers.empty());
         const auto ret = it->second.announcers.insert(peer);
         if (ret.second) {
-            LogDebug(BCLog::TXPACKAGES, "added peer=%d as announcer of orphan tx %s\n", peer, wtxid.ToString());
+            // Cache preferred-ness of peer
+            if (preferred_peer) {
+                ProtectOrphanFromRandomEviction(peer, wtxid);
+                LogDebug(BCLog::TXPACKAGES, "added peer=%d as preferred announcer of orphan tx %s\n", peer, wtxid.ToString());
+            } else {
+                LogDebug(BCLog::TXPACKAGES, "added peer=%d as announcer of orphan tx %s\n", peer, wtxid.ToString());
+            }
             return true;
         }
     }
@@ -101,6 +112,8 @@ void TxOrphanage::EraseForPeer(NodeId peer)
 {
     m_peer_work_set.erase(peer);
 
+    m_preferred_peer_to_wtxid.erase(peer);
+
     int nErased = 0;
     std::map<Wtxid, OrphanTx>::iterator iter = m_orphans.begin();
     while (iter != m_orphans.end())
@@ -118,6 +131,26 @@ void TxOrphanage::EraseForPeer(NodeId peer)
         }
     }
     if (nErased > 0) LogDebug(BCLog::TXPACKAGES, "Erased %d orphan transaction(s) from peer=%d\n", nErased, peer);
+}
+
+std::set<Wtxid> TxOrphanage::GetProtectedOrphans()
+{
+    std::set<Wtxid> protected_wtxids;
+    for (const auto& pair : m_preferred_peer_to_wtxid) {
+        const std::vector<Wtxid>& wtxid_set = pair.second;
+        for (const Wtxid& wtxid : wtxid_set) {
+            protected_wtxids.insert(wtxid);
+        }
+    }
+    return protected_wtxids;
+}
+
+void TxOrphanage::ProtectOrphanFromRandomEviction(NodeId peer, const Wtxid& wtxid)
+{
+    m_preferred_peer_to_wtxid.try_emplace(peer);
+
+    auto it_prefer = m_preferred_peer_to_wtxid.find(peer);
+    it_prefer->second.push_back(wtxid);
 }
 
 void TxOrphanage::LimitOrphans(unsigned int max_orphans, FastRandomContext& rng)
@@ -142,10 +175,27 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphans, FastRandomContext& rng)
         m_next_sweep = nMinExpTime + ORPHAN_TX_EXPIRE_INTERVAL;
         if (nErased > 0) LogDebug(BCLog::TXPACKAGES, "Erased %d orphan tx due to expiration\n", nErased);
     }
+    
+    std::set<Wtxid> protected_orphans;
+    if (m_orphans.size() > max_orphans) protected_orphans = GetProtectedOrphans();
+
     while (m_orphans.size() > max_orphans)
     {
         // Evict a random orphan:
         size_t randompos = rng.randrange(m_orphan_list.size());
+        size_t randompos_step = randompos;
+        // Iterate further down the list if we collided with something that can't be evicted
+        while (protected_orphans.contains(m_orphan_list[randompos_step]->first)) {
+            ++randompos_step;
+            if (randompos_step >= m_orphan_list.size()) {
+                randompos_step = 0;
+            }
+            if (randompos_step == randompos) {
+                // Everything is protected? Just return original index to deletion
+                Assume(false);
+                break;
+            }
+        }
         EraseTx(m_orphan_list[randompos]->first);
         ++nEvicted;
     }

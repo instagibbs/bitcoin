@@ -188,9 +188,9 @@ bool TxDownloadManagerImpl::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid,
             if (unique_parents.empty()) return true;
 
             if (auto delay{OrphanResolutionCandidate(peer, Wtxid::FromUint256(gtxid.GetHash()), unique_parents.size())}) {
-                m_orphanage.AddAnnouncer(Wtxid::FromUint256(gtxid.GetHash()), peer);
-
                 const auto& info = m_peer_info.at(peer).m_connection_info;
+
+                m_orphanage.AddAnnouncer(Wtxid::FromUint256(gtxid.GetHash()), peer, info.m_preferred);
                 for (const auto& parent_txid : unique_parents) {
                     m_txrequest.ReceivedInv(peer, GenTxid::Txid(parent_txid), info.m_preferred, now + *delay);
                 }
@@ -404,7 +404,7 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
                     const auto& wtxid = orphan_tx->GetWitnessHash();
                     if (auto delay{OrphanResolutionCandidate(nodeid, wtxid, unique_parents.size())}) {
                         const auto& info = m_peer_info.at(nodeid).m_connection_info;
-                        m_orphanage.AddTx(orphan_tx, nodeid);
+                        m_orphanage.AddTx(orphan_tx, nodeid, /*preferred_peer*/info.m_preferred);
 
                         // Treat finding orphan resolution candidate as equivalent to the peer announcing all missing parents
                         // In the future, orphan resolution may include more explicit steps
@@ -431,6 +431,7 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
                 // Note that, if the orphanage reaches capacity, it's possible that we immediately evict
                 // the transaction we just added.
                 m_orphanage.LimitOrphans(m_opts.m_max_orphan_txs, m_opts.m_rng);
+                // ^^^ If we don't actually add to orphanage, we shouldn't try requesting?
             } else {
                 unique_parents.clear();
                 LogDebug(BCLog::MEMPOOL, "not keeping orphan with rejected parents %s (wtxid=%s)\n",

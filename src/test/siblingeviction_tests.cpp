@@ -261,6 +261,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
         // TODO need to also count how many newly-affected clusters
         // are occuring to reduce computational churn, <= 100 total
+        // aka CountDistinctClusters with all refs passed in
 
         // Resubmission strategies? Unclear.
 

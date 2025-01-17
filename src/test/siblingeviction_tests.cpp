@@ -16,108 +16,50 @@ BOOST_FIXTURE_TEST_SUITE(siblingeviction_tests, TestingSetup)
 
 BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 {
-    /** Variable used whenever an empty TxGraph::Ref is needed. */
-    TxGraph::Ref empty_ref;
-
     const int32_t max_count = 6;
 
     auto graph = MakeTxGraph(max_count);
 
     graph->StartStaging();
 
-    const FeeFrac feerate1{1, 2};
-    const FeeFrac feerate2{4, 2};
-    const FeeFrac feerate3{1, 20};
 
-    TxGraph::Ref ref1 = graph->AddTransaction(feerate1);
-    TxGraph::Ref ref2 = graph->AddTransaction(feerate2);
-
-    graph->AddDependency(ref1, ref2);
-
-    graph->SetTransactionFeerate(ref1, feerate3);
-
-    BOOST_CHECK(!graph->IsOversized(true));
-
-    bool exists = graph->Exists(ref1, /*main_only=*/false);
-    BOOST_CHECK(exists);
-
-    auto indfeerate = graph->GetIndividualFeerate(ref1);
-    BOOST_CHECK(indfeerate != FeeFrac{});
-
-    auto chunkfeerate = graph->GetMainChunkFeerate(ref1);
-    // Not in main, returns 0
-    BOOST_CHECK(chunkfeerate == FeeFrac{});
-
-    auto desc1 = graph->GetDescendants(ref1, false);
-    auto desc2 = graph->GetDescendants(ref2, false);
-
-    auto anc1 = graph->GetAncestors(ref1, false);
-    auto anc2 = graph->GetAncestors(ref2, false);
-
-    auto cluster1 = graph->GetCluster(ref1, false);
-    auto cluster2 = graph->GetCluster(ref2, false);
-
-    BOOST_CHECK(graph->HaveStaging());
-
-    graph->CommitStaging();
-    BOOST_CHECK(!graph->HaveStaging());
-
-    auto cmp = graph->CompareMainOrder(ref1, ref2);
-    BOOST_CHECK(cmp != 0);
-
-    graph->StartStaging();
-    graph->AbortStaging();
-
-    graph->SanityCheck();
-
-    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 2);
-
-    chunkfeerate = graph->GetMainChunkFeerate(ref1);
-    // Now in main
-    BOOST_CHECK(chunkfeerate == feerate3 + feerate2);
-
-    // Removes directly from main
-    graph->RemoveTransaction(ref1);
-    graph->RemoveTransaction(ref2);
-
-    BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 0);
-
-    std::vector<TxGraph::Ref*> removed = graph->Cleanup();
-    BOOST_CHECK_EQUAL(removed.size(), 2);
-
-    BOOST_CHECK(!graph->HaveStaging());
+    const FeeFrac low_feerate{1, 20};
+    const FeeFrac med_feerate{1, 2};
+    const FeeFrac high_feerate{2, 1};
+    const FeeFrac highest_feerate{20, 1};
 
     // Parent with two children, one a cpfp, one dead weight
-    TxGraph::Ref parent_1 = graph->AddTransaction(feerate1);
-    TxGraph::Ref child_cpfp = graph->AddTransaction(feerate2);
-    TxGraph::Ref child_moocher = graph->AddTransaction(feerate3);
+    TxGraph::Ref parent_1 = graph->AddTransaction(med_feerate);
+    TxGraph::Ref child_cpfp = graph->AddTransaction(high_feerate);
+    TxGraph::Ref child_parent_1_moocher = graph->AddTransaction(low_feerate);
 
     graph->AddDependency(parent_1, child_cpfp);
-    graph->AddDependency(child_cpfp, child_moocher);
-    graph->AddDependency(parent_1, child_moocher);
+    graph->AddDependency(child_cpfp, child_parent_1_moocher);
+    graph->AddDependency(parent_1, child_parent_1_moocher);
 
-    // Second parent to cpfp and child_low_fee
-    TxGraph::Ref parent_2 = graph->AddTransaction(feerate1);
-    TxGraph::Ref child_low_fee = graph->AddTransaction(feerate3);
+    // Second parent, parent to cpfp and second moocher
+    TxGraph::Ref parent_2 = graph->AddTransaction(med_feerate);
+    TxGraph::Ref child_parent_2_moocher = graph->AddTransaction(low_feerate);
 
     graph->AddDependency(parent_2, child_cpfp);
-    graph->AddDependency(parent_2, child_low_fee);
+    graph->AddDependency(parent_2, child_parent_2_moocher);
 
     // Third parent to its own cluster which will be joined
     // via new package
-    TxGraph::Ref parent_3 = graph->AddTransaction(feerate1);
+    TxGraph::Ref parent_3 = graph->AddTransaction(med_feerate);
 
     // Just at size.
+    graph->CommitStaging();
     BOOST_CHECK(!graph->IsOversized(/*main_only=*/true));
 
-    const FeeFrac feerate_high{20, 1};
     // New package of 2 comes in, we make a graph for just itself
+    // Would need to fetch utxos, fill in feerates
     {
         auto pkg_graph = MakeTxGraph(max_count);
 
-        // Conflicts with child_moocher under the hood
-        TxGraph::Ref new_child_low_fee = pkg_graph->AddTransaction(feerate3);
-        TxGraph::Ref grandchild_cpfp = pkg_graph->AddTransaction(feerate_high);
+        // RBF conflicts with child_parent_1_moocher under the hood
+        TxGraph::Ref new_child_low_fee = pkg_graph->AddTransaction(low_feerate);
+        TxGraph::Ref grandchild_cpfp = pkg_graph->AddTransaction(highest_feerate);
         pkg_graph->AddDependency(new_child_low_fee, grandchild_cpfp);
         BOOST_CHECK(!pkg_graph->IsOversized(/*main_only=*/true));
 
@@ -130,27 +72,28 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         auto cfr = builder->GetCurrentChunkFeerate();
         auto chunk = builder->GetCurrentChunk();
         BOOST_CHECK_EQUAL(chunk.size(), 2);
-        BOOST_CHECK(feerate3 + feerate_high == cfr);
+        BOOST_CHECK(low_feerate + highest_feerate == cfr);
     }
 
     // We will attempt to add to staging
     graph->StartStaging();
 
+    // Set of detected conflicts in main graph
     std::set<TxGraph::Ref*> all_conflicts;
 
     // RBFs: We remove from staging area
     // Things we need to RemoveTransaction for due to direct conflicts
     // and all the conflicted descendants
     // Only one RBF, simulated for now. Moocher out.
-    graph->RemoveTransaction(child_moocher);
-    all_conflicts.insert(&child_moocher);
+    graph->RemoveTransaction(child_parent_1_moocher);
+    all_conflicts.insert(&child_parent_1_moocher);
 
     // New child has two parents and one grandchild
-    TxGraph::Ref new_child_low_fee_2 = graph->AddTransaction(feerate3);
-    TxGraph::Ref grandchild_cpfp_2 = graph->AddTransaction(feerate_high);
-    graph->AddDependency(parent_1, new_child_low_fee_2);
-    graph->AddDependency(parent_3, new_child_low_fee_2);
-    graph->AddDependency(new_child_low_fee_2, grandchild_cpfp_2);
+    TxGraph::Ref new_child_low_fee = graph->AddTransaction(low_feerate);
+    TxGraph::Ref grandchild_cpfp = graph->AddTransaction(highest_feerate);
+    graph->AddDependency(parent_1, new_child_low_fee);
+    graph->AddDependency(parent_3, new_child_low_fee);
+    graph->AddDependency(new_child_low_fee, grandchild_cpfp);
 
     // Staged area is now oversized, time to inspect main graph
     // to decide what to remove before attempting RBF since it has
@@ -159,10 +102,8 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     BOOST_CHECK(graph->IsOversized(/*main_only=*/false));
     BOOST_CHECK_EQUAL(graph->GetTransactionCount(/*main_only=*/true), 6);
 
-    std::vector<TxGraph::Ref> parents;
-
     // Gather all in-main parents of package (parent ref already held)
-    // Only one parent for now
+    std::vector<TxGraph::Ref> parents;
     parents.push_back(std::move(parent_1));
     parents.push_back(std::move(parent_3));
 
@@ -287,7 +228,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     const auto parent_1_cluster = graph->GetCluster(parents[0]);
     BOOST_CHECK_EQUAL(parent_1_cluster.size(), filter_for_desc_of_anc ? 4 : 6);
     BOOST_CHECK_EQUAL(sibling_evicted.size(), 1);
-    BOOST_CHECK(filter_for_desc_of_anc ? sibling_evicted[0] == &child_cpfp : sibling_evicted[0] == &child_low_fee);
+    BOOST_CHECK(filter_for_desc_of_anc ? sibling_evicted[0] == &child_cpfp : sibling_evicted[0] == &child_parent_2_moocher);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

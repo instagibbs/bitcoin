@@ -150,6 +150,8 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
             affected_clusters.push_back(cluster);
             for (const auto& ref : cluster) {
                 // Add size to give topo-valid tie-breaker in heap
+                // FIXME  we should really be heaping the chunk, not individual tx.
+                // Need a way of accessing chunk a ref is in
                 heap_refs.emplace_back(ref, heap_refs.size());
             }
         }

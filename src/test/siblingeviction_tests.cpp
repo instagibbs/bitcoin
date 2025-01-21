@@ -207,6 +207,9 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         // aka CountDistinctClusters with all refs passed in
 
         // Resubmission strategies? Unclear.
+        // Keep evicted list in order, walk backwards and try re-adding
+        // things, if something ends up needing to be skipped, we
+        // don't any anything that has that in its descendant set.
 
         auto cfr{graph->GetMainChunkFeerate(*ref)};
         if (last_feerate.IsEmpty()) {

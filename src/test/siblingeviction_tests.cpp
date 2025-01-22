@@ -125,11 +125,8 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     // after MAX_CLUSTER_COUNT_LIMIT removals; 
     std::vector<std::vector<TxGraph::Ref*>> affected_clusters;
 
-    using RefCmp = std::pair<TxGraph::Ref*, uint32_t>;
-    auto ref_cmp = [&graph](RefCmp lhs, RefCmp rhs) {
-        const auto lhs_prio = graph->GetMainChunkFeerate(*lhs.first);
-        const auto rhs_prio = graph->GetMainChunkFeerate(*rhs.first);
-        return lhs_prio > rhs_prio || (lhs_prio == rhs_prio && lhs.second > rhs.second); // Min-heap: smallest priority first
+    auto ref_cmp = [&graph](TxGraph::Ref* lhs, TxGraph::Ref* rhs) {
+        return std::is_lt(graph->CompareMainOrder(*lhs, *rhs));
     };
 
     // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
@@ -137,7 +134,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
     // We're building a topo-valid heap, could also just
     // build a heap that keeps track of tail of clusters
-    std::vector<RefCmp> heap_refs;
+    std::vector<TxGraph::Ref*> heap_refs;
 
     for (const auto& parent : parents) {
         // Gather all ancestors (they can not be evicted)
@@ -152,7 +149,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
                 // Add size to give topo-valid tie-breaker in heap
                 // FIXME  we should really be heaping the chunk, not individual tx.
                 // Need a way of accessing chunk a ref is in
-                heap_refs.emplace_back(ref, heap_refs.size());
+                heap_refs.emplace_back(ref);
             }
         }
     }
@@ -184,7 +181,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     FeeFrac last_feerate;
     do {
         std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
-        TxGraph::Ref* ref = heap_refs.back().first;
+        TxGraph::Ref* ref = heap_refs.back();
         heap_refs.pop_back();
 
         // Only evict things that are descendants of ancestors of package

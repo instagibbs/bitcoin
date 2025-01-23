@@ -125,8 +125,10 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     // after MAX_CLUSTER_COUNT_LIMIT removals; 
     std::vector<std::vector<TxGraph::Ref*>> affected_clusters;
 
-    auto ref_cmp = [&graph](TxGraph::Ref* lhs, TxGraph::Ref* rhs) {
-        return std::is_lt(graph->CompareMainOrder(*lhs, *rhs));
+    using Chunk = std::vector<TxGraph::Ref*>;
+
+    auto ref_cmp = [&graph](Chunk lhs, Chunk rhs) {
+        return std::is_lt(graph->CompareMainOrder(*lhs[0], *rhs[0]));
     };
 
     // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
@@ -134,7 +136,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
     // We're building a topo-valid heap, could also just
     // build a heap that keeps track of tail of clusters
-    std::vector<TxGraph::Ref*> heap_refs;
+    std::vector<Chunk> heap_refs;
 
     for (const auto& parent : parents) {
         // Gather all ancestors (they can not be evicted)
@@ -145,12 +147,26 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
         // If new cluster, append to cluster list
         if (!cluster.empty() && affected_clusters_prefix.insert(cluster[0]).second) {
             affected_clusters.push_back(cluster);
+
+            // Accumulates transactions until package feerate matches measured chunkfeerate
+            // since that implies that is the chunk.
+            Chunk current_chunk;
+            FeeFrac current_feerate;
             for (const auto& ref : cluster) {
-                // Add size to give topo-valid tie-breaker in heap
-                // FIXME  we should really be heaping the chunk, not individual tx.
-                // Need a way of accessing chunk a ref is in
-                heap_refs.emplace_back(ref);
+                const auto ifr = graph->GetIndividualFeerate(*ref);
+                const auto cfr = graph->GetMainChunkFeerate(*ref);
+
+                current_chunk.emplace_back(ref);
+                current_feerate += ifr;
+
+                if (cfr == current_feerate) {
+                    heap_refs.emplace_back(current_chunk);
+                    current_chunk.clear();
+                    current_feerate = FeeFrac{};
+                }
             }
+            BOOST_CHECK_EQUAL(current_chunk.size(), 0);
+            BOOST_CHECK(current_feerate == FeeFrac{});
         }
     }
 
@@ -181,39 +197,46 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     FeeFrac last_feerate;
     do {
         std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
-        TxGraph::Ref* ref = heap_refs.back();
+        Chunk popped_chunk = heap_refs.back();
+        //TxGraph::Ref* ref = heap_refs.back();
         heap_refs.pop_back();
 
-        // Only evict things that are descendants of ancestors of package
-        // This results in a slightly more "local" eviction, which may
-        // or may not be cheaper.
-        if (filter_for_desc_of_anc && !all_ancestors_descendants.contains(ref)) continue;
+        // Walk backwards over chunk transactions; we might not have to evict all of it
+        for (size_t i{0}; i < popped_chunk.size() ; ++i) {
+            const auto ref = popped_chunk[popped_chunk.size() - 1 - i];
 
-        // We can't evict our package ancestors
-        if (all_ancestors.count(ref) > 0) continue;
+            // Only evict things that are descendants of ancestors of package
+            // This results in a slightly more "local" eviction, which may
+            // or may not be cheaper.
+            if (filter_for_desc_of_anc && !all_ancestors_descendants.contains(ref)) continue;
 
-        // The tx might already be removed in staging from direct conflict, no-op in that case
-        // For logging purposes we skip
-        if (all_conflicts.contains(ref)) continue;
+            // We can't evict our package ancestors
+            if (all_ancestors.count(ref) > 0) continue;
 
-        graph->RemoveTransaction(*ref);
-        sibling_evicted.push_back(std::move(ref));
+            // The tx might already be removed in staging from direct conflict, no-op in that case
+            // For logging purposes we skip
+            if (all_conflicts.contains(ref)) continue;
 
-        // TODO need to also count how many newly-affected clusters
-        // are occuring to reduce computational churn, <= 100 total
-        // aka CountDistinctClusters with all refs passed in
+            graph->RemoveTransaction(*ref);
+            sibling_evicted.push_back(std::move(ref));
 
-        // Resubmission strategies? Unclear.
-        // Keep evicted list in order, walk backwards and try re-adding
-        // things, if something ends up needing to be skipped, we
-        // don't any anything that has that in its descendant set.
+            // TODO need to also count how many newly-affected clusters
+            // are occuring to reduce computational churn, <= 100 total
+            // aka CountDistinctClusters with all refs passed in
 
-        auto cfr{graph->GetMainChunkFeerate(*ref)};
-        if (last_feerate.IsEmpty()) {
-            last_feerate = cfr;
-        } else {
-            BOOST_CHECK(last_feerate <= cfr);
-            last_feerate = cfr;
+            // Resubmission strategies? Unclear.
+            // Keep evicted list in order, walk backwards and try re-adding
+            // things, if something ends up needing to be skipped, we
+            // don't any anything that has that in its descendant set.
+
+            auto cfr{graph->GetMainChunkFeerate(*ref)};
+            if (last_feerate.IsEmpty()) {
+                last_feerate = cfr;
+            } else {
+                BOOST_CHECK(last_feerate <= cfr);
+                last_feerate = cfr;
+            }
+
         }
     } while (!heap_refs.empty() && graph->IsOversized(/*main_only=*/false));
 

@@ -219,6 +219,8 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
             graph->RemoveTransaction(*ref);
             sibling_evicted.push_back(std::move(ref));
+
+            if (!graph->IsOversized(/*main_only=*/false)) break;
         }
     } while (!heap_refs.empty() && graph->IsOversized(/*main_only=*/false));
 

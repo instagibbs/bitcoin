@@ -140,6 +140,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
     for (const auto& parent : parents) {
         // Gather all ancestors (they can not be evicted)
+        // N.B. we may not have access to this call in future?
         auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
         all_ancestors.insert(ancestors.begin(), ancestors.end());
 
@@ -191,10 +192,9 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     std::vector<TxGraph::Ref*> sibling_evicted;
 
     // Switch this to change eviction strategy
+    // We may not have fast access to these sets in future.
     bool filter_for_desc_of_anc = false;
 
-    // STRATEGY 1: Evict any non-ancestors from effected clusters
-    FeeFrac last_feerate;
     do {
         std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
         Chunk popped_chunk = heap_refs.back();
@@ -219,26 +219,15 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 
             graph->RemoveTransaction(*ref);
             sibling_evicted.push_back(std::move(ref));
-
-            // TODO need to also count how many newly-affected clusters
-            // are occuring to reduce computational churn, <= 100 total
-            // aka CountDistinctClusters with all refs passed in
-
-            // Resubmission strategies? Unclear.
-            // Keep evicted list in order, walk backwards and try re-adding
-            // things, if something ends up needing to be skipped, we
-            // don't any anything that has that in its descendant set.
-
-            auto cfr{graph->GetMainChunkFeerate(*ref)};
-            if (last_feerate.IsEmpty()) {
-                last_feerate = cfr;
-            } else {
-                BOOST_CHECK(last_feerate <= cfr);
-                last_feerate = cfr;
-            }
-
         }
     } while (!heap_refs.empty() && graph->IsOversized(/*main_only=*/false));
+
+    // Now that we fit, we may be able to re-add some transactions
+    // Walk backwards over sibling_evicted, and attempt
+    // to re-add them. If still oversized, add to sibling_skip
+    // list and continue. For each considered re-add,
+    // we skip them if you already skipped their ancestor
+    // by finding it in the sibling_skip set.
 
     // We're good to go
     BOOST_CHECK(!graph->IsOversized(/*main_only=*/false));

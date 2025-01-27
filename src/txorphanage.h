@@ -5,6 +5,7 @@
 #ifndef BITCOIN_TXORPHANAGE_H
 #define BITCOIN_TXORPHANAGE_H
 
+#include <consensus/validation.h>
 #include <net.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -83,14 +84,25 @@ public:
         /** Peers added with AddTx or AddAnnouncer. */
         std::set<NodeId> announcers;
         NodeSeconds nTimeExpire;
+
+        unsigned int GetSize() const {
+            return GetTransactionWeight(*tx);
+        }
     };
 
     std::vector<OrphanTxBase> GetOrphanTransactions() const;
+
+    /** Get the total weight of all orphans. If an orphan has multiple announcers, its weight is
+     * only counted once within this total. */
+    unsigned int TotalOrphanBytes() const { return m_total_orphan_size; }
 
 protected:
     struct OrphanTx : public OrphanTxBase {
         size_t list_pos;
     };
+
+    /** Total size of all entries in m_orphans. */
+    unsigned int m_total_orphan_size{0};
 
     /** Map from wtxid to orphan transaction record. Limited by
      *  -maxorphantx/DEFAULT_MAX_ORPHAN_TRANSACTIONS */

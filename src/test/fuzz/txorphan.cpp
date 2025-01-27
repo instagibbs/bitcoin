@@ -94,6 +94,9 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
         LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10 * DEFAULT_MAX_ORPHAN_TRANSACTIONS)
         {
             NodeId peer_id = fuzzed_data_provider.ConsumeIntegral<NodeId>();
+            const auto total_bytes_start{orphanage.TotalOrphanBytes()};
+            const auto total_peer_bytes_start{orphanage.BytesFromPeer(peer_id)};
+            const auto tx_size{tx->GetTotalSize()};
 
             CallOneOf(
                 fuzzed_data_provider,
@@ -113,6 +116,23 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                         bool add_tx = orphanage.AddTx(tx, peer_id);
                         // have_tx == true -> add_tx == false
                         Assert(!have_tx || !add_tx);
+
+                        if (add_tx) {
+                            Assert(orphanage.BytesFromPeer(peer_id) == tx_size + total_peer_bytes_start);
+                            Assert(orphanage.TotalOrphanBytes() == tx_size + total_bytes_start);
+                            Assert(tx_size <= MAX_STANDARD_TX_WEIGHT);
+                        } else {
+                            // Peer may have been added as an announcer.
+                            if (orphanage.BytesFromPeer(peer_id) == tx_size + total_peer_bytes_start) {
+                                Assert(orphanage.HaveTxFromPeer(tx->GetWitnessHash(), peer_id));
+                            } else {
+                                // Otherwise, there must not be any change to the peer byte count.
+                                Assert(orphanage.BytesFromPeer(peer_id) == total_peer_bytes_start);
+                            }
+
+                            // Regardless, total bytes should not have changed.
+                            Assert(orphanage.TotalOrphanBytes() == total_bytes_start);
+                        }
                     }
                     have_tx = orphanage.HaveTx(tx->GetWitnessHash());
                     {
@@ -132,6 +152,15 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                         Assert(have_tx || !added_announcer);
                         // have_tx_and_peer == true -> added_announcer == false
                         Assert(!have_tx_and_peer || !added_announcer);
+
+                        // Total bytes should not have changed. If peer was added as announcer, byte
+                        // accounting must have been updated.
+                        Assert(orphanage.TotalOrphanBytes() == total_bytes_start);
+                        if (added_announcer) {
+                            Assert(orphanage.BytesFromPeer(peer_id) == tx_size + total_peer_bytes_start);
+                        } else {
+                            Assert(orphanage.BytesFromPeer(peer_id) == total_peer_bytes_start);
+                        }
                     }
                 },
                 [&] {
@@ -139,6 +168,9 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     // EraseTx should return 0 if m_orphans doesn't have the tx
                     {
                         Assert(have_tx == orphanage.EraseTx(tx->GetWitnessHash()));
+                        if (have_tx) {
+                            Assert(orphanage.TotalOrphanBytes() == total_bytes_start - tx_size);
+                        }
                     }
                     have_tx = orphanage.HaveTx(tx->GetWitnessHash());
                     // have_tx should be false and EraseTx should fail
@@ -149,6 +181,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                 [&] {
                     orphanage.EraseForPeer(peer_id);
                     Assert(!orphanage.HaveTxFromPeer(tx->GetWitnessHash(), peer_id));
+                    Assert(orphanage.BytesFromPeer(peer_id) == 0);
                 },
                 [&] {
                     // test mocktime and expiry

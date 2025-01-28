@@ -827,6 +827,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.test_same_txid_orphan_of_orphan()
         self.test_orphan_txid_inv()
         # self.test_max_orphan_amount()
+        # FIXME: add test for dynamic orphan limit
         self.test_orphan_handling_prefer_outbound()
         self.test_announcers_before_and_after()
         self.test_parents_change()

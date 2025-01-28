@@ -106,7 +106,6 @@ public:
 
 protected:
     struct OrphanTx : public OrphanTxBase {
-        size_t list_pos;
     };
 
     /** Total size of all entries in m_orphans. */
@@ -116,6 +115,8 @@ protected:
      *  -maxorphantx/DEFAULT_MAX_ORPHAN_TRANSACTIONS */
     std::map<Wtxid, OrphanTx> m_orphans;
 
+    using OrphanMap = decltype(m_orphans);
+
     struct PeerOrphanInfo {
         /** List of transactions that should be reconsidered: added to in AddChildrenToWorkSet,
          * removed from one-by-one with each call to GetTxToReconsider. The wtxids may refer to
@@ -123,16 +124,22 @@ protected:
          * GetTxToReconsider. */
         std::set<Wtxid> m_work_set;
 
+        /** Orphan transactions in vector for quick random eviction */
+        std::vector<OrphanMap::iterator> m_iter_list;
+
         /** Total weight of orphans for which this peer is an announcer.
          * If orphans are provided by different peers, its weight will be accounted for in each
          * PeerOrphanInfo, so the total of all peers' m_total_size may be larger than
          * m_total_orphan_size. If a peer is removed as an announcer, even if the orphan still
          * remains in the orphanage, this number will be decremented. */
         unsigned int m_total_size{0};
-    };
-    std::map<NodeId, PeerOrphanInfo> m_peer_orphanage_info;
 
-    using OrphanMap = decltype(m_orphans);
+        /** Maximum total weight of all orphans (including ones that are announced by other peers as
+         * well). Provided by txdownloadman, as it depends on connection details. */
+        unsigned int m_max_total_size{1};
+    };
+
+    std::map<NodeId, PeerOrphanInfo> m_peer_orphanage_info;
 
     struct IteratorComparator
     {
@@ -146,9 +153,6 @@ protected:
     /** Index from the parents' COutPoint into the m_orphans. Used
      *  to remove orphan transactions from the m_orphans */
     std::map<COutPoint, std::set<OrphanMap::iterator, IteratorComparator>> m_outpoint_to_orphan_it;
-
-    /** Orphan transactions in vector for quick random eviction */
-    std::vector<OrphanMap::iterator> m_orphan_list;
 
     /** Timestamp for the next scheduled sweep of expired orphans */
     NodeSeconds m_next_sweep{0s};

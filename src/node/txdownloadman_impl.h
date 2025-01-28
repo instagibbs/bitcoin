@@ -134,7 +134,13 @@ public:
         /** Information relevant to scheduling tx requests. */
         const TxDownloadConnectionInfo m_connection_info;
 
-        PeerInfo(const TxDownloadConnectionInfo& info) : m_connection_info{info} {}
+        /** Maximum bytes used by transactions in orphanage for this peer. */
+        const unsigned int m_max_orphan_bytes;
+
+        PeerInfo(const TxDownloadConnectionInfo& info) :
+            m_connection_info{info},
+            m_max_orphan_bytes{info.m_preferred ? MAX_ORPHAN_BYTES_PREFERRED : MAX_ORPHAN_BYTES_NONPREFERRED}
+        {}
     };
 
     /** Information for all of the peers we may download transactions from. This is not necessarily

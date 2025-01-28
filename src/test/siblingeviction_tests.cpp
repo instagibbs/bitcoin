@@ -16,9 +16,10 @@ BOOST_FIXTURE_TEST_SUITE(siblingeviction_tests, TestingSetup)
 
 BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
 {
-    const int32_t max_count = 6;
+    const uint max_count = 6;
+    const uint64_t max_size = 100'000;
 
-    auto graph = MakeTxGraph(max_count);
+    auto graph = MakeTxGraph(max_count, max_size);
 
     graph->StartStaging();
 
@@ -55,7 +56,7 @@ BOOST_FIXTURE_TEST_CASE(siblingeviction, TestChain100Setup)
     // New package of 2 comes in, we make a graph for just itself
     // Would need to fetch utxos, fill in feerates
     {
-        auto pkg_graph = MakeTxGraph(max_count);
+        auto pkg_graph = MakeTxGraph(max_count, 100'000);
 
         // RBF conflicts with child_parent_1_moocher under the hood
         TxGraph::Ref new_child_low_fee = pkg_graph->AddTransaction(low_feerate);

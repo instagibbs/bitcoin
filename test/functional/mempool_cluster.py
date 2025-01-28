@@ -23,8 +23,10 @@ class MempoolClusterTest(BitcoinTestFramework):
         self.wallet = MiniWallet(node)
 
         node = self.nodes[0]
-        parent_tx = self.wallet.send_self_transfer(from_node=node)
-        utxo_to_spend = parent_tx["new_utxo"]
+        # Second output of original parent will be used for kindred eviction
+        parent_tx = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2)
+        utxo_to_spend = parent_tx["new_utxos"][0]
+        utxo_for_kindred_eviction = parent_tx["new_utxos"][1]
         ancestors = [parent_tx["txid"]]
         while len(node.getrawmempool()) < MAX_CLUSTER_COUNT:
             next_tx = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=utxo_to_spend)
@@ -53,6 +55,12 @@ class MempoolClusterTest(BitcoinTestFramework):
         # Test that adding one more transaction to the cluster will fail.
         bad_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_to_spend)
         assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, bad_tx["hex"])
+
+        # But if transaction has non-ancestors that can be evicted, it will try an RBF
+        from pdb import set_trace
+        set_trace()
+        kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, fee=10)
+        node.sendrawtransaction(kindred_tx["hex"], 0)
 
         # TODO: verify that the size limits are also enforced.
         # TODO: add tests that exercise rbf, package submission, and package

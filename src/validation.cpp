@@ -994,10 +994,12 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         return kindred_evicted;
     }
 
-    const auto entry = m_pool.GetEntry(ws.m_hash);
-    if (!Assume(entry)) return std::nullopt;
+//    const auto entry = m_pool.GetEntry(ws.m_hash);
+//    if (!Assume(entry)) return std::nullopt;
 
-    std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> parent_entries = m_pool.GetParents(*entry);
+    // FIXME this is including changeset parents, we should not be?
+    // All we care about is things in main graph aka in-mempool
+    std::vector<const TxGraph::Ref*> parent_entries = changeset.CalculateParentsOf(ws.m_ptx);
 
     // We will reconstruct chunks manually for eviction ordering
     using Chunk = std::vector<TxGraph::Ref*>;
@@ -1016,10 +1018,10 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     for (const auto& parent : parent_entries) {
         // Gather all ancestors (they can not be evicted)
         // N.B. we may not have access to this call in future?
-        auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
+        auto ancestors = graph->GetAncestors(*parent, /*main_only=*/true);
         all_ancestors.insert(ancestors.begin(), ancestors.end());
 
-        const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
+        const auto& cluster = graph->GetCluster(*parent, /*main_only=*/true);
         // If new cluster, process chunks
         if (!cluster.empty() && clusters_prefix.insert(cluster[0]).second) {
 
@@ -1040,7 +1042,8 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
                     current_feerate = FeeFrac{};
                 }
             }
-            if (!Assume(current_chunk.empty()) || Assume(current_feerate.IsEmpty())) {
+            if (!Assume(current_chunk.empty()) || !Assume(current_feerate.IsEmpty())) {
+                // Unable to recover chunks for some reason
                 return std::nullopt;
             }
         }
@@ -1071,14 +1074,13 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
             const auto entry = static_cast<CTxMemPoolEntry*>(ref);
 
             // We can't evict our package ancestors
-            if (all_ancestors.count(ref) > 0) continue;
+            if (all_ancestors.count(ref) > 0) break;
 
             // The tx might already be removed in staging from direct conflict, no-op in that case
             // For logging purposes we skip
             if (all_conflict_entries.contains(static_cast<CTxMemPoolEntry*>(ref))) continue;
 
             graph->RemoveTransaction(*ref);
-//            kindred_evicted.push_back(static_cast<CTxMemPoolEntry*>(ref));
             kindred_evicted_txid.insert(entry->GetTx().GetHash());
 
             if (!graph->IsOversized(/*main_only=*/false)) break;
@@ -1094,9 +1096,10 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     }
 */
 
+    if (graph->IsOversized(/*main_only=*/false)) return std::nullopt;
+
     kindred_evicted = m_pool.GetIterSet(kindred_evicted_txid);
 
-    // FIXME return teh equiv of direct_conflict_iters.merge(ws.m_iters_conflicting)
     return kindred_evicted;
 }
 

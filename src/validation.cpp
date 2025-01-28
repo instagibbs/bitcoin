@@ -659,6 +659,8 @@ private:
     // only tests that are fast should be done here (to avoid CPU DoS).
     bool PreChecks(ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
+    std::optional<std::vector<CTxMemPoolEntry*>> TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws);
+
     // Run checks for mempool replace-by-fee, only used in AcceptSingleTransaction.
     bool ReplacementChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
@@ -976,6 +978,122 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     return true;
 }
 
+std::optional<std::vector<CTxMemPoolEntry*>> MemPoolAccept::TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(m_pool.cs);
+
+    // Running list of things we deem evict-worthy
+    std::vector<CTxMemPoolEntry*> kindred_evicted;
+
+    auto& graph = m_pool.m_txgraph;
+
+    // Nothing to do
+    if (!graph->IsOversized(/*main_only=*/false)) {
+        return kindred_evicted;
+    }
+
+    const auto entry = m_pool.GetEntry(ws.m_hash);
+    if (!Assume(entry)) return std::nullopt;
+
+    std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> parent_entries = m_pool.GetParents(*entry);
+
+    // We will reconstruct chunks manually for eviction ordering
+    using Chunk = std::vector<TxGraph::Ref*>;
+
+    auto ref_cmp = [&graph](Chunk lhs, Chunk rhs) {
+        return std::is_lt(graph->CompareMainOrder(*lhs[0], *rhs[0]));
+    };
+
+    // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
+    std::set<TxGraph::Ref*> clusters_prefix;
+    // Set of all ancestors of the added package
+    std::set<TxGraph::Ref*> all_ancestors;
+    // Heap for popping lowest chunks first for eviction
+    std::vector<Chunk> heap_refs;
+
+    for (const auto& parent : parent_entries) {
+        // Gather all ancestors (they can not be evicted)
+        // N.B. we may not have access to this call in future?
+        auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
+        all_ancestors.insert(ancestors.begin(), ancestors.end());
+
+        const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
+        // If new cluster, process chunks
+        if (!cluster.empty() && clusters_prefix.insert(cluster[0]).second) {
+
+            // Accumulates transactions until package feerate matches measured chunkfeerate
+            // since that implies that is the chunk.
+            Chunk current_chunk;
+            FeeFrac current_feerate;
+            for (const auto& ref : cluster) {
+                const auto ifr = graph->GetIndividualFeerate(*ref);
+                const auto cfr = graph->GetMainChunkFeerate(*ref);
+
+                current_chunk.emplace_back(ref);
+                current_feerate += ifr;
+
+                if (cfr == current_feerate) {
+                    heap_refs.emplace_back(current_chunk);
+                    current_chunk.clear();
+                    current_feerate = FeeFrac{};
+                }
+            }
+            if (!Assume(current_chunk.empty()) || Assume(current_feerate.IsEmpty())) {
+                return std::nullopt;
+            }
+        }
+    }
+
+    if (!Assume(!heap_refs.empty())) {
+        return std::nullopt;
+    }
+
+    // We can't return anything that would already be removed
+    // via conflict, check staging for removals
+    const auto& all_conflicts_iter_set = changeset.GetRemovals();
+    std::set<const CTxMemPoolEntry*> all_conflict_entries;
+    for (CTxMemPool::txiter it : all_conflicts_iter_set) {
+        const auto removed_entry = m_pool.GetEntry(it->GetTx().GetHash());
+        all_conflict_entries.insert(removed_entry);
+    }
+
+    do {
+        std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
+        Chunk popped_chunk = heap_refs.back();
+        heap_refs.pop_back();
+
+        // Walk backwards over chunk transactions; we might not have to evict all of it
+        for (size_t i{0}; i < popped_chunk.size() ; ++i) {
+            const auto ref = popped_chunk[popped_chunk.size() - 1 - i];
+
+            // We can't evict our package ancestors
+            if (all_ancestors.count(ref) > 0) continue;
+
+            // The tx might already be removed in staging from direct conflict, no-op in that case
+            // For logging purposes we skip
+            if (all_conflict_entries.contains(static_cast<CTxMemPoolEntry*>(ref))) continue;
+
+            graph->RemoveTransaction(*ref);
+            kindred_evicted.push_back(static_cast<CTxMemPoolEntry*>(ref));
+
+            if (!graph->IsOversized(/*main_only=*/false)) break;
+        }
+    } while (!heap_refs.empty() && graph->IsOversized(/*main_only=*/false));
+
+/*
+    std::vector<CTxMemPoolEntry*> converted_kindred_evicted;
+    converted_kindred_evicted.reserve(kindred_evicted.size());
+
+    for (auto* ref : kindred_evicted) {
+        converted_kindred_evicted.push_back(static_cast<CTxMemPoolEntry*>(ref));
+    }
+*/
+
+    // FIXME return teh equiv of direct_conflict_iters.merge(ws.m_iters_conflicting)
+    return kindred_evicted;
+}
+
 bool MemPoolAccept::ReplacementChecks(Workspace& ws)
 {
     AssertLockHeld(cs_main);
@@ -1014,10 +1132,11 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         m_subpackage.m_changeset->StageRemoval(it);
     }
 
+    /*
     if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
         // If we can't calculate a feerate, it's because the cluster size limits were hit.
         return state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
-    }
+    }*/
 
     return true;
 }
@@ -1335,6 +1454,13 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
         }
     }
 
+    // 1. Construct staged graph with conflicts
+    // 2. Check oversizedness
+    // 3. If oversized, throw into kindred eviction logic
+    // 4. Once not oversized, run diagram check
+
+
+    // Stage removals before size checking
     if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
         if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
             // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
@@ -1343,12 +1469,40 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 
-    // Check if the transaction would exceed the cluster size limit.
+    // If we're over-sized, run kindred eviction logic
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
-        ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
+        if (!kindred_eviction_candidates) {
+            ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+            return MempoolAcceptResult::Failure(ws.m_state);
+        } else {
+            // Add candidates to forthcoming RBF attempt
+        }
+    }
+
+    // Do one last attempt at diagram check
+    if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
+        if (err_string->first == DiagramCheckError::UNCALCULABLE) {
+            // If we can't calculate a feerate, it's because the cluster size limits were hit.
+            ws.m_state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
+            return MempoolAcceptResult::Failure(ws.m_state);
+        }
+    }
+/*
+    if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
+        if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
+            // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
+            return MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), single_wtxid);
+        }
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 
+    if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+        // Check if the transaction would exceed the cluster size limit. In RBF cases already checked during diagram check.
+        ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        return MempoolAcceptResult::Failure(ws.m_state);
+    }
+*/
     // Perform the inexpensive checks first and avoid hashing and signature verification unless
     // those checks pass, to mitigate CPU exhaustion denial-of-service attacks.
     if (!PolicyScriptChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);

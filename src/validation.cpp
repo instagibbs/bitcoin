@@ -659,7 +659,7 @@ private:
     // only tests that are fast should be done here (to avoid CPU DoS).
     bool PreChecks(ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
-    std::optional<std::vector<CTxMemPoolEntry*>> TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws);
+    std::optional<CTxMemPool::setEntries> TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws);
 
     // Run checks for mempool replace-by-fee, only used in AcceptSingleTransaction.
     bool ReplacementChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
@@ -978,13 +978,14 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     return true;
 }
 
-std::optional<std::vector<CTxMemPoolEntry*>> MemPoolAccept::TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws)
+std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
 
     // Running list of things we deem evict-worthy
-    std::vector<CTxMemPoolEntry*> kindred_evicted;
+    std::set<Txid> kindred_evicted_txid;
+    CTxMemPool::setEntries kindred_evicted;
 
     auto& graph = m_pool.m_txgraph;
 
@@ -1067,6 +1068,8 @@ std::optional<std::vector<CTxMemPoolEntry*>> MemPoolAccept::TryKindredEviction(C
         for (size_t i{0}; i < popped_chunk.size() ; ++i) {
             const auto ref = popped_chunk[popped_chunk.size() - 1 - i];
 
+            const auto entry = static_cast<CTxMemPoolEntry*>(ref);
+
             // We can't evict our package ancestors
             if (all_ancestors.count(ref) > 0) continue;
 
@@ -1075,7 +1078,8 @@ std::optional<std::vector<CTxMemPoolEntry*>> MemPoolAccept::TryKindredEviction(C
             if (all_conflict_entries.contains(static_cast<CTxMemPoolEntry*>(ref))) continue;
 
             graph->RemoveTransaction(*ref);
-            kindred_evicted.push_back(static_cast<CTxMemPoolEntry*>(ref));
+//            kindred_evicted.push_back(static_cast<CTxMemPoolEntry*>(ref));
+            kindred_evicted_txid.insert(entry->GetTx().GetHash());
 
             if (!graph->IsOversized(/*main_only=*/false)) break;
         }
@@ -1089,6 +1093,8 @@ std::optional<std::vector<CTxMemPoolEntry*>> MemPoolAccept::TryKindredEviction(C
         converted_kindred_evicted.push_back(static_cast<CTxMemPoolEntry*>(ref));
     }
 */
+
+    kindred_evicted = m_pool.GetIterSet(kindred_evicted_txid);
 
     // FIXME return teh equiv of direct_conflict_iters.merge(ws.m_iters_conflicting)
     return kindred_evicted;
@@ -1476,13 +1482,32 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
             ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
             return MempoolAcceptResult::Failure(ws.m_state);
         } else {
+            // Eviction candidates should have been staged
+            Assume(m_subpackage.m_changeset->CheckMemPoolPolicyLimits());
             // Add candidates to forthcoming RBF attempt
+            for (const auto eviction_candidate : *kindred_eviction_candidates) {
+                ws.m_iters_conflicting.insert(eviction_candidate);
+            }
+            // Run anti-DoS checks again
+
+            // TODO set this more robustly, only try again if candidates are found
+            m_subpackage.m_conflicting_fees = 0;
+            m_subpackage.m_conflicting_size = 0;
+            m_subpackage.m_rbf |= !kindred_eviction_candidates->empty();
+
+            if (!ReplacementChecks(ws)) {
+                if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
+                    // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
+                    return MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), single_wtxid);
+                }
+                return MempoolAcceptResult::Failure(ws.m_state);
+            }
         }
     }
 
-    // Do one last attempt at diagram check
-    if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
-        if (err_string->first == DiagramCheckError::UNCALCULABLE) {
+    // Finally do a digram check if necessary
+    if (m_subpackage.m_rbf) {
+        if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
             // If we can't calculate a feerate, it's because the cluster size limits were hit.
             ws.m_state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
             return MempoolAcceptResult::Failure(ws.m_state);

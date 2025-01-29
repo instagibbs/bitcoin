@@ -75,6 +75,8 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
             return new_tx;
         }();
 
+        const auto wtxid{tx->GetWitnessHash()};
+
         // Trigger orphanage functions that are called using parents. ptx_potential_parent is a tx we constructed in a
         // previous loop and potentially the parent of this tx.
         if (ptx_potential_parent) {
@@ -165,17 +167,27 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                 },
                 [&] {
                     bool have_tx = orphanage.HaveTx(tx->GetWitnessHash());
+                    bool have_from_peer{orphanage.HaveTxFromPeer(wtxid, peer_id)};
                     // EraseTx should return 0 if m_orphans doesn't have the tx
                     {
+                        auto bytes_from_peer_before{orphanage.BytesFromPeer(peer_id)};
                         Assert(have_tx == orphanage.EraseTx(tx->GetWitnessHash()));
                         if (have_tx) {
                             Assert(orphanage.TotalOrphanBytes() == total_bytes_start - tx_size);
+                            if (have_from_peer) {
+                                Assert(orphanage.BytesFromPeer(peer_id) == bytes_from_peer_before - tx_size);
+                            } else {
+                                Assert(orphanage.BytesFromPeer(peer_id) == bytes_from_peer_before);
+                            }
+                        } else {
+                            Assert(orphanage.TotalOrphanBytes() == total_bytes_start);
                         }
                     }
                     have_tx = orphanage.HaveTx(tx->GetWitnessHash());
+                    have_from_peer = orphanage.HaveTxFromPeer(wtxid, peer_id);
                     // have_tx should be false and EraseTx should fail
                     {
-                        Assert(!have_tx && !orphanage.EraseTx(tx->GetWitnessHash()));
+                        Assert(!have_tx && !have_from_peer && !orphanage.EraseTx(tx->GetWitnessHash()));
                     }
                 },
                 [&] {

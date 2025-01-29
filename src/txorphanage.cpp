@@ -163,6 +163,7 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphan_size, FastRandomContext& 
         m_next_sweep = nMinExpTime + ORPHAN_TX_EXPIRE_INTERVAL;
         if (nErased > 0) LogDebug(BCLog::TXPACKAGES, "Erased %d orphan tx due to expiration\n", nErased);
     }
+
     while (m_total_orphan_size > max_orphan_size)
     {
         // Find the peer with the greatest ratio of size used : size allowed. This metric causes us
@@ -184,6 +185,8 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphan_size, FastRandomContext& 
             }
         }
 
+        Assume(it_biggest_peer->second.m_total_size > 0);
+
         // Select a random transaction of this peer to evict.
         size_t randompos = rng.randrange(it_biggest_peer->second.m_iter_list.size());
         auto it_to_evict = it_biggest_peer->second.m_iter_list.at(randompos);
@@ -191,8 +194,22 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphan_size, FastRandomContext& 
         // Only erase this peer as an announcer, unless it is the only announcer. Otherwise peers
         // can selectively delete orphan transactions by announcing a lot of them.
         if (it_to_evict->second.announcers.size() > 1) {
-            it_to_evict->second.announcers.erase(it_biggest_peer->first);
+            Assume(it_to_evict->second.announcers.erase(it_biggest_peer->first));
             it_biggest_peer->second.m_total_size -= it_to_evict->second.GetSize();
+
+            // Find this orphan iter's position in the list.
+            auto& orphan_list = it_biggest_peer->second.m_iter_list;
+            size_t old_pos = std::distance(orphan_list.begin(), std::find(orphan_list.begin(), orphan_list.end(), it_to_evict));
+
+            if (!Assume(old_pos < orphan_list.size())) continue;
+            if (old_pos + 1 != orphan_list.size()) {
+                // Unless we're deleting the last entry in orphan_list, move the last
+                // entry to the position we're deleting.
+                auto it_last = orphan_list.back();
+                orphan_list[old_pos] = it_last;
+            }
+            orphan_list.pop_back();
+
         } else {
             EraseTx(it_to_evict->first);
             ++nEvicted;
@@ -339,6 +356,28 @@ std::vector<CTransactionRef> TxOrphanage::GetChildrenFromSamePeer(const CTransac
         children_found.emplace_back(child_iter->second.tx);
     }
     return children_found;
+}
+
+void TxOrphanage::CheckTotalOrphanBytes() const
+{
+    unsigned int total_bytes_calculated{0};
+    std::map<NodeId, unsigned int> reconstructed_peer_orphanage_usage;
+    for (const auto & [wtxid, orphan_tx] : m_orphans) {
+        const auto orphan_weight = orphan_tx.GetSize();
+        total_bytes_calculated += orphan_weight;
+        for (const auto peer_id : orphan_tx.announcers) {
+            reconstructed_peer_orphanage_usage[peer_id] += orphan_weight;
+        }
+    }
+    if (total_bytes_calculated != m_total_orphan_size) {
+        Assume(false);
+    }
+
+    for (const auto& pair : m_peer_orphanage_info) {
+        if (pair.second.m_total_size != reconstructed_peer_orphanage_usage[pair.first]) {
+            Assume(false);
+        }
+    }
 }
 
 std::vector<TxOrphanage::OrphanTxBase> TxOrphanage::GetOrphanTransactions() const

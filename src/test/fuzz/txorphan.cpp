@@ -203,6 +203,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     Assert(orphanage.Size() <= limit);
                 });
 
+            orphanage.CheckTotalOrphanBytes();
         }
         // Set tx as potential parent to be used for future GetChildren() calls.
         if (!ptx_potential_parent || fuzzed_data_provider.ConsumeBool()) {

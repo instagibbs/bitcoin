@@ -104,6 +104,8 @@ public:
         return peer_it == m_peer_orphanage_info.end() ? 0 : peer_it->second.m_total_size;
     }
 
+    void CheckTotalOrphanBytes() const;
+
 protected:
     struct OrphanTx : public OrphanTxBase {
     };

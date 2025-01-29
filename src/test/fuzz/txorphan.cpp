@@ -47,6 +47,8 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
 
     CTransactionRef ptx_potential_parent = nullptr;
 
+    std::set<NodeId> all_peer_ids;
+
     LIMITED_WHILE(outpoints.size() < 200'000 && fuzzed_data_provider.ConsumeBool(), 10 * DEFAULT_MAX_ORPHAN_TRANSACTIONS)
     {
         // construct transaction
@@ -99,6 +101,8 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
             const auto total_bytes_start{orphanage.TotalOrphanBytes()};
             const auto total_peer_bytes_start{orphanage.BytesFromPeer(peer_id)};
             const auto tx_weight{GetTransactionWeight(*tx)};
+
+            all_peer_ids.insert(peer_id);
 
             CallOneOf(
                 fuzzed_data_provider,
@@ -201,6 +205,9 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     auto limit = fuzzed_data_provider.ConsumeIntegral<unsigned int>();
                     orphanage.LimitOrphans(limit, orphanage_rng);
                     Assert(orphanage.TotalOrphanBytes() <= limit);
+                    for (const auto& peer : all_peer_ids) {
+                        Assert(orphanage.BytesFromPeer(peer) <= limit);
+                    }
                 });
 
             orphanage.CheckTotalOrphanBytes();

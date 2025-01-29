@@ -192,8 +192,9 @@ void TxOrphanage::LimitOrphans(unsigned int max_orphan_size, FastRandomContext& 
         // can selectively delete orphan transactions by announcing a lot of them.
         if (it_to_evict->second.announcers.size() > 1) {
             it_to_evict->second.announcers.erase(it_biggest_peer->first);
+            it_biggest_peer->second.m_total_size -= it_to_evict->second.GetSize();
         } else {
-            EraseTx(it_biggest_peer->second.m_iter_list.at(randompos)->first);
+            EraseTx(it_to_evict->first);
             ++nEvicted;
         }
     }

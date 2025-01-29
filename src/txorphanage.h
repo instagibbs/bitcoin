@@ -70,7 +70,7 @@ public:
     /** Erase all orphans included in or invalidated by a new block */
     void EraseForBlock(const CBlock& block);
 
-    /** Limit the orphanage to the given maximum */
+    /** If there are more than max_orphans total orphans, evict randomly until that is no longer the case. */
     void LimitOrphans(unsigned int max_orphans, FastRandomContext& rng);
 
     /** Add any orphans that list a particular tx as a parent into the from peer's work set */
@@ -116,6 +116,17 @@ public:
         return peer_it == m_peer_orphanage_info.end() ? 0 : peer_it->second.m_total_usage;
     }
 
+    unsigned int AnnouncementsByPeer(NodeId peer) const {
+        auto peer_it = m_peer_orphanage_info.find(peer);
+        return peer_it == m_peer_orphanage_info.end() ? 0 : peer_it->second.m_iter_list.size();
+    }
+
+    /* Test-only functions following */
+
+    /* Set custom limits to make evictions easier to hit. */
+    void SetCustomPerPeerWeightReservation(unsigned int orphan_weight_per_peer) { m_reserved_orphan_weight_per_peer = orphan_weight_per_peer; }
+    void SetCustomGlobalAnnouncementLimit(unsigned int max_global_announcements) { m_max_global_announcements = max_global_announcements; }
+
     /** Check consistency between PeerOrphanInfo and m_orphans. Recalculate counters and ensure they
      * match what is cached. */
     void SanityCheck() const;
@@ -136,6 +147,9 @@ protected:
     std::map<Wtxid, OrphanTx> m_orphans;
 
     using OrphanMap = decltype(m_orphans);
+
+    unsigned int m_reserved_orphan_weight_per_peer{RESERVED_ORPHAN_WEIGHT_PER_PEER};
+    unsigned int m_max_global_announcements{MAX_GLOBAL_ANNOUNCEMENTS};
 
     struct PeerOrphanInfo {
         /** List of transactions that should be reconsidered: added to in AddChildrenToWorkSet,
@@ -189,19 +203,19 @@ protected:
     }
 
     unsigned int GetPerPeerMaxAnnouncements() const {
-        if (m_peer_orphanage_info.empty()) return MAX_GLOBAL_ANNOUNCEMENTS;
-        return MAX_GLOBAL_ANNOUNCEMENTS / m_peer_orphanage_info.size();
+        if (m_peer_orphanage_info.empty()) return m_max_global_announcements;
+        return m_max_global_announcements / m_peer_orphanage_info.size();
     }
 
     unsigned int GetGlobalMaxAnnouncements() const {
-        return MAX_GLOBAL_ANNOUNCEMENTS;
+        return m_max_global_announcements;
     }
 
     /** If ORPHAN_TX_EXPIRE_INTERVAL has elapsed since the last sweep, expire orphans older than
      * ORPHAN_TX_EXPIRE_TIME. Called within LimitOrphans. */
     unsigned int MaybeExpireOrphans();
 
-    /** If there are more than max_orphans total orphans, evict randomly until that is no longer the case. */
+    /** If there is excess orphanage usage, evict based on peer usage of resources until that is no longer the case. */
     unsigned int MaybeTrimOrphans(unsigned int max_orphans, FastRandomContext& rng);
 
     /** Returns whether the global announcement or memory limits have been reached. */

@@ -285,12 +285,14 @@ static void CheckInvariants(const node::TxDownloadManagerImpl& txdownload_impl, 
 
     // Orphanage usage should never exceed what is allowed
     Assert(orphanage.Size() <= max_orphan_count);
+    // FIXME: assert byte total
 
     // We should never have more than the maximum in-flight requests out for a peer.
     for (NodeId peer = 0; peer < NUM_PEERS; ++peer) {
         if (!HasRelayPermissions(peer)) {
             Assert(txdownload_impl.m_txrequest.Count(peer) <= node::MAX_PEER_TX_ANNOUNCEMENTS);
         }
+        // FIXME: assert byte total
     }
     txdownload_impl.m_txrequest.SanityCheck();
 }

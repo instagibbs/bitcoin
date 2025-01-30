@@ -285,6 +285,7 @@ static void CheckInvariants(const node::TxDownloadManagerImpl& txdownload_impl, 
 
     // Orphanage usage should never exceed what is allowed
     Assert(orphanage.Size() <= max_orphan_count);
+    txdownload_impl.m_orphanage.SanityCheck();
 
     // We should never have more than the maximum in-flight requests out for a peer.
     for (NodeId peer = 0; peer < NUM_PEERS; ++peer) {

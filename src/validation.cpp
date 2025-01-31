@@ -1115,37 +1115,94 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     CFeeRate newFeeRate(ws.m_modified_fees, ws.m_vsize);
 
     CTxMemPool::setEntries all_conflicts;
+    std::set<Wtxid> processed_conflicts;
 
-    // Calculate all conflicting entries and enforce Rule #5.
-    if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
-                             strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+    if (!m_subpackage.m_rbf && m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+        // Nothing to do
+        return true;
     }
 
-    // Check if it's economically rational to mine this transaction rather than the ones it
-    // replaces and pays for its own relay fees. Enforce Rules #3 and #4.
-    for (CTxMemPool::txiter it : all_conflicts) {
-        m_subpackage.m_conflicting_fees += it->GetModifiedFee();
-        m_subpackage.m_conflicting_size += it->GetTxSize();
+    // FIXME should this be a two-pass loop?
+    if (m_subpackage.m_rbf) {
+        // Calculate all conflicting entries and enforce Rule #5.
+        if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                 strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
+
+        // Check if it's economically rational to mine this transaction rather than the ones it
+        // replaces and pays for its own relay fees. Enforce Rules #3 and #4.
+        for (CTxMemPool::txiter it : all_conflicts) {
+            m_subpackage.m_conflicting_fees += it->GetModifiedFee();
+            m_subpackage.m_conflicting_size += it->GetTxSize();
+        }
+
+        if (const auto err_string{PaysForRBF(m_subpackage.m_conflicting_fees, ws.m_modified_fees, ws.m_vsize,
+                                             m_pool.m_opts.incremental_relay_feerate, hash)}) {
+            // Result may change in a package context
+            return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
+                                 strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
+
+        // Add all the to-be-removed transactions to the changeset.
+        for (auto it : all_conflicts) {
+            processed_conflicts.insert(it->GetSharedTx()->GetWitnessHash());
+            m_subpackage.m_changeset->StageRemoval(it);
+        }
+
     }
 
-    if (const auto err_string{PaysForRBF(m_subpackage.m_conflicting_fees, ws.m_modified_fees, ws.m_vsize,
-                                         m_pool.m_opts.incremental_relay_feerate, hash)}) {
-        // Result may change in a package context
-        return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
-                             strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+    // We're still busting limits; let's try kindred eviction
+    if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+
+        const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
+        if (!kindred_eviction_candidates) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        }
+
+        // Impute new direct conflicts
+        for (const auto eviction_candidate : *kindred_eviction_candidates) {
+            ws.m_iters_conflicting.insert(eviction_candidate);
+        }
+
+        // Calculate all conflicting entries and enforce Rule #5.
+        if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                 strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
+
+        // Check if it's economically rational to mine this transaction rather than the ones it
+        // replaces and pays for its own relay fees. Enforce Rules #3 and #4.
+        for (CTxMemPool::txiter it : all_conflicts) {
+            // No double-counting
+            if (processed_conflicts.contains(it->GetSharedTx()->GetWitnessHash())) continue;
+
+            m_subpackage.m_rbf = true;
+            m_subpackage.m_conflicting_fees += it->GetModifiedFee();
+            m_subpackage.m_conflicting_size += it->GetTxSize();
+        }
+
+        if (const auto err_string{PaysForRBF(m_subpackage.m_conflicting_fees, ws.m_modified_fees, ws.m_vsize,
+                                             m_pool.m_opts.incremental_relay_feerate, hash)}) {
+            // Result may change in a package context
+            return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
+                                 strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
+
+        // Add all the to-be-removed transactions to the changeset.
+        for (auto it : all_conflicts) {
+            // No double-removal from changeset
+            if (processed_conflicts.contains(it->GetSharedTx()->GetWitnessHash())) continue;
+
+            m_subpackage.m_changeset->StageRemoval(it);
+        }
     }
 
-    // Add all the to-be-removed transactions to the changeset.
-    for (auto it : all_conflicts) {
-        m_subpackage.m_changeset->StageRemoval(it);
-    }
-
-    /*
+    // Finally, with or without kindred eviction, do one single diagram check
     if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
         // If we can't calculate a feerate, it's because the cluster size limits were hit.
         return state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
-    }*/
+    }
 
     return true;
 }
@@ -1463,14 +1520,8 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
         }
     }
 
-    // 1. Construct staged graph with conflicts
-    // 2. Check oversizedness
-    // 3. If oversized, throw into kindred eviction logic
-    // 4. Once not oversized, run diagram check
-
-
-    // Stage removals before size checking
-    if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
+    // These checks may trigger kindred eviction RBF even if no explicit conflict
+    if (!ReplacementChecks(ws)) {
         if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
             // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
             return MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), single_wtxid);
@@ -1478,44 +1529,12 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 
-    // If we're over-sized, run kindred eviction logic
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
-        const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
-        if (!kindred_eviction_candidates) {
-            ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
-            return MempoolAcceptResult::Failure(ws.m_state);
-        } else {
-            // Eviction candidates should have been staged
-            Assume(m_subpackage.m_changeset->CheckMemPoolPolicyLimits());
-            // Add candidates to forthcoming RBF attempt
-            for (const auto eviction_candidate : *kindred_eviction_candidates) {
-                ws.m_iters_conflicting.insert(eviction_candidate);
-            }
-            // Run anti-DoS checks again
-
-            // TODO set this more robustly, only try again if candidates are found
-            m_subpackage.m_conflicting_fees = 0;
-            m_subpackage.m_conflicting_size = 0;
-            m_subpackage.m_rbf |= !kindred_eviction_candidates->empty();
-
-            if (!ReplacementChecks(ws)) {
-                if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
-                    // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
-                    return MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), single_wtxid);
-                }
-                return MempoolAcceptResult::Failure(ws.m_state);
-            }
-        }
+        // Check if the transaction would exceed the cluster size limit. In RBF cases already checked during diagram check.
+        ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        return MempoolAcceptResult::Failure(ws.m_state);
     }
 
-    // Finally do a digram check if necessary
-    if (m_subpackage.m_rbf) {
-        if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
-            // If we can't calculate a feerate, it's because the cluster size limits were hit.
-            ws.m_state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
-            return MempoolAcceptResult::Failure(ws.m_state);
-        }
-    }
 /*
     if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
         if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {

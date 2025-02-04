@@ -19,6 +19,9 @@ MAX_CLUSTER_COUNT = 64
 class MempoolClusterTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
+        self.extra_args = [[
+            '-datacarriersize=100000',  # needed to pad transaction with MiniWallet
+        ]]
 
     def run_test(self):
         node = self.nodes[0]
@@ -64,9 +67,7 @@ class MempoolClusterTest(BitcoinTestFramework):
         evicting_child = node.sendrawtransaction(kindred_tx["hex"], 0)
         assert evicting_child in node.getrawmempool()
         assert ancestors[-1] not in node.getrawmempool()
-
-        from pdb import set_trace
-        set_trace()
+        assert ancestors[-2] in node.getrawmempool()
 
         # Re-submitting the same transaction will fail RBF checks due to total fee
         assert_raises_rpc_error(-26, "insufficient fee", node.sendrawtransaction, tx_to_evict)
@@ -76,6 +77,14 @@ class MempoolClusterTest(BitcoinTestFramework):
         node.sendrawtransaction(tx_to_evict)
         assert evicting_child not in node.getrawmempool()
         assert ancestors[-1] in node.getrawmempool()
+        node.prioritisetransaction(ancestors[-1], 0, -10000000)
+
+        # If we make an oversized CPFP off original parent, will evict all non-ancestors required
+        huge_kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, target_vsize=100000, fee_rate=Decimal("0.006"))
+        node.sendrawtransaction(huge_kindred_tx["hex"])
+        assert huge_kindred_tx["txid"] in node.getrawmempool()
+        for i in range(len(ancestors) - 50):
+            assert ancestors[-(1+i)] not in node.getrawmempool()
 
         # TODO: verify that the size limits are also enforced.
         # TODO: add tests that exercise rbf, package submission, and package

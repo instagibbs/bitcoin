@@ -1071,8 +1071,13 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
 
             const auto entry = static_cast<CTxMemPoolEntry*>(ref);
 
-            // We can't evict our package ancestors
-            if (all_ancestors.count(ref) > 0) break;
+            if (popped_chunk.size() > 1) {
+                Assume(true);
+            }
+
+            // We can't evict our package ancestors; continue because
+            // next transaction in chunk might not be in ancestor set
+            if (all_ancestors.count(ref) > 0) continue;
 
             // The tx might already be removed in staging from direct conflict, no-op in that case
             // For logging purposes we skip

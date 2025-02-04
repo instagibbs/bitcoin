@@ -12,6 +12,8 @@ from test_framework.util import (
     assert_raises_rpc_error,
 )
 
+from decimal import Decimal
+
 MAX_CLUSTER_COUNT = 64
 
 class MempoolClusterTest(BitcoinTestFramework):
@@ -56,11 +58,24 @@ class MempoolClusterTest(BitcoinTestFramework):
         bad_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_to_spend)
         assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, bad_tx["hex"])
 
+        # But if transaction has non-ancestors that can be evicted, it will try an RBF
+        kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, fee_rate=Decimal("0.006"))
+        tx_to_evict = node.getrawtransaction(ancestors[-1])
+        evicting_child = node.sendrawtransaction(kindred_tx["hex"], 0)
+        assert evicting_child in node.getrawmempool()
+        assert ancestors[-1] not in node.getrawmempool()
+
         from pdb import set_trace
         set_trace()
-        # But if transaction has non-ancestors that can be evicted, it will try an RBF
-        kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, fee=10)
-        node.sendrawtransaction(kindred_tx["hex"], 0)
+
+        # Re-submitting the same transaction will fail RBF checks due to total fee
+        assert_raises_rpc_error(-26, "insufficient fee", node.sendrawtransaction, tx_to_evict)
+
+        # But it works if we up the fee sufficiently
+        node.prioritisetransaction(ancestors[-1], 0, 10000000)
+        node.sendrawtransaction(tx_to_evict)
+        assert evicting_child not in node.getrawmempool()
+        assert ancestors[-1] in node.getrawmempool()
 
         # TODO: verify that the size limits are also enforced.
         # TODO: add tests that exercise rbf, package submission, and package

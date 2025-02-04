@@ -58,10 +58,6 @@ class MempoolClusterTest(BitcoinTestFramework):
 
         # But if transaction has non-ancestors that can be evicted, it will try an RBF
         kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, fee=10)
-        print(ancestors)
-        print(kindred_tx["txid"])
-        from pdb import set_trace
-        set_trace()
         node.sendrawtransaction(kindred_tx["hex"], 0)
 
         # TODO: verify that the size limits are also enforced.

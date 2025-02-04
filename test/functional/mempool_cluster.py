@@ -9,6 +9,7 @@ from test_framework.wallet import (
     MiniWallet,
 )
 from test_framework.util import (
+    assert_equal,
     assert_raises_rpc_error,
 )
 
@@ -32,6 +33,7 @@ class MempoolClusterTest(BitcoinTestFramework):
         parent_tx = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2)
         utxo_to_spend = parent_tx["new_utxos"][0]
         utxo_for_kindred_eviction = parent_tx["new_utxos"][1]
+        historical_utxos_spent = [parent_tx["new_utxos"][0]]
         ancestors = [parent_tx["txid"]]
         while len(node.getrawmempool()) < MAX_CLUSTER_COUNT:
             next_tx = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=utxo_to_spend)
@@ -48,6 +50,7 @@ class MempoolClusterTest(BitcoinTestFramework):
             # Update for next iteration
             ancestors.append(next_tx["txid"])
             utxo_to_spend = next_tx["new_utxo"]
+            historical_utxos_spent.append(next_tx["new_utxo"])
 
         assert node.getmempoolcluster(parent_tx['txid'])['txcount'] == MAX_CLUSTER_COUNT
         feeratediagram = node.getmempoolfeeratediagram()
@@ -83,8 +86,26 @@ class MempoolClusterTest(BitcoinTestFramework):
         huge_kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, target_vsize=100000, fee_rate=Decimal("0.006"))
         node.sendrawtransaction(huge_kindred_tx["hex"])
         assert huge_kindred_tx["txid"] in node.getrawmempool()
-        for i in range(len(ancestors) - 50):
-            assert ancestors[-(1+i)] not in node.getrawmempool()
+        last_remaining_ancestor = None
+        last_remaining_ancestor_txid = None
+        for i in range(len(ancestors)):
+            if ancestors[i] in node.getrawmempool():
+                last_remaining_ancestor = i
+                last_remaining_ancestor_txid = ancestors[i]
+        assert last_remaining_ancestor < 20
+
+        # Lastly, test having a direct conflict + requirement to kindred evict by
+        # RBFing the last ancestor from ancestors in the mempool with a 100kvB txn
+        assert last_remaining_ancestor_txid in node.getrawmempool()
+        # 0-index count, plus existing oversized child of ultimate parent
+        assert_equal(len(node.getrawmempool()), last_remaining_ancestor + 1 + 1)
+        huge_direct_and_kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=historical_utxos_spent[last_remaining_ancestor - 1], target_vsize=100000, fee_rate=Decimal("0.012"))
+        node.sendrawtransaction(huge_direct_and_kindred_tx["hex"])
+        # Direct RBF for one tx, and kindred eviction for the other, cluster is one smaller
+        assert huge_kindred_tx["txid"] not in node.getrawmempool()
+        assert last_remaining_ancestor_txid not in node.getrawmempool()
+        assert huge_direct_and_kindred_tx["txid"] in node.getrawmempool()
+        assert_equal(len(node.getrawmempool()), last_remaining_ancestor + 1 + 1 - 1)
 
         # TODO: verify that the size limits are also enforced.
         # TODO: add tests that exercise rbf, package submission, and package

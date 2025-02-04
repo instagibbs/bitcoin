@@ -967,6 +967,16 @@ void CTxMemPool::ChangeSet::StageRemoval(CTxMemPool::txiter it)
     m_to_remove.insert(it);
 }
 
+
+void CTxMemPool::ChangeSet::UnstageRemoval(CTxMemPool::txiter it)
+{
+    LOCK(m_pool->cs);
+    m_dependencies_processed = false;
+    const auto removed_feerate{m_pool->m_txgraph->GetIndividualFeerate(*it)};
+    m_pool->m_txgraph->AddTransaction(removed_feerate); // FIXME new entry... literally need to StageAddition step
+    m_to_remove.erase(it);
+}
+
 void CTxMemPool::ChangeSet::Apply()
 {
     LOCK(m_pool->cs);

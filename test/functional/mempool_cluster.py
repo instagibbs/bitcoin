@@ -57,9 +57,11 @@ class MempoolClusterTest(BitcoinTestFramework):
         assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, bad_tx["hex"])
 
         # But if transaction has non-ancestors that can be evicted, it will try an RBF
+        kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, fee=10)
+        print(ancestors)
+        print(kindred_tx["txid"])
         from pdb import set_trace
         set_trace()
-        kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=utxo_for_kindred_eviction, fee=10)
         node.sendrawtransaction(kindred_tx["hex"], 0)
 
         # TODO: verify that the size limits are also enforced.

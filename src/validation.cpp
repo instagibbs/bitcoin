@@ -1062,6 +1062,8 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         all_conflict_entries.insert(removed_entry);
     }
 
+    std::vector<CTxMemPoolEntry*> kindred_evicted_entries;
+
     do {
         std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
         Chunk popped_chunk = heap_refs.back();
@@ -1080,8 +1082,12 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
             // For logging purposes we skip
             if (all_conflict_entries.contains(static_cast<CTxMemPoolEntry*>(ref))) continue;
 
+            // FIXME we need to abandon these removals before finishing
+            // could use another level... or AddTransaction and dependencies
+            // as required
             graph->RemoveTransaction(*ref);
             kindred_evicted_txid.insert(entry->GetTx().GetHash());
+            kindred_evicted_entries.push_back(entry);
 
             if (!graph->IsOversized(/*main_only=*/false)) break;
         }
@@ -1096,9 +1102,23 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     }
 */
 
-    if (graph->IsOversized(/*main_only=*/false)) return std::nullopt;
+    // We need to put everything back in staging, in topological order
+    // FIXME none of this works.
+/*    for (size_t i{0}; i < kindred_evicted_entries.size(); ++i) {
+        const auto kindred_evicted_entry{kindred_evicted_entries[kindred_evicted_entries.size() - 1 - i]};
+        changeset.UnstageRemoval(*kindred_evicted_entry);
+    }*/
+    // FIXME this is going to crash; We should be doing proper addition/removals in general
+//    changeset.ProcessDependencies();
 
     kindred_evicted = m_pool.GetIterSet(kindred_evicted_txid);
+
+    for (const auto evicted_iter : kindred_evicted) {
+        changeset.UnstageRemoval(evicted_iter);
+    }
+
+    // Re-adding stuff means we have to do this to recompute dependencies
+    changeset.CheckMemPoolPolicyLimits();
 
     return kindred_evicted;
 }
@@ -1154,9 +1174,9 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
 
     // We're still busting limits; let's try kindred eviction
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
-
+        // FIXME try StageRemoval inside TryK? If we fail we toss changeset anyways
         const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
-        if (!kindred_eviction_candidates) {
+        if (!kindred_eviction_candidates || kindred_eviction_candidates->empty()) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         }
 
@@ -1166,10 +1186,12 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         }
 
         // Calculate all conflicting entries and enforce Rule #5.
+        // FIXME CountDistinctClusters seems to get really upset from TryKindredEviction if it returns empty and we let it through?
         if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
                                  strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
         }
+//        Assert(all_conflicts.size() >= ws.m_iters_conflicting.size());
 
         // Check if it's economically rational to mine this transaction rather than the ones it
         // replaces and pays for its own relay fees. Enforce Rules #3 and #4.

@@ -663,6 +663,9 @@ public:
 
         void StageRemoval(CTxMemPool::txiter it);
 
+        // Removes entry from m_to_remove, re-applies to underlying txgraph
+        void UnstageRemoval(CTxMemPool::txiter it);
+
         const CTxMemPool::setEntries& GetRemovals() const { return m_to_remove; }
 
         bool CheckMemPoolPolicyLimits();

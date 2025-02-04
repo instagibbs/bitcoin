@@ -1131,9 +1131,12 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     // Direct conflicts weren't enough; let's look for more potential conflicts
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
         const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
-        if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+        if (!kindred_eviction_candidates) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         }
+
+        // We should not break cluster limits if RBF is applied
+        Assume(m_subpackage.m_changeset->CheckMemPoolPolicyLimits());
 
         // Turned into an RBF attempt via kindred eviction
         m_subpackage.m_rbf = true;

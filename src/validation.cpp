@@ -1085,7 +1085,9 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
             // FIXME we need to abandon these removals before finishing
             // could use another level... or AddTransaction and dependencies
             // as required
-            graph->RemoveTransaction(*ref);
+            //graph->RemoveTransaction(*ref);
+            const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
+            changeset.StageRemoval(entry_it);
             kindred_evicted_txid.insert(entry->GetTx().GetHash());
             kindred_evicted_entries.push_back(entry);
 
@@ -1111,10 +1113,11 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     // FIXME this is going to crash; We should be doing proper addition/removals in general
 //    changeset.ProcessDependencies();
 
+    // FIXME we're already staging evicting, don't even need the list? Just a bool?
     kindred_evicted = m_pool.GetIterSet(kindred_evicted_txid);
 
     for (const auto evicted_iter : kindred_evicted) {
-        changeset.UnstageRemoval(evicted_iter);
+//        changeset.UnstageRemoval(evicted_iter);
     }
 
     // Re-adding stuff means we have to do this to recompute dependencies
@@ -1211,13 +1214,14 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
                                  strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
         }
 
+        /* We don't need this; removals have already been staged
         // Add all the to-be-removed transactions to the changeset.
         for (auto it : all_conflicts) {
             // No double-removal from changeset
             if (processed_conflicts.contains(it->GetSharedTx()->GetWitnessHash())) continue;
 
             m_subpackage.m_changeset->StageRemoval(it);
-        }
+        }*/
     }
 
     // Finally, with or without kindred eviction, do one single diagram check

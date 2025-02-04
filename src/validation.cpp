@@ -1497,7 +1497,6 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     }
 
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
-        // Check if the transaction would exceed the cluster size limit. In RBF cases already checked during diagram check.
         ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         return MempoolAcceptResult::Failure(ws.m_state);
     }

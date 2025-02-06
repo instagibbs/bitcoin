@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <arith_uint256.h>
+#include <policy/feerate.h>
 #include <util/feefrac.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
@@ -137,6 +138,69 @@ FUZZ_TARGET(feefrac_div_fallback)
     auto res = FeeFrac::DivFallback(num, den, round_down);
     assert(res == 0 || (res < 0) == is_negative);
     assert(Abs256(res) == quot_abs);
+}
+
+FUZZ_TARGET(feefrac_mul_div_cfeerate)
+{
+    // Verify the differential behavior of CFeeRate and FeeFrac::Evaluate
+    // by enforcing a absolute "fee gap" is not overly large.
+
+    // Construct a 32-bit signed multiplicand, a 64-bit signed multiplicand, a positive 31-bit
+    // divisor, and a rounding mode.
+    FuzzedDataProvider provider(buffer.data(), buffer.size());
+    auto mul32 = provider.ConsumeIntegralInRange<int32_t>(1, 100'000); // 100kVB max
+    auto mul64 = provider.ConsumeIntegralInRange<int64_t>(1, 50'000'000'000); // sats in fees
+    auto div = provider.ConsumeIntegralInRange<int32_t>(1, 100'000);
+    auto round_down = provider.ConsumeBool();
+
+    // Predict the sign of the overall result.
+    bool is_negative = ((mul32 < 0) && (mul64 > 0)) || ((mul32 > 0) && (mul64 < 0));
+    // Evaluate absolute value using arith_uint256. If the actual result is negative and we are
+    // rounding down or positive and we rounding up, the absolute value of the quotient is the
+    // rounded-up quotient of the absolute values.
+    auto prod_abs = Abs256(mul32) * Abs256(mul64);
+    auto div_abs = Abs256(div);
+    auto quot_abs = (is_negative == round_down) ?
+        (prod_abs + div_abs - 1) / div_abs :
+        prod_abs / div_abs;
+
+    // If the result is not representable by an int64_t, bail out.
+    if ((is_negative && quot_abs > MAX_ABS_INT64) || (!is_negative && quot_abs >= MAX_ABS_INT64)) {
+        // If 0 <= mul32 <= div, then the result is guaranteed to be representable. In the context
+        // of the Evaluate{Down,Up} calls below, this corresponds to 0 <= at_size <= feefrac.size.
+        assert(mul32 < 0 || mul32 > div);
+        return;
+    }
+
+    // Verify the behavior of FeeFrac::Mul + FeeFrac::Div.
+    auto res = FeeFrac::Div(FeeFrac::Mul(mul64, mul32), div, round_down);
+    assert(res == 0 || (res < 0) == is_negative);
+    assert(Abs256(res) == quot_abs);
+
+    // Verify the behavior of FeeFrac::MulFallback + FeeFrac::DivFallback.
+    auto res_fallback = FeeFrac::DivFallback(FeeFrac::MulFallback(mul64, mul32), div, round_down);
+    assert(res == res_fallback);
+
+    // FIXME scale value with value of args?
+    const auto allowed_gap{100};
+
+    // Verify the behavior of FeeFrac::Evaluate{Down,Up}.
+    if (mul32 > 0) {
+        auto res_fee = round_down ?
+            FeeFrac{mul64, div}.EvaluateFeeDown(mul32) :
+            FeeFrac{mul64, div}.EvaluateFeeUp(mul32);
+        assert(res == res_fee);
+
+        CFeeRate feerate(mul64, (uint32_t) div);
+        CAmount feerate_fee{feerate.GetFee(mul32)};
+        if (feerate_fee != res_fee) {
+            const auto fee_gap{feerate_fee - res_fee};
+            if (fee_gap < -allowed_gap || fee_gap > allowed_gap) {
+                assert(false);
+            }
+        }
+    }
+
 }
 
 FUZZ_TARGET(feefrac_mul_div)

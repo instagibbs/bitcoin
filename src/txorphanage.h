@@ -7,11 +7,13 @@
 
 #include <consensus/validation.h>
 #include <net.h>
+#include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <sync.h>
 #include <util/time.h>
 
+#include <algorithm>
 #include <map>
 #include <set>
 
@@ -19,6 +21,14 @@
 static constexpr auto ORPHAN_TX_EXPIRE_TIME{20min};
 /** Minimum time between orphan transactions expire time checks */
 static constexpr auto ORPHAN_TX_EXPIRE_INTERVAL{5min};
+/** The usage (weight) reserved for each peer, representing the amount of memory we are willing to
+ * allocate for orphanage space. This limit is per-peer, so the global upper bound on memory usage
+ * scales up with more peers. */
+static constexpr unsigned int RESERVED_ORPHAN_WEIGHT_PER_PEER{404'000};
+/** The maximum number of announcements across all peers, representing a computational upper bound
+ * on the number of evictions we might do at a time. This limit does not increase with more peers;
+ * as more peers are added, they are allocated a comparatively smaller portion of this global limit. */
+static constexpr unsigned int MAX_GLOBAL_ANNOUNCEMENTS{125'000};
 
 /** A class to track orphan transactions (failed on TX_MISSING_INPUTS)
  * Since we cannot distinguish orphans from bad transactions with
@@ -161,6 +171,23 @@ protected:
 
     /** Timestamp for the next scheduled sweep of expired orphans */
     NodeSeconds m_next_sweep{0s};
+
+    unsigned int GetPerPeerMaxUsage() const {
+        return RESERVED_ORPHAN_WEIGHT_PER_PEER;
+    }
+
+    unsigned int GetGlobalMaxUsage() const {
+        return std::max<unsigned int>(m_peer_orphanage_info.size() * RESERVED_ORPHAN_WEIGHT_PER_PEER, 1);
+    }
+
+    unsigned int GetPerPeerMaxAnnouncements() const {
+        if (m_peer_orphanage_info.empty()) return MAX_GLOBAL_ANNOUNCEMENTS;
+        return MAX_GLOBAL_ANNOUNCEMENTS / m_peer_orphanage_info.size();
+    }
+
+    unsigned int GetGlobalMaxAnnouncements() const {
+        return MAX_GLOBAL_ANNOUNCEMENTS;
+    }
 };
 
 #endif // BITCOIN_TXORPHANAGE_H

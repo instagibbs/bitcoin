@@ -188,6 +188,13 @@ protected:
     unsigned int GetGlobalMaxAnnouncements() const {
         return MAX_GLOBAL_ANNOUNCEMENTS;
     }
+
+    /** If ORPHAN_TX_EXPIRE_INTERVAL has elapsed since the last sweep, expire orphans older than
+     * ORPHAN_TX_EXPIRE_TIME. Called within LimitOrphans. */
+    unsigned int MaybeExpireOrphans();
+
+    /** If there are more than max_orphans total orphans, evict randomly until that is no longer the case. */
+    unsigned int MaybeTrimOrphans(unsigned int max_orphans, FastRandomContext& rng);
 };
 
 #endif // BITCOIN_TXORPHANAGE_H

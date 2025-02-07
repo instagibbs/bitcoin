@@ -11,6 +11,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <sync.h>
+#include <util/feefrac.h>
 #include <util/time.h>
 
 #include <algorithm>
@@ -121,7 +122,6 @@ public:
 
 protected:
     struct OrphanTx : public OrphanTxBase {
-        size_t list_pos;
     };
 
     /** Total usage (weight) of all entries in m_orphans. */
@@ -134,6 +134,8 @@ protected:
     /** Map from wtxid to orphan transaction record. Limited by
      *  -maxorphantx/DEFAULT_MAX_ORPHAN_TRANSACTIONS */
     std::map<Wtxid, OrphanTx> m_orphans;
+
+    using OrphanMap = decltype(m_orphans);
 
     struct PeerOrphanInfo {
         /** List of transactions that should be reconsidered: added to in AddChildrenToWorkSet,
@@ -148,10 +150,19 @@ protected:
          * m_total_orphan_size. If a peer is removed as an announcer, even if the orphan still
          * remains in the orphanage, this number will be decremented. */
         unsigned int m_total_usage{0};
+
+        /** Orphan transactions in vector for quick random eviction */
+        std::vector<OrphanMap::iterator> m_iter_list;
+
+        FeeFrac GetDoSScore(unsigned int peer_max_ann, unsigned int peer_max_mem) {
+            FeeFrac comp_score(m_iter_list.size(), peer_max_ann);
+            FeeFrac mem_score(m_total_usage, peer_max_mem);
+            return std::max<FeeFrac>(comp_score, mem_score);
+        }
     };
     std::map<NodeId, PeerOrphanInfo> m_peer_orphanage_info;
 
-    using OrphanMap = decltype(m_orphans);
+    using PeerMap = decltype(m_peer_orphanage_info);
 
     struct IteratorComparator
     {
@@ -165,9 +176,6 @@ protected:
     /** Index from the parents' COutPoint into the m_orphans. Used
      *  to remove orphan transactions from the m_orphans */
     std::map<COutPoint, std::set<OrphanMap::iterator, IteratorComparator>> m_outpoint_to_orphan_it;
-
-    /** Orphan transactions in vector for quick random eviction */
-    std::vector<OrphanMap::iterator> m_orphan_list;
 
     /** Timestamp for the next scheduled sweep of expired orphans */
     NodeSeconds m_next_sweep{0s};
@@ -195,6 +203,9 @@ protected:
 
     /** If there are more than max_orphans total orphans, evict randomly until that is no longer the case. */
     unsigned int MaybeTrimOrphans(unsigned int max_orphans, FastRandomContext& rng);
+
+    /** Returns whether the global announcement or memory limits have been reached. */
+    bool NeedsTrim() const;
 };
 
 #endif // BITCOIN_TXORPHANAGE_H

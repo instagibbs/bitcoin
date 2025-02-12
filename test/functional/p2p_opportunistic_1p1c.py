@@ -489,7 +489,7 @@ class PackageRelayTest(BitcoinTestFramework):
 
         peer_normal = node.add_p2p_connection(P2PInterface())
 
-        batch_size = 100
+        batch_size = 301
         num_peers = 10
         # Each of the num_peers peers creates a distinct set of orphans
         many_orphans = [self.create_small_orphan() for _ in range(batch_size * num_peers)]
@@ -503,7 +503,8 @@ class PackageRelayTest(BitcoinTestFramework):
                 peer_doser_batch.send_message(msg_tx(tx))
 
         # Something was evicted
-        self.wait_until(lambda: len(node.getorphantxs()) < batch_size * num_peers)
+        self.log.info("Waiting for the orphanage to completely fill in transaction count")
+        self.wait_until(lambda: len(node.getorphantxs()) == 3000, timeout=60*5, check_interval=5)
 
         self.log.info("Send an orphan from a non-DoSy peer. Its orphan should not be evicted.")
         low_fee_parent = self.create_tx_below_mempoolminfee(self.wallet)
@@ -519,10 +520,15 @@ class PackageRelayTest(BitcoinTestFramework):
         orphan_inv = CInv(t=MSG_WTX, h=int(orphan_wtxid, 16))
 
         # Wait for getdata
+        assert_equal(len(node.getorphantxs()), 3000)
         peer_normal.send_and_ping(msg_inv([orphan_inv]))
         node.bumpmocktime(NONPREF_PEER_TX_DELAY)
         peer_normal.wait_for_getdata([int(orphan_wtxid, 16)])
         peer_normal.send_and_ping(msg_tx(orphan_tx))
+
+        # Orphan has been entered and evicted something else
+        assert high_fee_child["txid"] in node.getorphantxs()
+        assert_equal(len(node.getorphantxs()), 3000)
 
         # Wait for parent request
         parent_txid_int = int(low_fee_parent["txid"], 16)
@@ -531,13 +537,18 @@ class PackageRelayTest(BitcoinTestFramework):
 
         shared_orphans = [self.create_small_orphan() for _ in range(batch_size)]
         self.log.info(f"Send the same {batch_size} orphans from {num_peers} DoSy peers (may take a while)")
-        for _ in range(num_peers):
-            peer_doser_shared = node.add_p2p_connection(P2PInterface())
+        peer_doser_shared = [node.add_p2p_connection(P2PInterface()) for _ in range(num_peers)]
+        for i in range(num_peers):
             for orphan in shared_orphans:
-                peer_doser_shared.send_message(msg_tx(orphan))
+                peer_doser_shared[i].send_message(msg_tx(orphan))
 
-        # Something was evicted; the orphanage does not contain all DoS orphans + the 1p1c child
-        self.wait_until(lambda: len(node.getorphantxs()) < batch_size * num_peers + len(shared_orphans) + 1)
+        # We sync peers to make sure we have processed as many orphans as possible
+        for peer_doser in peer_doser_shared:
+            peer_doser.sync_with_ping()
+
+        self.log.info("Check that orphan from normal peer still exists in orphanage")
+        assert high_fee_child["txid"] in node.getorphantxs()
+        assert_equal(len(node.getorphantxs()), 3000)
 
         self.log.info("Provide the orphan's parent. This 1p1c package should be successfully accepted.")
         peer_normal.send_and_ping(msg_tx(low_fee_parent["tx"]))

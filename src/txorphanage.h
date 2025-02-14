@@ -105,6 +105,14 @@ public:
         return peer_it == m_peer_orphanage_info.end() ? 0 : peer_it->second.m_total_usage;
     }
 
+    /** Number of orphans for which this peer is an announcer. If an orphan has multiple announcers,
+     * it is accounted for in each PeerOrphanInfo, so the total of all peers' AnnouncementsByPeer()
+     * may be larger than Size().. */
+    unsigned int AnnouncementsByPeer(NodeId peer) const {
+        auto peer_it = m_peer_orphanage_info.find(peer);
+        return peer_it == m_peer_orphanage_info.end() ? 0 : peer_it->second.m_iter_list.size();
+    }
+
     /** Check consistency between PeerOrphanInfo and m_orphans. Recalculate counters and ensure they
      * match what is cached. */
     void SanityCheck() const;
@@ -125,6 +133,8 @@ protected:
      *  -maxorphantx/DEFAULT_MAX_ORPHAN_TRANSACTIONS */
     std::map<Wtxid, OrphanTx> m_orphans;
 
+    using OrphanMap = decltype(m_orphans);
+
     struct PeerOrphanInfo {
         /** List of transactions that should be reconsidered: added to in AddChildrenToWorkSet,
          * removed from one-by-one with each call to GetTxToReconsider. The wtxids may refer to
@@ -138,10 +148,11 @@ protected:
          * m_total_orphan_size. If a peer is removed as an announcer, even if the orphan still
          * remains in the orphanage, this number will be decremented. */
         int64_t m_total_usage{0};
+
+        /** Orphan transactions announced by this peer. */
+        std::vector<OrphanMap::iterator> m_iter_list;
     };
     std::map<NodeId, PeerOrphanInfo> m_peer_orphanage_info;
-
-    using OrphanMap = decltype(m_orphans);
 
     struct IteratorComparator
     {

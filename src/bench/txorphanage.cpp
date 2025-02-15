@@ -43,9 +43,9 @@ static CTransactionRef MakeTransactionSpending(const std::vector<COutPoint>& out
     return MakeTransactionRef(tx);
 }
 
-static void OrphanageEvictionMany(benchmark::Bench& bench)
+static void OrphanageEvictionMany(int num_peers, benchmark::Bench& bench)
 {
-    NodeId NUM_PEERS{125};
+    NodeId NUM_PEERS{num_peers};
     unsigned int NUM_TRANSACTIONS(DEFAULT_MAX_ORPHAN_ANNOUNCEMENTS / NUM_PEERS);
 
     FastRandomContext det_rand{true};
@@ -60,11 +60,104 @@ static void OrphanageEvictionMany(benchmark::Bench& bench)
     bench.run([&]() NO_THREAD_SAFETY_ANALYSIS {
         TxOrphanage orphanage;
         for (unsigned int i{0}; i < NUM_TRANSACTIONS; ++i) {
-            orphanage.AddTx(txns.at(i), i % NUM_PEERS);
+            for (auto j{0}; j < NUM_PEERS; j++) {
+                orphanage.AddTx(txns.at(i), j);
+            }
         }
         assert(orphanage.Size() == NUM_TRANSACTIONS);
         orphanage.LimitOrphans(0, det_rand);
     });
+}
+
+static void OrphanageEvictionManyWithOnePeer(benchmark::Bench& bench)
+{
+    OrphanageEvictionMany(1, bench);
+}
+
+static void OrphanageEvictionManyWithManyPeers(benchmark::Bench& bench)
+{
+    OrphanageEvictionMany(125, bench);
+}
+
+static void OrphanageEvictionBlock(int num_peers, benchmark::Bench& bench)
+{
+    NodeId NUM_PEERS{num_peers};
+    unsigned int NUM_TRANSACTIONS(DEFAULT_MAX_ORPHAN_ANNOUNCEMENTS / NUM_PEERS);
+
+    FastRandomContext det_rand{true};
+
+    // Construct transactions to submit to orphanage: 1-in-1-out tiny transactions
+    std::vector<CTransactionRef> txns;
+    CBlock block;
+    txns.reserve(NUM_TRANSACTIONS);
+    for (unsigned int i{0}; i < NUM_TRANSACTIONS; ++i) {
+        txns.emplace_back(MakeTransactionSpending({}, /*num_outputs=*/1, det_rand));
+        block.vtx.push_back(txns.back());
+    }
+
+    bench.run([&]() NO_THREAD_SAFETY_ANALYSIS {
+        TxOrphanage orphanage;
+        for (unsigned int i{0}; i < NUM_TRANSACTIONS; ++i) {
+            for (auto j{0}; j < NUM_PEERS; j++) {
+                orphanage.AddTx(txns.at(i), j);
+            }
+        }
+        assert(orphanage.Size() == NUM_TRANSACTIONS);
+        orphanage.EraseForBlock(block);
+        assert(orphanage.Size() == 0);
+    });
+}
+
+static void OrphanageEvictionBlockOnePeer(benchmark::Bench& bench)
+{
+    OrphanageEvictionBlock(1, bench);
+}
+
+static void OrphanageEvictionBlockManyPeers(benchmark::Bench& bench)
+{
+    OrphanageEvictionBlock(125, bench);
+}
+
+static void OrphanageEvictionPeer(int num_peers, benchmark::Bench& bench)
+{
+    NodeId NUM_PEERS{num_peers};
+    unsigned int NUM_TRANSACTIONS(DEFAULT_MAX_ORPHAN_ANNOUNCEMENTS / NUM_PEERS);
+
+    FastRandomContext det_rand{true};
+
+    // Construct transactions to submit to orphanage: 1-in-1-out tiny transactions
+    std::vector<CTransactionRef> txns;
+    CBlock block;
+    txns.reserve(NUM_TRANSACTIONS);
+    for (unsigned int i{0}; i < NUM_TRANSACTIONS; ++i) {
+        txns.emplace_back(MakeTransactionSpending({}, /*num_outputs=*/1, det_rand));
+        block.vtx.push_back(txns.back());
+    }
+
+    bench.run([&]() NO_THREAD_SAFETY_ANALYSIS {
+        TxOrphanage orphanage;
+        for (unsigned int i{0}; i < NUM_TRANSACTIONS; ++i) {
+            for (auto j{0}; j < NUM_PEERS; j++) {
+                orphanage.AddTx(txns.at(i), j);
+            }
+        }
+        assert(orphanage.Size() == NUM_TRANSACTIONS);
+        for (auto i{0}; i < NUM_PEERS; i++) {
+            orphanage.EraseForPeer(i);
+        }
+        assert(orphanage.Size() == 0);
+    });
+}
+
+
+static void OrphanageEvictionPeerOne(benchmark::Bench& bench)
+{
+    OrphanageEvictionPeer(1, bench);
+}
+
+static void OrphanageEvictionPeerMany(benchmark::Bench& bench)
+{
+    OrphanageEvictionPeer(125, bench);
 }
 
 static void OrphanageWorksetMany(benchmark::Bench& bench)
@@ -131,7 +224,11 @@ static void OrphanageWorkset(benchmark::Bench& bench)
         orphanage.AddChildrenToWorkSet(*ptx_parent, det_rand);
     });
 }
-
-BENCHMARK(OrphanageEvictionMany, benchmark::PriorityLevel::HIGH);
+BENCHMARK(OrphanageEvictionBlockOnePeer, benchmark::PriorityLevel::HIGH);
+BENCHMARK(OrphanageEvictionBlockManyPeers, benchmark::PriorityLevel::HIGH);
+BENCHMARK(OrphanageEvictionPeerOne, benchmark::PriorityLevel::HIGH);
+BENCHMARK(OrphanageEvictionPeerMany, benchmark::PriorityLevel::HIGH);
+BENCHMARK(OrphanageEvictionManyWithOnePeer, benchmark::PriorityLevel::HIGH);
+BENCHMARK(OrphanageEvictionManyWithManyPeers, benchmark::PriorityLevel::HIGH);
 BENCHMARK(OrphanageWorksetMany, benchmark::PriorityLevel::HIGH);
 BENCHMARK(OrphanageWorkset, benchmark::PriorityLevel::HIGH);

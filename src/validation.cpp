@@ -1017,6 +1017,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     for (const auto& parent : parent_entries) {
         // Gather all ancestors (they can not be evicted)
         // N.B. we may not have access to this call in future?
+        // FIXME accumulate all_ancestors via GetAncestorsUnion
         auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
         all_ancestors.insert(ancestors.begin(), ancestors.end());
 

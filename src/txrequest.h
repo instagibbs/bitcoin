@@ -131,6 +131,9 @@ public:
     void ReceivedInv(NodeId peer, const GenTxid& gtxid, bool preferred,
         std::chrono::microseconds reqtime);
 
+    void ReceivedPackageInv(NodeId peer, const std::vector<GenTxid>& package_gtxids, bool preferred,
+        std::chrono::microseconds reqtime);
+
     /** Deletes all announcements for a given peer.
      *
      * It should be called when a peer goes offline.
@@ -160,7 +163,7 @@ public:
      *    out of order: if multiple dependent transactions are announced simultaneously by one peer, and end up
      *    being requested from them, the requests will happen in announcement order.
      */
-    std::vector<GenTxid> GetRequestable(NodeId peer, std::chrono::microseconds now,
+    std::vector<std::vector<GenTxid>> GetRequestable(NodeId peer, std::chrono::microseconds now,
         std::vector<std::pair<NodeId, GenTxid>>* expired = nullptr);
 
     /** Marks a transaction as requested, with a specified expiry.

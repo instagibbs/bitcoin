@@ -155,7 +155,7 @@ public:
      *  - m_recent_rejects_reconsiderable (if include_reconsiderable = true)
      *  - m_recent_confirmed_transactions
      *  */
-    bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable);
+    bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable, bool include_orphanage);
 
     void ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info);
     void DisconnectedPeer(NodeId nodeid);
@@ -165,8 +165,10 @@ public:
      */
     bool AddTxAnnouncement(NodeId peer, const GenTxid& gtxid, std::chrono::microseconds now);
 
+    bool AddPackageAnnouncement(NodeId peer, const std::vector<GenTxid>& gtxid, std::chrono::microseconds now);
+
     /** Get getdata requests to send. */
-    std::vector<GenTxid> GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+    std::vector<std::vector<GenTxid>> GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
 
     /** Marks a tx as ReceivedResponse in txrequest. */
     void ReceivedNotFound(NodeId nodeid, const std::vector<uint256>& txhashes);

@@ -43,7 +43,11 @@ bool TxDownloadManager::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid, std
 {
     return m_impl->AddTxAnnouncement(peer, gtxid, now);
 }
-std::vector<GenTxid> TxDownloadManager::GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
+bool TxDownloadManager::AddPackageAnnouncement(NodeId peer, const std::vector<GenTxid>& package_gtxids, std::chrono::microseconds now)
+{
+    return m_impl->AddPackageAnnouncement(peer, package_gtxids, now);
+}
+std::vector<std::vector<GenTxid>> TxDownloadManager::GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
 {
     return m_impl->GetRequestsToSend(nodeid, current_time);
 }
@@ -122,26 +126,28 @@ void TxDownloadManagerImpl::BlockDisconnected()
     RecentConfirmedTransactionsFilter().reset();
 }
 
-bool TxDownloadManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable)
+bool TxDownloadManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable, bool include_orphanage)
 {
     const uint256& hash = gtxid.GetHash();
 
-    if (gtxid.IsWtxid()) {
-        // Normal query by wtxid.
-        if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
-    } else {
-        // Never query by txid: it is possible that the transaction in the orphanage has the same
-        // txid but a different witness, which would give us a false positive result. If we decided
-        // not to request the transaction based on this result, an attacker could prevent us from
-        // downloading a transaction by intentionally creating a malleated version of it.  While
-        // only one (or none!) of these transactions can ultimately be confirmed, we have no way of
-        // discerning which one that is, so the orphanage can store multiple transactions with the
-        // same txid.
-        //
-        // While we won't query by txid, we can try to "guess" what the wtxid is based on the txid.
-        // A non-segwit transaction's txid == wtxid. Query this txid "casted" to a wtxid. This will
-        // help us find non-segwit transactions, saving bandwidth, and should have no false positives.
-        if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
+    if (include_orphanage) {
+        if (gtxid.IsWtxid()) {
+            // Normal query by wtxid.
+            if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
+        } else {
+            // Never query by txid: it is possible that the transaction in the orphanage has the same
+            // txid but a different witness, which would give us a false positive result. If we decided
+            // not to request the transaction based on this result, an attacker could prevent us from
+            // downloading a transaction by intentionally creating a malleated version of it.  While
+            // only one (or none!) of these transactions can ultimately be confirmed, we have no way of
+            // discerning which one that is, so the orphanage can store multiple transactions with the
+            // same txid.
+            //
+            // While we won't query by txid, we can try to "guess" what the wtxid is based on the txid.
+            // A non-segwit transaction's txid == wtxid. Query this txid "casted" to a wtxid. This will
+            // help us find non-segwit transactions, saving bandwidth, and should have no false positives.
+            if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
+        }
     }
 
     if (include_reconsiderable && RecentRejectsReconsiderableFilter().contains(hash)) return true;
@@ -183,7 +189,7 @@ bool TxDownloadManagerImpl::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid,
         if (auto orphan_tx{m_orphanage.GetTx(wtxid)}) {
             auto unique_parents{GetUniqueParents(*orphan_tx)};
             std::erase_if(unique_parents, [&](const auto& txid){
-                return AlreadyHaveTx(GenTxid::Txid(txid), /*include_reconsiderable=*/false);
+                return AlreadyHaveTx(GenTxid::Txid(txid), /*include_reconsiderable=*/false, /*include_orpahange=*/true);
             });
 
             // The missing parents may have all been rejected or accepted since the orphan was added to the orphanage.
@@ -202,7 +208,7 @@ bool TxDownloadManagerImpl::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid,
     }
 
     // If this is an inv received from a peer and we already have it, we can drop it.
-    if (AlreadyHaveTx(gtxid, /*include_reconsiderable=*/true)) return true;
+    if (AlreadyHaveTx(gtxid, /*include_reconsiderable=*/true, /*include_orpahange=*/true)) return true;
 
     auto it = m_peer_info.find(peer);
     if (it == m_peer_info.end()) return false;
@@ -225,6 +231,55 @@ bool TxDownloadManagerImpl::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid,
     if (overloaded) delay += OVERLOADED_PEER_TX_DELAY;
 
     m_txrequest.ReceivedInv(peer, gtxid, info.m_preferred, now + delay);
+
+    return false;
+}
+
+bool TxDownloadManagerImpl::AddPackageAnnouncement(NodeId peer, const std::vector<GenTxid>& package_gtxids, std::chrono::microseconds now)
+{
+    // 1P1C only for now
+    if (!Assume(package_gtxids.size() == 2)) return false;
+
+    // Child is the reference transaction in the package
+    const auto& child_gtxid{package_gtxids.back()};
+    const auto& parent_gtxid{package_gtxids.front()};
+
+    bool already_have_parent{AlreadyHaveTx(parent_gtxid, /*include_reconsiderable=*/true, /*include_orpahange=*/false)};
+    bool already_have_child{AlreadyHaveTx(child_gtxid, /*include_reconsiderable=*/true, /*include_orpahange=*/false)};
+
+    if (already_have_parent && already_have_child) {
+        // Nothing to be gained by fetching either tx
+        return true;
+    } else if (already_have_parent && !already_have_child) {
+        // Process child separately as per usual
+        return AddTxAnnouncement(peer, child_gtxid, now);
+    }
+
+    // Continue processing with 1P1C txrequest queueing
+    Assume(!already_have_parent && !already_have_child);
+
+    auto it = m_peer_info.find(peer);
+    if (it == m_peer_info.end()) return false;
+    const auto& info = it->second.m_connection_info;
+    // TODO count as two announcements? It's kinda just one
+    if (!info.m_relay_permissions && m_txrequest.Count(peer) >= MAX_PEER_TX_ANNOUNCEMENTS) {
+        // Too many queued announcements for this peer
+        return false;
+    }
+    // Decide the TxRequestTracker parameters for this announcement:
+    // - "preferred": if fPreferredDownload is set (= outbound, or NetPermissionFlags::NoBan permission)
+    // - "reqtime": current time plus delays for:
+    //   - NONPREF_PEER_TX_DELAY for announcements from non-preferred connections
+    //   - TXID_RELAY_DELAY for txid announcements while wtxid peers are available
+    //   - OVERLOADED_PEER_TX_DELAY for announcements from peers which have at least
+    //     MAX_PEER_TX_REQUEST_IN_FLIGHT requests in flight (and don't have NetPermissionFlags::Relay).
+    auto delay{0us};
+    if (!info.m_preferred) delay += NONPREF_PEER_TX_DELAY;
+    // TODO add delay when not using sender initiated? Could allow longer expiry since not worrying about churn?
+    const bool overloaded = !info.m_relay_permissions && m_txrequest.CountInFlight(peer) >= MAX_PEER_TX_REQUEST_IN_FLIGHT;
+    if (overloaded) delay += OVERLOADED_PEER_TX_DELAY;
+
+    m_txrequest.ReceivedPackageInv(peer, package_gtxids, info.m_preferred, now + delay);
 
     return false;
 }
@@ -267,25 +322,53 @@ bool TxDownloadManagerImpl::MaybeAddOrphanResolutionCandidate(const std::vector<
     return true;
 }
 
-std::vector<GenTxid> TxDownloadManagerImpl::GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
+std::vector<std::vector<GenTxid>> TxDownloadManagerImpl::GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
 {
-    std::vector<GenTxid> requests;
+    std::vector<std::vector<GenTxid>> requests;
     std::vector<std::pair<NodeId, GenTxid>> expired;
     auto requestable = m_txrequest.GetRequestable(nodeid, current_time, &expired);
     for (const auto& entry : expired) {
         LogDebug(BCLog::NET, "timeout of inflight %s %s from peer=%d\n", entry.second.IsWtxid() ? "wtx" : "tx",
             entry.second.GetHash().ToString(), entry.first);
     }
-    for (const GenTxid& gtxid : requestable) {
-        if (!AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false)) {
-            LogDebug(BCLog::NET, "Requesting %s %s peer=%d\n", gtxid.IsWtxid() ? "wtx" : "tx",
-                gtxid.GetHash().ToString(), nodeid);
-            requests.emplace_back(gtxid);
-            m_txrequest.RequestedTx(nodeid, gtxid.GetHash(), current_time + GETDATA_TX_INTERVAL);
+    for (const auto& package_gtxids : requestable) {
+        if (!Assume(!package_gtxids.empty())) continue;
+        
+        if (package_gtxids.size() == 2) {
+            // We don't look in orphanage since we're doing sender-initiated protocol here
+            bool have_parent{AlreadyHaveTx(package_gtxids.front(), /*include_reconsiderable=*/false, /*include_orpahange=*/false)};
+            bool have_child{AlreadyHaveTx(package_gtxids.back(), /*include_reconsiderable=*/false, /*include_orpahange=*/false)};
+
+            // if neither parent or child already have, send off tuple request
+            if (!have_parent && !have_child) {
+                LogDebug(BCLog::NET, "Requesting 1p1c package %s %s peer=%d\n",
+                    package_gtxids.front().GetHash().ToString(), package_gtxids.back().GetHash().ToString(), nodeid);
+                requests.emplace_back(package_gtxids);
+                // Only track the child request for this peer FIXME is this right?
+                m_txrequest.RequestedTx(nodeid, package_gtxids.back().GetHash(), current_time + GETDATA_TX_INTERVAL);
+            } else if (have_parent && !have_child) {
+                // if parent known but not child, send off child req and forget parent
+                requests.push_back(std::vector<GenTxid>{package_gtxids.back()});
+                m_txrequest.RequestedTx(nodeid, package_gtxids.back().GetHash(), current_time + GETDATA_TX_INTERVAL);
+                m_txrequest.ForgetTxHash(package_gtxids.front().GetHash());
+            } else {
+                // else forget both
+                m_txrequest.ForgetTxHash(package_gtxids.front().GetHash());
+                m_txrequest.ForgetTxHash(package_gtxids.back().GetHash());
+            }
         } else {
-            // We have already seen this transaction, no need to download. This is just a belt-and-suspenders, as
-            // this should already be called whenever a transaction becomes AlreadyHaveTx().
-            m_txrequest.ForgetTxHash(gtxid.GetHash());
+            Assert(package_gtxids.size() == 1);
+            const auto& gtxid{package_gtxids.back()};
+            if (!AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false, /*include_orpahange=*/true)) {
+                LogDebug(BCLog::NET, "Requesting %s %s peer=%d\n", gtxid.IsWtxid() ? "wtx" : "tx",
+                    gtxid.GetHash().ToString(), nodeid);
+                requests.emplace_back(std::vector<GenTxid>{gtxid});
+                m_txrequest.RequestedTx(nodeid, gtxid.GetHash(), current_time + GETDATA_TX_INTERVAL);
+            } else {
+                // We have already seen this transaction, no need to download. This is just a belt-and-suspenders, as
+                // this should already be called whenever a transaction becomes AlreadyHaveTx().
+                m_txrequest.ForgetTxHash(gtxid.GetHash());
+            }
         }
     }
     return requests;
@@ -398,7 +481,7 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
                 // Exclude m_lazy_recent_rejects_reconsiderable: the missing parent may have been
                 // previously rejected for being too low feerate. This orphan might CPFP it.
                 std::erase_if(unique_parents, [&](const auto& txid){
-                    return AlreadyHaveTx(GenTxid::Txid(txid), /*include_reconsiderable=*/false);
+                    return AlreadyHaveTx(GenTxid::Txid(txid), /*include_reconsiderable=*/false, /*include_orpahange=*/true);
                 });
                 const auto now{GetTime<std::chrono::microseconds>()};
                 const auto& wtxid = ptx->GetWitnessHash();
@@ -535,7 +618,7 @@ std::pair<bool, std::optional<PackageToValidate>> TxDownloadManagerImpl::Receive
     // already; and an adversary can already relay us old transactions
     // (older than our recency filter) if trying to DoS us, without any need
     // for witness malleation.
-    if (AlreadyHaveTx(GenTxid::Wtxid(wtxid), /*include_reconsiderable=*/false)) {
+    if (AlreadyHaveTx(GenTxid::Wtxid(wtxid), /*include_reconsiderable=*/false, /*include_orpahange=*/true)) {
         // If a tx is detected by m_lazy_recent_rejects it is ignored. Because we haven't
         // submitted the tx to our mempool, we won't have computed a DoS
         // score for it or determined exactly why we consider it invalid.

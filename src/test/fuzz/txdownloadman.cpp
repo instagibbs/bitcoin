@@ -383,7 +383,7 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                 // TxDownloadManager should not be telling us to request things we already have.
                 // Exclude m_lazy_recent_rejects_reconsiderable because it may request low-feerate parent of orphan.
                 for (const auto& gtxid : getdata_requests) {
-                    Assert(!txdownload_impl.AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false));
+                    Assert(!txdownload_impl.AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false, /*include_orpahange=*/true));
                 }
             },
             [&] {
@@ -395,7 +395,7 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                 // The only combination that doesn't make sense is validate both tx and package.
                 Assert(!(should_validate && maybe_package.has_value()));
                 if (should_validate) {
-                    Assert(!txdownload_impl.AlreadyHaveTx(GenTxid::Wtxid(rand_tx->GetWitnessHash()), /*include_reconsiderable=*/true));
+                    Assert(!txdownload_impl.AlreadyHaveTx(GenTxid::Wtxid(rand_tx->GetWitnessHash()), /*include_reconsiderable=*/true, /*include_orpahange=*/true));
                 }
                 if (maybe_package.has_value()) {
                     CheckPackageToValidate(*maybe_package, rand_peer);
@@ -424,7 +424,7 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                     // However, if there was a non-null tx in the workset, HaveMoreWork should have
                     // returned true.
                     Assert(expect_work);
-                    Assert(txdownload_impl.AlreadyHaveTx(GenTxid::Wtxid(ptx->GetWitnessHash()), /*include_reconsiderable=*/false));
+                    Assert(txdownload_impl.AlreadyHaveTx(GenTxid::Wtxid(ptx->GetWitnessHash()), /*include_reconsiderable=*/false, /*include_orpahange=*/true));
                     // Presumably we have validated this tx. Use "missing inputs" to keep it in the
                     // orphanage longer. Later iterations might call MempoolAcceptedTx or
                     // MempoolRejectedTx with a different error.

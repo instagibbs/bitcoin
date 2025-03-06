@@ -13,10 +13,15 @@ from test_framework.mempool_util import (
 )
 from test_framework.messages import (
     CInv,
+    COIN,
+    CPkgInv,
     CTxInWitness,
     MAX_BIP125_RBF_SEQUENCE,
     MSG_WTX,
+    msg_feefilter,
     msg_inv,
+    msg_pkginv,
+    msg_pkgtxns,
     msg_tx,
     tx_from_hex,
 )
@@ -72,6 +77,42 @@ class PackageRelayTest(BitcoinTestFramework):
         assert_greater_than(self.nodes[0].getmempoolinfo()["mempoolminfee"], FEERATE_1SAT_VB)
 
         return wallet.create_self_transfer(fee_rate=FEERATE_1SAT_VB, sequence=self.sequence, confirmed_only=True)
+
+    @cleanup
+    def test_basic_sender_initiated(self):
+        node = self.nodes[0]
+        self.log.info("Check that opportunistic 1p1c logic works when child is received before parent")
+
+        low_fee_parent = self.create_tx_below_mempoolminfee(self.wallet)
+        high_fee_child = self.wallet.create_self_transfer(utxo_to_spend=low_fee_parent["new_utxo"], fee_rate=20*FEERATE_1SAT_VB)
+
+        peer_sender = node.add_p2p_connection(P2PInterface())
+
+        # add peer who INVs and stalls out
+
+        # send a feefilter just above the parent tx to trigger package inv relay
+        peer_receiver = node.add_p2p_connection(P2PInterface())
+        peer_receiver.send_and_ping(msg_feefilter(int(node.getmempoolinfo()['mempoolminfee'] * COIN) + 1))
+
+        # Peer sends CPkgInv and waits for getpackagetxns request
+        low_parent_wtxid_int = int(low_fee_parent["tx"].getwtxid(), 16)
+        high_child_wtxid_int = int(high_fee_child["tx"].getwtxid(), 16)
+
+        peer_sender.send_and_ping(msg_pkginv([CPkgInv(t=MSG_WTX, h1=low_parent_wtxid_int, h2=high_child_wtxid_int)]))
+
+        # Vector of a pair of hashes expected
+        peer_sender.wait_for_getpkgtxns([[low_parent_wtxid_int, high_child_wtxid_int]])
+
+        # Respond with whole package
+        peer_sender.send_and_ping(msg_pkgtxns([low_fee_parent["tx"], high_fee_child["tx"]]))
+
+        assert low_fee_parent["txid"] in node.getrawmempool()
+        assert high_fee_child["txid"] in node.getrawmempool()
+
+        # peer_receiver should receive a PkgInv, not an Inv
+        # and peer_sender should not be told at all about it
+
+        node.disconnect_p2ps()
 
     @cleanup
     def test_basic_child_then_parent(self):
@@ -388,6 +429,8 @@ class PackageRelayTest(BitcoinTestFramework):
         self.generate(self.wallet, 20)
 
         fill_mempool(self, node)
+
+        self.test_basic_sender_initiated()
 
         self.log.info("Check opportunistic 1p1c logic when parent (txid != wtxid) is received before child")
         self.test_basic_parent_then_child(self.wallet)

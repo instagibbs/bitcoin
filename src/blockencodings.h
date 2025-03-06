@@ -53,6 +53,19 @@ public:
     }
 };
 
+class PackageTransactions {
+public:
+    // A PackageTransactions message
+    std::vector<CTransactionRef> txn;
+
+    PackageTransactions() = default;
+
+    SERIALIZE_METHODS(PackageTransactions, obj)
+    {
+        READWRITE(TX_WITH_WITNESS(Using<VectorFormatter<TransactionCompression>>(obj.txn)));
+    }
+};
+
 class BlockTransactions {
 public:
     // A BlockTransactions message

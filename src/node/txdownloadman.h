@@ -139,8 +139,10 @@ public:
      * Returns true if this was a dropped inv (p2p_inv=true and we already have the tx), false otherwise. */
     bool AddTxAnnouncement(NodeId peer, const GenTxid& gtxid, std::chrono::microseconds now);
 
+    bool AddPackageAnnouncement(NodeId peer, const std::vector<GenTxid>& package_gtxids, std::chrono::microseconds now);
+
     /** Get getdata requests to send. */
-    std::vector<GenTxid> GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+    std::vector<std::vector<GenTxid>> GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
 
     /** Should be called when a notfound for a tx has been received. */
     void ReceivedNotFound(NodeId nodeid, const std::vector<uint256>& txhashes);

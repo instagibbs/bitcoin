@@ -83,6 +83,49 @@ std::string CInv::ToString() const
     }
 }
 
+CPkgInv::CPkgInv()
+{
+    type = 0;
+    hash1.SetNull();
+    hash2.SetNull();
+}
+
+CPkgInv::CPkgInv(uint32_t typeIn, const uint256& hashIn1, const uint256& hashIn2) : type(typeIn), hash1(hashIn1), hash2(hashIn2) {}
+
+// Only sorts on the representative hash
+bool operator<(const CPkgInv& a, const CPkgInv& b)
+{
+    return (a.type < b.type || (a.type == b.type && a.hash2 < b.hash2));
+}
+
+std::string CPkgInv::GetMessageType() const
+{
+    std::string cmd;
+    if (type & MSG_WITNESS_FLAG)
+        cmd.append("witness-");
+    int masked = type & MSG_TYPE_MASK;
+    switch (masked)
+    {
+    case MSG_TX:             return cmd.append(NetMsgType::TX);
+    // WTX is not a message type, just an inv type
+    case MSG_WTX:            return cmd.append("wtx");
+    case MSG_BLOCK:          return cmd.append(NetMsgType::BLOCK);
+    case MSG_FILTERED_BLOCK: return cmd.append(NetMsgType::MERKLEBLOCK);
+    case MSG_CMPCT_BLOCK:    return cmd.append(NetMsgType::CMPCTBLOCK);
+    default:
+        throw std::out_of_range(strprintf("CPkgInv::GetMessageType(): type=%d unknown type", type));
+    }
+}
+
+std::string CPkgInv::ToString() const
+{
+    try {
+        return strprintf("%s %s %s", GetMessageType(), hash1.ToString(), hash2.ToString());
+    } catch(const std::out_of_range &) {
+        return strprintf("0x%08x %s %s", type, hash1.ToString(), hash2.ToString());
+    }
+}
+
 /**
  * Convert a service flag (NODE_*) to a human readable string.
  * It supports unknown service flags which will be returned as "UNKNOWN[...]".

@@ -364,6 +364,43 @@ class CAddress:
         return ("CAddress(nServices=%i net=%s addr=%s port=%i)"
                 % (self.nServices, self.ADDRV2_NET_NAME[self.net], self.ip, self.port))
 
+class CPkgInv:
+    __slots__ = ("hash1", "hash2", "type")
+
+    typemap = {
+        0: "Error",
+        MSG_TX: "TX",
+        MSG_BLOCK: "Block",
+        MSG_TX | MSG_WITNESS_FLAG: "WitnessTx",
+        MSG_BLOCK | MSG_WITNESS_FLAG: "WitnessBlock",
+        MSG_FILTERED_BLOCK: "filtered Block",
+        MSG_CMPCT_BLOCK: "CompactBlock",
+        MSG_WTX: "WTX",
+    }
+
+    def __init__(self, t=0, h1=0, h2=0):
+        self.type = t
+        self.hash1 = h1
+        self.hash2 = h2
+
+    def deserialize(self, f):
+        self.type = int.from_bytes(f.read(4), "little")
+        self.hash1 = deser_uint256(f)
+        self.hash2 = deser_uint256(f)
+
+    def serialize(self):
+        r = b""
+        r += self.type.to_bytes(4, "little")
+        r += ser_uint256(self.hash1)
+        r += ser_uint256(self.hash2)
+        return r
+
+    def __repr__(self):
+        return "CPkgInv(type=%s hash1=%064x, hash2=%064x)" \
+            % (self.typemap[self.type], self.hash1, self.hash2)
+
+    def __eq__(self, other):
+        return isinstance(other, CPkgInv) and self.hash1 == other.hash1 and self.hash2 == other.hash2 and self.type == other.type
 
 class CInv:
     __slots__ = ("hash", "type")
@@ -1230,6 +1267,24 @@ class msg_sendaddrv2:
     def __repr__(self):
         return "msg_sendaddrv2()"
 
+class msg_pkginv:
+    __slots__ = ("pkginv",)
+    msgtype = b"pkginv"
+
+    def __init__(self, pkginv=None):
+        if pkginv is None:
+            self.pkginv = []
+        else:
+            self.pkginv = pkginv
+
+    def deserialize(self, f):
+        self.pkginv = deser_vector(f, CPkgInv)
+
+    def serialize(self):
+        return ser_vector(self.pkginv)
+
+    def __repr__(self):
+        return "msg_pkginv(pkginv=%s)" % (repr(self.pkginv))
 
 class msg_inv:
     __slots__ = ("inv",)
@@ -1267,6 +1322,39 @@ class msg_getdata:
     def __repr__(self):
         return "msg_getdata(inv=%s)" % (repr(self.inv))
 
+class msg_getpkgtxns:
+    __slots__ = ("pkginv",)
+    msgtype = b"getpkgtxns"
+
+    def __init__(self, pkginv=None):
+        self.pkginv = pkginv if pkginv is not None else []
+
+    def deserialize(self, f):
+        self.pkginv = deser_vector(f, CPkgInv)
+
+    def serialize(self):
+        return ser_vector(self.pkginv)
+
+    def __repr__(self):
+        return "msg_getpkgtxns(pkginv=%s)" % (repr(self.pkginv))
+
+class msg_pkgtxns:
+    __slots__ = ("txn",)
+    msgtype = b"pkgtxns"
+
+    def __init__(self, txn=None):
+        self.txn = txn if txn is not None else []
+
+    def deserialize(self, f):
+        self.txn = deser_vector(f, CTransaction)
+
+    def serialize(self):
+        r = b""
+        r += ser_vector(self.txn, 'serialize_with_witness')
+        return r
+
+    def __repr__(self):
+        return "msg_pkgtxns(txn=%s)" % (repr(self.txn))
 
 class msg_getblocks:
     __slots__ = ("locator", "hashstop")
@@ -1291,6 +1379,23 @@ class msg_getblocks:
         return "msg_getblocks(locator=%s hashstop=%064x)" \
             % (repr(self.locator), self.hashstop)
 
+class msg_packagetxns:
+    __slots__ = ("packagetxns",)
+    msgtype = b"packagetxns"
+
+    def __init__(self, tx1=None, tx2=None):
+        self.packagetxns = [tx1, tx2]
+
+    def deserialize(self, f):
+        self.packagetxns = deser_vector(f, CTransaction)
+
+    def serialize(self):
+        r = b""
+        r += ser_vector(self.packagetxns, "serialize_with_witness")
+        return r
+
+    def __repr__(self):
+        return "msg_packagetxns(tx=%s)" % (repr(self.tx))
 
 class msg_tx:
     __slots__ = ("tx",)

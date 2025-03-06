@@ -92,6 +92,8 @@ static constexpr auto PING_INTERVAL{2min};
 static const unsigned int MAX_LOCATOR_SZ = 101;
 /** The maximum number of entries in an 'inv' protocol message */
 static const unsigned int MAX_INV_SZ = 50000;
+/** The maximum number of entries in a 'pkginv' protocol message */
+static const unsigned int MAX_PKG_INV_SZ = 5000;
 /** Limit to avoid sending big packets. Not used in processing incoming GETDATA for compatibility */
 static const unsigned int MAX_GETDATA_SZ = 1000;
 /** Number of blocks that can be requested at any given time from a single peer. */
@@ -3887,6 +3889,52 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::PACKAGEINV) {
+        std::vector<CPkgInv> package_invs;
+        vRecv >> package_invs;
+        if (package_invs.size() > MAX_PKG_INV_SZ)
+        {
+            Misbehaving(*peer, strprintf("inv message size = %u", package_invs.size()));
+            return;
+        }
+
+        if (RejectIncomingTxs(pfrom)) {
+            LogDebug(BCLog::NET, "transaction pkginv sent in violation of protocol, %s\n", pfrom.DisconnectMsg(fLogIPs));
+            pfrom.fDisconnect = true;
+            return;
+        }
+
+        LOCK2(cs_main, m_tx_download_mutex);
+
+        if (interruptMsgProc) return;
+
+        if (m_chainman.IsInitialBlockDownload()) return;
+
+        const auto current_time{GetTime<std::chrono::microseconds>()};
+
+        for (CPkgInv& package_inv : package_invs) {
+            if (!package_inv.IsMsgWtx()) {
+                // TODO disconnect peer etc, decide what flags necessary
+                return;
+            }
+
+            // Each inv has two hashes representing the parent and child, respectively
+            const auto& parent_wtxid = package_inv.hash1;
+            const auto& child_wtxid = package_inv.hash2;
+
+            const GenTxid parent_gtxid = GenTxid::Wtxid(parent_wtxid);
+            const GenTxid child_gtxid = GenTxid::Wtxid(child_wtxid);
+            AddKnownTx(*peer, parent_wtxid);
+            AddKnownTx(*peer, child_wtxid);
+
+            // Potentially queue package announcement, indexed by child wtxid
+            const bool fAlreadyHave{m_txdownloadman.AddPackageAnnouncement(pfrom.GetId(), {parent_gtxid, child_gtxid}, current_time)};
+            LogDebug(BCLog::NET, "got inv: %s  %s peer=%d\n", package_inv.ToString(), fAlreadyHave ? "have" : "new", pfrom.GetId());
+        }
+
+        return;
+    }
+
     if (msg_type == NetMsgType::INV) {
         std::vector<CInv> vInv;
         vRecv >> vInv;
@@ -3998,6 +4046,80 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             peer->m_getdata_requests.insert(peer->m_getdata_requests.end(), vInv.begin(), vInv.end());
             ProcessGetData(pfrom, *peer, interruptMsgProc);
         }
+
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETPKGTXNS) {
+        unsigned int num_pkgs = ReadCompactSize(vRecv);
+        // FIXME if asking for one tx, could just getdata?
+        // FIXME we are likely asking for lots of parent
+        // duplicates?
+        if (num_pkgs == 0) return;
+        if (num_pkgs > 100) {
+            LogDebug(BCLog::NET, "\ngetpkgtxns exceeds allowed size, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        std::vector<CPkgInv> pkgs_requested;
+        pkgs_requested.resize(num_pkgs);
+        for (unsigned int n = 0; n < num_pkgs; ++n) {
+            vRecv >> pkgs_requested[n];
+        }
+
+        // Sends off N package messages, odd?
+        {
+            LOCK(peer->m_getdata_requests_mutex);
+
+            for (unsigned int n = 0; n < num_pkgs; ++n) {
+                std::vector<Wtxid> txns_requested{Wtxid::FromUint256(pkgs_requested[n].hash1), Wtxid::FromUint256(pkgs_requested[n].hash2)};
+                PackageTransactions pkgtxns;
+                for (const auto& wtxid : txns_requested) {
+                    auto ptx = FindTxForGetData(*peer->GetTxRelay(), GenTxid::Wtxid(wtxid));
+                    if (ptx) {
+                        pkgtxns.txn.push_back(ptx);
+                    } else {
+                        // A getpkgtxns request is all or nothing; if any of the transactions are
+                        // unavailable, return a notfound for the full request.
+                        break;
+                    }
+                }
+                if (pkgtxns.txn.size() == txns_requested.size()) {
+                    MakeAndPushMessage(pfrom, NetMsgType::PKGTXNS, pkgtxns);
+                } else {
+                    std::vector<CInv> notfound{{CInv{MSG_PKGTXNS, txns_requested.back()}}};
+                    MakeAndPushMessage(pfrom, NetMsgType::NOTFOUND, notfound);
+                }
+            }
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::PKGTXNS) {
+        if (RejectIncomingTxs(pfrom)) {
+            LogDebug(BCLog::NET, "\npkgtxns sent in violation of protocol peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+
+        PackageTransactions package_txns;
+        vRecv >> package_txns;
+
+        if (package_txns.txn.size() != 2) {
+            LogDebug(BCLog::NET, "\npkgtxns exceeds allowed size, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+
+        // Single peer offering two txns
+        node::PackageToValidate package_to_validate{package_txns.txn[0], package_txns.txn[1], pfrom.GetId(), pfrom.GetId()};
+
+        LOCK2(cs_main, m_tx_download_mutex);
+
+        const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_txns.txn, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
+        LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_txns.txn.back()->ToString(),
+                     package_result.m_state.IsValid() ? "package accepted" : "package rejected");
+        ProcessPackageResult(package_to_validate, package_result);
 
         return;
     }
@@ -5657,6 +5779,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Message: inventory
         //
         std::vector<CInv> vInv;
+        std::vector<CPkgInv> package_invs;
         {
             LOCK(peer->m_block_inv_mutex);
             vInv.reserve(std::max<size_t>(peer->m_blocks_for_inv_relay.size(), INVENTORY_BROADCAST_TARGET));
@@ -5766,12 +5889,46 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                             continue;
                         }
                         if (tx_relay->m_bloom_filter && !tx_relay->m_bloom_filter->IsRelevantAndUpdate(*txinfo.tx)) continue;
-                        // Send
-                        vInv.push_back(inv);
+
+
+
+                        // FIXME find better way to screen tx
+                        // This also doesn't actually help if parent is above mempoolminfee
+                        // during package RBF. We ideally should be detecting *chunks* and propagating these
+                        // or use TRUC as heurstic or???
+                        bool package_inv{false};
+                        {
+                            LOCK(m_mempool.cs);
+
+                            // Send package inv if useful
+                            const auto entry{m_mempool.GetEntry(txinfo.tx->GetHash())};
+                            Assume(entry);
+
+                            if (entry->GetCountWithAncestors() == 2) {
+                                const auto& parent{*entry->GetMemPoolParents().begin()};
+                                auto parent_txinfo = m_mempool.info(GenTxid::Txid(parent.get().GetSharedTx()->GetHash()));
+                                if (parent_txinfo.fee < filterrate.GetFee(parent_txinfo.vsize)) {
+                                    // queue package inv
+                                    package_invs.emplace_back(MSG_WTX, parent.get().GetTx().GetWitnessHash(), txinfo.tx->GetWitnessHash());
+                                    package_inv = true;
+                                }
+                            }
+                        }
+
                         nRelayedTransactions++;
-                        if (vInv.size() == MAX_INV_SZ) {
-                            MakeAndPushMessage(*pto, NetMsgType::INV, vInv);
-                            vInv.clear();
+
+                        // Send
+                        if (package_inv) {
+                             if (package_invs.size() == MAX_INV_SZ) {
+                                MakeAndPushMessage(*pto, NetMsgType::PACKAGEINV, package_invs);
+                                vInv.clear();
+                            }
+                        } else {
+                            vInv.push_back(inv);
+                            if (vInv.size() == MAX_INV_SZ) {
+                                MakeAndPushMessage(*pto, NetMsgType::INV, vInv);
+                                vInv.clear();
+                            }
                         }
                         tx_relay->m_tx_inventory_known_filter.insert(hash);
                     }
@@ -5781,8 +5938,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     tx_relay->m_last_inv_sequence = m_mempool.GetSequence();
                 }
         }
-        if (!vInv.empty())
+        if (!vInv.empty()) {
             MakeAndPushMessage(*pto, NetMsgType::INV, vInv);
+        }
+
+        if (!package_invs.empty()) {
+            MakeAndPushMessage(*pto, NetMsgType::PACKAGEINV, package_invs);
+        }
 
         // Detect whether we're stalling
         auto stalling_timeout = m_block_stalling_timeout.load();
@@ -5855,6 +6017,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Message: getdata (blocks)
         //
         std::vector<CInv> vGetData;
+        std::vector<CPkgInv> getpackagetxns;
         if (CanServeBlocks(*peer) && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
             std::vector<const CBlockIndex*> vToDownload;
             NodeId staller = -1;
@@ -5895,17 +6058,33 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         {
             LOCK(m_tx_download_mutex);
-            for (const GenTxid& gtxid : m_txdownloadman.GetRequestsToSend(pto->GetId(), current_time)) {
-                vGetData.emplace_back(gtxid.IsWtxid() ? MSG_WTX : (MSG_TX | GetFetchFlags(*peer)), gtxid.GetHash());
-                if (vGetData.size() >= MAX_GETDATA_SZ) {
-                    MakeAndPushMessage(*pto, NetMsgType::GETDATA, vGetData);
-                    vGetData.clear();
+            for (const std::vector<GenTxid>& gtxids : m_txdownloadman.GetRequestsToSend(pto->GetId(), current_time)) {
+                if (gtxids.size() == 2) {
+                    // Fire off 1P1C getpackagetxn message
+                    getpackagetxns.emplace_back(MSG_WTX, gtxids.front().GetHash(), gtxids.back().GetHash());
+                    if (getpackagetxns.size() >= MAX_GETDATA_SZ) {
+                        MakeAndPushMessage(*pto, NetMsgType::GETPKGTXNS, getpackagetxns);
+                        getpackagetxns.clear();
+                    }
+                } else {
+                    Assert(gtxids.size() == 1);
+                    const auto gtxid{gtxids.front()};
+                    vGetData.emplace_back(gtxid.IsWtxid() ? MSG_WTX : (MSG_TX | GetFetchFlags(*peer)), gtxid.GetHash());
+                    if (vGetData.size() >= MAX_GETDATA_SZ) {
+                        MakeAndPushMessage(*pto, NetMsgType::GETDATA, vGetData);
+                        vGetData.clear();
+                    }
                 }
             }
         }
 
         if (!vGetData.empty())
             MakeAndPushMessage(*pto, NetMsgType::GETDATA, vGetData);
+
+        if (!getpackagetxns.empty()) {
+            MakeAndPushMessage(*pto, NetMsgType::GETPKGTXNS, getpackagetxns);
+        }
+
     } // release cs_main
     MaybeSendFeefilter(*pto, *peer, current_time);
     return true;

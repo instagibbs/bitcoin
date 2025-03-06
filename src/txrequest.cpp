@@ -61,6 +61,8 @@ using SequenceNumber = uint64_t;
 struct Announcement {
     /** Txid or wtxid that was announced. */
     const uint256 m_txhash;
+    /** wtxid of parent in a parent-child package announcement. */
+    const uint256 m_parent_wtxid;
     /** For CANDIDATE_{DELAYED,BEST,READY} the reqtime; for REQUESTED the expiry. */
     std::chrono::microseconds m_time;
     /** What peer the request was from. */
@@ -100,6 +102,13 @@ struct Announcement {
                  SequenceNumber sequence)
         : m_txhash(gtxid.GetHash()), m_time(reqtime), m_peer(peer), m_sequence(sequence), m_preferred(preferred),
           m_is_wtxid{gtxid.IsWtxid()} {}
+
+    /** Construct a new package announcement from scratch, initially in CANDIDATE_DELAYED state. */
+    Announcement(const GenTxid& gtxid, const GenTxid& parent_wtxid, NodeId peer, bool preferred, std::chrono::microseconds reqtime,
+                 SequenceNumber sequence)
+        : m_txhash(gtxid.GetHash()), m_parent_wtxid(parent_wtxid.GetHash()), m_time(reqtime), m_peer(peer), m_sequence(sequence), m_preferred(preferred),
+          m_is_wtxid{gtxid.IsWtxid()} {}
+
 };
 
 //! Type alias for priorities.
@@ -602,8 +611,33 @@ public:
         ++m_current_sequence;
     }
 
+    void ReceivedPackageInv(NodeId peer, const std::vector<GenTxid>& package_gtxids, bool preferred,
+        std::chrono::microseconds reqtime)
+    {
+        Assume(package_gtxids.size() == 2);
+
+        const auto& gtxid{package_gtxids.back()};
+        const auto& parent_gtxid{package_gtxids.front()};
+
+        // Bail out if we already have a CANDIDATE_BEST announcement for this (txhash, peer) combination. The case
+        // where there is a non-CANDIDATE_BEST announcement already will be caught by the uniqueness property of the
+        // ByPeer index when we try to emplace the new object below.
+        if (m_index.get<ByPeer>().count(ByPeerView{peer, true, gtxid.GetHash()})) return;
+
+        // Try creating the announcement with CANDIDATE_DELAYED state (which will fail due to the uniqueness
+        // of the ByPeer index if a non-CANDIDATE_BEST announcement already exists with the same txhash and peer).
+        // Bail out in that case.
+        auto ret = m_index.get<ByPeer>().emplace(gtxid, parent_gtxid, peer, preferred, reqtime, m_current_sequence);
+        if (!ret.second) return;
+
+        // Update accounting metadata.
+        ++m_peerinfo[peer].m_total;
+        ++m_current_sequence;
+    }
+
+
     //! Find the GenTxids to request now from peer.
-    std::vector<GenTxid> GetRequestable(NodeId peer, std::chrono::microseconds now,
+    std::vector<std::vector<GenTxid>> GetRequestable(NodeId peer, std::chrono::microseconds now,
         std::vector<std::pair<NodeId, GenTxid>>* expired)
     {
         // Move time.
@@ -623,11 +657,16 @@ public:
             return a->m_sequence < b->m_sequence;
         });
 
-        // Convert to GenTxid and return.
-        std::vector<GenTxid> ret;
+        // Convert to std::pair<GenTxid, Wtxid> and return.
+        std::vector<std::vector<GenTxid>> ret;
         ret.reserve(selected.size());
         std::transform(selected.begin(), selected.end(), std::back_inserter(ret), [](const Announcement* ann) {
-            return ToGenTxid(*ann);
+            if (ann->m_parent_wtxid != Wtxid()) {
+                // Return in topological order
+                return std::vector<GenTxid>{GenTxid::Wtxid(ann->m_parent_wtxid), ToGenTxid(*ann)};
+            } else {
+                return std::vector<GenTxid>{ToGenTxid(*ann)};
+            }
         });
         return ret;
     }
@@ -744,6 +783,12 @@ void TxRequestTracker::ReceivedInv(NodeId peer, const GenTxid& gtxid, bool prefe
     m_impl->ReceivedInv(peer, gtxid, preferred, reqtime);
 }
 
+void TxRequestTracker::ReceivedPackageInv(NodeId peer, const std::vector<GenTxid>& package_gtxids, bool preferred,
+    std::chrono::microseconds reqtime)
+{
+    m_impl->ReceivedPackageInv(peer, package_gtxids, preferred, reqtime);
+}
+
 void TxRequestTracker::RequestedTx(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry)
 {
     m_impl->RequestedTx(peer, txhash, expiry);
@@ -754,7 +799,7 @@ void TxRequestTracker::ReceivedResponse(NodeId peer, const uint256& txhash)
     m_impl->ReceivedResponse(peer, txhash);
 }
 
-std::vector<GenTxid> TxRequestTracker::GetRequestable(NodeId peer, std::chrono::microseconds now,
+std::vector<std::vector<GenTxid>> TxRequestTracker::GetRequestable(NodeId peer, std::chrono::microseconds now,
     std::vector<std::pair<NodeId, GenTxid>>* expired)
 {
     return m_impl->GetRequestable(peer, now, expired);

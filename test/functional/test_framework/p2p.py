@@ -53,11 +53,13 @@ from test_framework.messages import (
     msg_getcfilters,
     msg_getdata,
     msg_getheaders,
+    msg_getpkgtxns,
     msg_headers,
     msg_inv,
     msg_mempool,
     msg_merkleblock,
     msg_notfound,
+    msg_pkginv,
     msg_ping,
     msg_pong,
     msg_sendaddrv2,
@@ -145,6 +147,8 @@ MESSAGEMAP = {
     b"verack": msg_verack,
     b"version": msg_version,
     b"wtxidrelay": msg_wtxidrelay,
+    b"getpkgtxns": msg_getpkgtxns,
+    b"pkginv": msg_pkginv,
 }
 
 
@@ -540,6 +544,7 @@ class P2PInterface(P2PConnection):
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
     def on_getheaders(self, message): pass
+    def on_getpkgtxns(self, message): pass
     def on_headers(self, message): pass
     def on_mempool(self, message): pass
     def on_merkleblock(self, message): pass
@@ -551,6 +556,7 @@ class P2PInterface(P2PConnection):
     def on_sendtxrcncl(self, message): pass
     def on_tx(self, message): pass
     def on_wtxidrelay(self, message): pass
+    def on_pkginv(self, message): pass
 
     def on_inv(self, message):
         want = msg_getdata()
@@ -637,6 +643,18 @@ class P2PInterface(P2PConnection):
             if not last_filtered_block:
                 return False
             return last_filtered_block.merkleblock.header.rehash() == int(blockhash, 16)
+
+        self.wait_until(test_function, timeout=timeout)
+
+    def wait_for_getpkgtxns(self, hash_list, *, timeout=60):
+        """Waits for a getpkgtxns message.
+
+        The object hashes in the inventory vector must match the provided hash_list."""
+        def test_function():
+            last_data = self.last_message.get("getpkgtxns")
+            if not last_data:
+                return False
+            return [[x.hash1, x.hash2] for x in last_data.pkginv] == hash_list
 
         self.wait_until(test_function, timeout=timeout)
 

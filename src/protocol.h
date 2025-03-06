@@ -138,6 +138,11 @@ inline constexpr const char* GETADDR{"getaddr"};
  */
 inline constexpr const char* MEMPOOL{"mempool"};
 /**
+ * The 1P1C package inv message (inventory message) transmits one or more inventories of
+ * objects known to the transmitting peer.
+ */
+inline constexpr const char* PACKAGEINV{"pkginv"};
+/**
  * The ping message is sent periodically to help confirm that the receiving
  * peer is still connected.
  */
@@ -264,6 +269,8 @@ inline constexpr const char* WTXIDRELAY{"wtxidrelay"};
  * txreconciliation, as described by BIP 330.
  */
 inline constexpr const char* SENDTXRCNCL{"sendtxrcncl"};
+inline constexpr const char* GETPKGTXNS{"getpkgtxns"};
+inline constexpr const char* PKGTXNS{"pkgtxns"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -283,6 +290,7 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::BLOCK,
     NetMsgType::GETADDR,
     NetMsgType::MEMPOOL,
+    NetMsgType::PACKAGEINV,
     NetMsgType::PING,
     NetMsgType::PONG,
     NetMsgType::NOTFOUND,
@@ -303,6 +311,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::CFCHECKPT,
     NetMsgType::WTXIDRELAY,
     NetMsgType::SENDTXRCNCL,
+    NetMsgType::GETPKGTXNS,
+    NetMsgType::PKGTXNS,
 })};
 
 /** nServices flags */
@@ -487,6 +497,7 @@ enum GetDataMsg : uint32_t {
     // MSG_FILTERED_WITNESS_BLOCK is defined in BIP144 as reserved for future
     // use and remains unused.
     // MSG_FILTERED_WITNESS_BLOCK = MSG_FILTERED_BLOCK | MSG_WITNESS_FLAG,
+    MSG_PKGTXNS = 6,                                 //!< Defined in BIP331
 };
 
 /** inv message data */
@@ -510,6 +521,7 @@ public:
     bool IsMsgFilteredBlk() const { return type == MSG_FILTERED_BLOCK; }
     bool IsMsgCmpctBlk() const { return type == MSG_CMPCT_BLOCK; }
     bool IsMsgWitnessBlk() const { return type == MSG_WITNESS_BLOCK; }
+    bool IsMsgPkgTxns() const { return type == MSG_PKGTXNS; }
 
     // Combined-message helper methods
     bool IsGenTxMsg() const
@@ -524,6 +536,44 @@ public:
     uint32_t type;
     uint256 hash;
 };
+
+/** inv message data */
+class CPkgInv
+{
+public:
+    CPkgInv();
+    CPkgInv(uint32_t typeIn, const uint256& hashIn1, const uint256& hashIn2);
+
+    SERIALIZE_METHODS(CPkgInv, obj) { READWRITE(obj.type, obj.hash1, obj.hash2); }
+
+    friend bool operator<(const CPkgInv& a, const CPkgInv& b);
+
+    std::string GetMessageType() const;
+    std::string ToString() const;
+
+    // Single-message helper methods
+    bool IsMsgTx() const { return type == MSG_TX; }
+    bool IsMsgBlk() const { return type == MSG_BLOCK; }
+    bool IsMsgWtx() const { return type == MSG_WTX; }
+    bool IsMsgFilteredBlk() const { return type == MSG_FILTERED_BLOCK; }
+    bool IsMsgCmpctBlk() const { return type == MSG_CMPCT_BLOCK; }
+    bool IsMsgWitnessBlk() const { return type == MSG_WITNESS_BLOCK; }
+
+    // Combined-message helper methods
+    bool IsGenTxMsg() const
+    {
+        return type == MSG_TX || type == MSG_WTX || type == MSG_WITNESS_TX;
+    }
+    bool IsGenBlkMsg() const
+    {
+        return type == MSG_BLOCK || type == MSG_FILTERED_BLOCK || type == MSG_CMPCT_BLOCK || type == MSG_WITNESS_BLOCK;
+    }
+
+    uint32_t type;
+    uint256 hash1;
+    uint256 hash2;
+};
+
 
 /** Convert a TX/WITNESS_TX/WTX CInv to a GenTxid. */
 GenTxid ToGenTxid(const CInv& inv);

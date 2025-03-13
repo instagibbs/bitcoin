@@ -1255,6 +1255,7 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
              { Consensus::DEPLOYMENT_CHECKTEMPLATEVERIFY, SCRIPT_VERIFY_DISCOURAGE_CHECK_TEMPLATE_VERIFY_HASH },
              { Consensus::DEPLOYMENT_ANYPREVOUT, SCRIPT_VERIFY_DISCOURAGE_ANYPREVOUT },
              { Consensus::DEPLOYMENT_OP_CAT, SCRIPT_VERIFY_DISCOURAGE_OP_CAT },
+             { Consensus::DEPLOYMENT_CHECKSIGFROMSTACK, SCRIPT_VERIFY_DISCOURAGE_CHECKSIGFROMSTACK },
     });
 
     // Check input scripts and signatures.
@@ -2427,6 +2428,11 @@ unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Chainstat
     // Enforce OP_CAT
     if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_OP_CAT)) {
         flags |= SCRIPT_VERIFY_OP_CAT;
+    }
+
+    // Enforce OP_CHECKSIGFROMSTACK (BIP348)
+    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_CHECKSIGFROMSTACK)) {
+        flags |= SCRIPT_VERIFY_CHECKSIGFROMSTACK;
     }
 
     return flags;

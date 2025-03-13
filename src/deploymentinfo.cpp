@@ -27,6 +27,10 @@ const struct VBDeploymentInfo VersionBitsDeploymentInfo[Consensus::MAX_VERSION_B
         /*.name =*/ "opcat",
         /*.gbt_force =*/ true,
     },
+    {
+        /*.name =*/ "checksigfromstack",
+        /*.gbt_force =*/ true,
+    },
 };
 
 std::string DeploymentName(Consensus::BuriedDeployment dep)
@@ -95,6 +99,8 @@ const std::map<std::string, uint32_t> g_verify_flag_names{
     FLAG_NAME(DISCOURAGE_ANYPREVOUT),
     FLAG_NAME(OP_CAT),
     FLAG_NAME(DISCOURAGE_OP_CAT),
+    FLAG_NAME(CHECKSIGFROMSTACK),
+    FLAG_NAME(DISCOURAGE_CHECKSIGFROMSTACK),
 };
 #undef FLAG_NAME
 

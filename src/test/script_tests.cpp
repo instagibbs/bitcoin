@@ -92,6 +92,7 @@ static ScriptErrorDesc script_errors[]={
     {SCRIPT_ERR_OP_CODESEPARATOR, "OP_CODESEPARATOR"},
     {SCRIPT_ERR_SIG_FINDANDDELETE, "SIG_FINDANDDELETE"},
     {SCRIPT_ERR_DISCOURAGE_OP_CAT, "DISCOURAGE_OP_CAT"},
+    {SCRIPT_ERR_DISCOURAGE_OP_CHECKSIGFROMSTACK, "DISCOURAGE_OP_CHECKSIGFROMSTACK"},
 };
 
 std::string FormatScriptFlags(uint32_t flags)
@@ -1748,8 +1749,8 @@ BOOST_AUTO_TEST_CASE(formatscriptflags)
     // quick check that FormatScriptFlags reports any unknown/unexpected bits
     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH), "P2SH");
     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_P2SH | (1u<<31)), "P2SH,0x80000000");
-    BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | (1u<<28)), "TAPROOT,0x10000000");
-    BOOST_CHECK_EQUAL(FormatScriptFlags(1u<<28), "0x10000000");
+    BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | (1u<<30)), "TAPROOT,0x40000000");
+    BOOST_CHECK_EQUAL(FormatScriptFlags(1u<<30), "0x40000000");
 }
 
 

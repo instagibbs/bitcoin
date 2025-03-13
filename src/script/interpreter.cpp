@@ -343,6 +343,72 @@ static bool EvalChecksigPreTapscript(const valtype& vchSig, const valtype& vchPu
     return true;
 }
 
+/**
+ *  Returns false when script execution must immediately fail.
+ *  `success_out` must be set when returning true.
+ */
+static bool EvalChecksigFromStack(const valtype& sig, const valtype& msg, const valtype& pubkey_in, ScriptExecutionData& execdata, unsigned int flags, SigVersion sigversion, ScriptError* serror, bool& success_out)
+{
+    assert(sigversion == SigVersion::TAPSCRIPT);
+
+    /*
+     * Implementation follows the BIP348 spec as closely as possible for correctness.
+     */
+
+    // If the public key size is zero, the script MUST fail and terminate immediately.
+    if (pubkey_in.size() == 0) {
+        return set_error(serror, SCRIPT_ERR_PUBKEYTYPE);
+    }
+
+    // If the public key size is 32 bytes, it is considered to be a public key as described in BIP 340:
+    // If the signature is not the empty vector, the signature is validated against the public key and message according to BIP 340. Validation failure in this case immediately terminates script execution with failure.
+    if (pubkey_in.size() == 32) {
+        if (!sig.empty()) {
+            if (sig.size() != 64) {
+                return set_error(serror, SCRIPT_ERR_SCHNORR_SIG_SIZE);
+            }
+
+            XOnlyPubKey pubkey{pubkey_in};
+            if (!pubkey.VerifySchnorr(msg, sig)) {
+                return set_error(serror, SCRIPT_ERR_SCHNORR_SIG);
+            }
+        }
+    }
+
+    // If the public key size is not zero and not 32 bytes; the public key is of an unknown public key type.
+    // Signature verification for unknown public key types succeeds as if signature verification for a known
+    // public key type had succeeded.
+    if (pubkey_in.size() != 0 && pubkey_in.size() != 32) {
+        /*
+         *  New public key version softforks should be defined before this `if` block.
+         *  Generally, the new code should not do anything but terminating the script execution. To avoid
+         *  consensus bugs, it should not modify any existing values (including `success_out`).
+         */
+        if ((flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE) != 0) {
+            return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE);
+        }
+    }
+
+    // If the script did not fail and terminate before this step, regardless of the public key type:
+
+    if (sig.empty()) {
+        // If the signature is the empty vector: An empty vector is pushed onto the stack, and execution continues with the next opcode.
+        success_out = false;
+    } else {
+        // If the signature is not the empty vector:
+        //  - The opcode is counted towards the sigops budget as described in BIP 342.
+        //  - A 1-byte value 0x01 is pushed onto the stack.
+        assert(execdata.m_validation_weight_left_init);
+        execdata.m_validation_weight_left -= VALIDATION_WEIGHT_PER_SIGOP_PASSED;
+        if (execdata.m_validation_weight_left < 0) {
+            return set_error(serror, SCRIPT_ERR_TAPSCRIPT_VALIDATION_WEIGHT);
+        }
+        success_out = true;
+    }
+
+    return true;
+}
+
 static bool EvalChecksigTapscript(const valtype& sig, const valtype& pubkey, ScriptExecutionData& execdata, unsigned int flags, const BaseSignatureChecker& checker, SigVersion sigversion, ScriptError* serror, bool& success)
 {
     assert(sigversion == SigVersion::TAPSCRIPT);
@@ -1283,6 +1349,40 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 }
                 break;
 
+                case OP_CHECKSIGFROMSTACK: {
+
+                    // DISCOURAGE for OP_CHECKSIGFROMSTACK is handled in OP_SUCCESS handling
+                    // OP_CHECKSIGFROMSTACK is only available in Tapscript
+                    if (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) {
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+                    }
+
+                    // If fewer than 3 elements are on the stack, the script MUST fail and terminate immediately
+                    if (stack.size() < 3) {
+                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
+                    }
+
+                    // The public key (top element)
+                    // message (second to top element),
+                    // and signature (third from top element) are read from the stack.
+                    const valtype& pubkey = stacktop(-1);
+                    const valtype& msg = stacktop(-2);
+                    const valtype& sig = stacktop(-3);
+
+                    bool push_success = true;
+                    if (!EvalChecksigFromStack(sig, msg, pubkey, execdata, flags, sigversion, serror, push_success)) {
+                        return false; // serror set by EvalChecksigFromStack
+                    }
+
+                    popstack(stack);
+                    popstack(stack);
+                    popstack(stack);
+
+                    stack.push_back(push_success ? vchTrue : vchFalse);
+
+                    break;
+                }
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -1986,6 +2086,12 @@ std::optional<bool> CheckTapscriptOpSuccess(const CScript& exec_script, unsigned
                     if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_CAT) {
                         return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_CAT);
                     } else if (!(flags & SCRIPT_VERIFY_OP_CAT)) {
+                        return set_success(serror);
+                    }
+                } else if (opcode == OP_CHECKSIGFROMSTACK) {
+                    if (flags & SCRIPT_VERIFY_DISCOURAGE_CHECKSIGFROMSTACK) {
+                        return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_CHECKSIGFROMSTACK);
+                    } else if (!(flags & SCRIPT_VERIFY_CHECKSIGFROMSTACK)) {
                         return set_success(serror);
                     }
                 } else {

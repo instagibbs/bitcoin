@@ -591,42 +591,7 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                     break;
                 }
 
-                case OP_CHECKTEMPLATEVERIFY:
-                {
-                    if (flags & SCRIPT_VERIFY_DISCOURAGE_CHECKTEMPLATEVERIFY) {
-                        return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS);
-                    }
-
-                    // if flags not enabled; treat as a NOP4
-                    if (!(flags & SCRIPT_VERIFY_CHECKTEMPLATEVERIFY)) {
-                        break;
-                    }
-
-                    if (stack.size() < 1) {
-                        return set_error(serror, SCRIPT_ERR_INVALID_STACK_OPERATION);
-                    }
-
-                    // If the argument was not 32 bytes, treat as OP_NOP4:
-                    switch (stack.back().size()) {
-                        case 32:
-                        {
-                            const Span<const unsigned char> hash{stack.back()};
-                            if (!checker.CheckDefaultCheckTemplateVerifyHash(hash)) {
-                                return set_error(serror, SCRIPT_ERR_TEMPLATE_MISMATCH);
-                            }
-                            break;
-                        }
-                        default:
-                            // future upgrade can add semantics for this opcode with different length args
-                            // so discourage use when applicable
-                            if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_CHECKTEMPLATEVERIFY) {
-                                return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS);
-                            }
-                    }
-                }
-                break;
-
-                case OP_NOP1: case OP_NOP5:
+                case OP_NOP1: case OP_NOP4: case OP_NOP5:
                 case OP_NOP6: case OP_NOP7: case OP_NOP8: case OP_NOP9: case OP_NOP10:
                 {
                     if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_NOPS)
@@ -1248,6 +1213,25 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 }
                 break;
 
+                //
+                // OP_SUCCESSx extensions
+                //
+                case OP_CHECKTEMPLATE:
+                {
+                    // No-op in pre-tapscript environments
+                    if (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) {
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+                    }
+
+                    std::optional<uint256> ctv_hash{checker.GetDefaultCheckTemplateVerifyHash()};
+                    if (!ctv_hash) {
+                        // Should never happen?
+                        return set_error(serror, SCRIPT_ERR_TEMPLATE_MISMATCH);
+                    }
+                    stack.push_back(valtype(ctv_hash.value().begin(), ctv_hash.value().end()));
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -1529,13 +1513,13 @@ void PrecomputedTransactionData::Init(const T& txTo, std::vector<CTxOut>&& spent
         if (uses_bip341_taproot && uses_bip143_segwit) break; // No need to scan further if we already need all.
     }
 
-    // Each of these computations is always required for CHECKTEMPLATEVERIFY, and sometimes
+    // Each of these computations is always required for CHECKTEMPLATE, and sometimes
     // required for any segwit/taproot.
     m_prevouts_single_hash = GetPrevoutsSHA256(txTo);
     m_sequences_single_hash = GetSequencesSHA256(txTo);
     m_outputs_single_hash = GetOutputsSHA256(txTo);
 
-    // Only required for CHECKTEMPLATEVERIFY.
+    // Only required for CHECKTEMPLATE.
     //
     // The empty hash is used to signal whether or not we should skip scriptSigs
     // when re-computing for different indexes.
@@ -1891,21 +1875,21 @@ bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSeq
 }
 
 template <class T>
-bool GenericTransactionSignatureChecker<T>::CheckDefaultCheckTemplateVerifyHash(const Span<const unsigned char>& hash) const
+std::optional<uint256> GenericTransactionSignatureChecker<T>::GetDefaultCheckTemplateVerifyHash() const
 {
-    // Should already be checked before calling...
-    assert(hash.size() == 32);
     if (txdata && txdata->m_bip119_ctv_ready) {
         assert(txTo != nullptr);
         uint256 hash_tmpl = txdata->m_scriptSigs_single_hash.IsNull() ?
             GetDefaultCheckTemplateVerifyHashEmptyScript(*txTo, txdata->m_outputs_single_hash, txdata->m_sequences_single_hash, nIn) :
             GetDefaultCheckTemplateVerifyHashWithScript(*txTo, txdata->m_outputs_single_hash, txdata->m_sequences_single_hash,
                     txdata->m_scriptSigs_single_hash, nIn);
-        return std::equal(hash_tmpl.begin(), hash_tmpl.end(), hash.data());
+        return hash_tmpl;
     } else {
-        return HandleMissingData(m_mdb);
+        HandleMissingData(m_mdb);
+        return std::nullopt;
     }
 }
+
 // explicit instantiation
 template class GenericTransactionSignatureChecker<CTransaction>;
 template class GenericTransactionSignatureChecker<CMutableTransaction>;
@@ -1925,10 +1909,16 @@ static bool ExecuteWitnessScript(const Span<const valtype>& stack_span, const CS
             }
             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
             if (IsOpSuccess(opcode)) {
-                if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
-                    return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
+                if (opcode == OP_CHECKTEMPLATE) {
+                    if (!(flags & SCRIPT_VERIFY_CHECKTEMPLATE)) {
+                        return set_success(serror);
+                    }
+                } else {
+                    if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
+                        return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
+                    }
+                    return set_success(serror);
                 }
-                return set_success(serror);
             }
         }
 
@@ -2069,6 +2059,20 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
             return set_success(serror);
         }
     } else if (!is_p2sh && CScript::IsPayToAnchor(witversion, program)) {
+        return true;
+    } else if (!is_p2sh && CScript::IsPayToCTV(witversion, program)) {
+
+        // Trivially true if not enforced via consensus
+        if (!(flags & SCRIPT_VERIFY_CHECKTEMPLATE)) {
+            return true;
+        }
+
+        const Span<const unsigned char> hash{program};
+        const auto ctv_hash{checker.GetDefaultCheckTemplateVerifyHash()};
+        if (!ctv_hash || !std::equal(hash.begin(), hash.end(), ctv_hash.value().data())) {
+            return set_error(serror, SCRIPT_ERR_TEMPLATE_MISMATCH);
+        }
+
         return true;
     } else {
         if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM) {

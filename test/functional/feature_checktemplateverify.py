@@ -22,10 +22,13 @@ from test_framework.messages import (
 from test_framework.p2p import P2PInterface
 from test_framework.script import (
     CScript,
+    OP_2,
+    OP_EQUAL,
     OP_TRUE,
     OP_DEPTH,
     OP_ENDIF,
     OP_IF,
+    OP_CHECKTEMPLATE,
     OP_CHECKTEMPLATEVERIFY,
     OP_FALSE,
     OP_DROP,
@@ -45,6 +48,10 @@ CHECKTEMPLATEVERIFY_ERROR = "non-mandatory-script-verify-flag (Script failed an 
 DISCOURAGED_ERROR = (
     "non-mandatory-script-verify-flag (NOPx reserved for soft-fork upgrades)"
 )
+OP_SUCCESS_DISCOURAGED_ERROR = (
+    "non-mandatory-script-verify-flag (OP_SUCCESSx reserved for soft-fork upgrades)"
+)
+
 STACK_TOO_SHORT_ERROR = (
     "non-mandatory-script-verify-flag (Operation not valid with the current stack size)"
 )
@@ -67,7 +74,6 @@ def template_hash_for_outputs(outputs, nIn=0, nVin=1, vin_override=None):
 def random_p2sh():
     return script_to_p2sh_script(random_bytes(20))
 
-
 def random_real_outputs_and_script(n, nIn=0, nVin=1, vin_override=None):
     outputs = [CTxOut((x + 1) * 1000, random_p2sh()) for x in range(n)]
     script = CScript(
@@ -78,6 +84,30 @@ def random_real_outputs_and_script(n, nIn=0, nVin=1, vin_override=None):
     )
     return outputs, script
 
+# Returns list of outputs that are being forwarded to, and the tapleaf script
+# committing to them
+def tapscript_real_outputs_and_script(n, nIn=0, nVin=1, vin_override=None):
+    outputs = [CTxOut((x + 1) * 1000, random_p2sh()) for x in range(n)]
+    script = CScript(
+        [
+            template_hash_for_outputs(outputs, nIn, nVin, vin_override),
+            OP_CHECKTEMPLATE,
+            OP_EQUAL,
+        ]
+    )
+    return outputs, script
+
+# Returns list of outputs that are being forwarded to, and the P2CTV script
+# committing to them
+def bare_real_outputs_and_script(n, nIn=0, nVin=1, vin_override=None):
+    outputs = [CTxOut((x + 1) * 1000, random_p2sh()) for x in range(n)]
+    script = CScript(
+        [
+            OP_2,
+            template_hash_for_outputs(outputs, nIn, nVin, vin_override),
+        ]
+    )
+    return outputs, script
 
 def random_secure_tree(depth):
     leaf_nodes = [
@@ -199,7 +229,7 @@ class CheckTemplateVerifyTest(BitcoinTestFramework):
         self.log.info("Creating setup transactions")
 
         self.log.info("Creating script for 10 random outputs")
-        outputs, script = random_real_outputs_and_script(10)
+        outputs, script = tapscript_real_outputs_and_script(10)
         # Add some fee satoshis
         amount_sats = sum(out.nValue for out in outputs) + 200 * 500
 
@@ -217,6 +247,126 @@ class CheckTemplateVerifyTest(BitcoinTestFramework):
             taproot.scriptPubKey,
             amount_sats=amount_sats,
         )
+
+        self.log.info("Creating funding txn for 10 random outputs as a p2ctv output")
+        bare_outputs, bare_script = bare_real_outputs_and_script(10)
+        # Add some fee satoshis
+        bare_amount_sats = sum(out.nValue for out in bare_outputs) + 200 * 500
+        bare_ctv_funding_tx = create_transaction_to_script(
+            self.nodes[0],
+            wallet,
+            get_coinbase(),
+            bare_script,
+            amount_sats=bare_amount_sats,
+        )
+
+        funding_txs = [
+            taproot_ctv_funding_tx,
+            bare_ctv_funding_tx,
+        ]
+
+        self.log.info("Obtaining TXIDs")
+        (
+            taproot_ctv_outpoint,
+            bare_ctv_outpoint,
+        ) = [COutPoint(int(tx.rehash(), 16), 0) for tx in funding_txs]
+
+        self.log.info("Funding all outputs")
+        for i in range(len(funding_txs)):
+            self.nodes[0].sendrawtransaction(funding_txs[i].serialize().hex(), 0)
+        self.generate(self.nodes[0], 1)
+
+        self.log.info("Testing Tapscript OP_CHECKTEMPLATEVERIFY spend pre-activation")
+        # Test sendrawtransaction
+        taproot_check_template_verify_tx = CTransaction()
+        taproot_check_template_verify_tx.version = 2
+        taproot_check_template_verify_tx.vin = [CTxIn(taproot_ctv_outpoint)]
+        taproot_check_template_verify_tx.vout = outputs
+        taproot_check_template_verify_tx.wit.vtxinwit += [CTxInWitness()]
+        taproot_check_template_verify_tx.wit.vtxinwit[0].scriptWitness.stack = [
+            script,
+            bytes([0xC0 + taproot.negflag]) + taproot.internal_pubkey,
+        ]
+
+        self.log.info("Tapscript CHECKTEMPLATE still accepted by consensus even on hash mismatch")
+        taproot_check_template_verify_tx.version = 3
+        bad_hex = taproot_check_template_verify_tx.serialize().hex()
+
+        assert_raises_rpc_error(
+            -26,
+            "non-mandatory-script-verify-flag (Script evaluated without error but finished with a false/empty top stack element)",
+            self.nodes[0].sendrawtransaction,
+            bad_hex,
+        )
+
+        res = self.generateblock(self.nodes[0], output="raw(55)", transactions=[bad_hex])
+        assert_equal(self.nodes[0].getbestblockhash(), res["hash"])
+
+        # reorg it out
+        self.nodes[0].invalidateblock(res["hash"])
+
+        # mempool empty, was should be rejected from mempool due to policy enforcement
+        assert_equal(self.nodes[0].getrawmempool(), [])
+
+        self.log.info("Testing P2CTV spend pre-activation")
+        bare_check_template_verify_tx = CTransaction()
+        bare_check_template_verify_tx.version = 2
+        bare_check_template_verify_tx.vin = [CTxIn(bare_ctv_outpoint)]
+        bare_check_template_verify_tx.vout = bare_outputs
+        # no witness data required
+
+        self.log.info("P2CTV still accepted by consensus even on hash mismatch")
+        bare_check_template_verify_tx.version = 3
+        bare_bad_hex = bare_check_template_verify_tx.serialize().hex()
+
+        assert_raises_rpc_error(
+            -26,
+            "non-mandatory-script-verify-flag (Script failed an OP_CHECKTEMPLATEVERIFY operation)",
+            self.nodes[0].sendrawtransaction,
+            bare_bad_hex,
+        )
+        
+        res = self.generateblock(self.nodes[0], output="raw(55)", transactions=[bare_bad_hex])
+        assert_equal(self.nodes[0].getbestblockhash(), res["hash"])
+
+        # reorg it out
+        self.nodes[0].invalidateblock(res["hash"])
+
+        # Activate softfork
+        self.generate(self.nodes[0], 400)
+        assert self.nodes[0].getdeploymentinfo()["deployments"]["checktemplate"]["active"]
+
+        assert_raises_rpc_error(
+            -25,
+            "TestBlockValidity failed: non-mandatory-script-verify-flag (Script evaluated without error but finished with a false/empty top stack element)",
+            self.generateblock,
+            self.nodes[0],
+            output="raw(55)",
+            transactions=[bad_hex],
+            submit=False,
+        )
+
+        assert_raises_rpc_error(
+            -25,
+            "TestBlockValidity failed: non-mandatory-script-verify-flag (Script failed an OP_CHECKTEMPLATEVERIFY operation)",
+            self.generateblock,
+            self.nodes[0],
+            output="raw(55)",
+            transactions=[bare_bad_hex],
+            submit=False,
+        )
+
+        # Un-mutate and make sure block was accepted
+        taproot_check_template_verify_tx.version = 2
+        bare_check_template_verify_tx.version = 2
+
+        self.nodes[0].sendrawtransaction(taproot_check_template_verify_tx.serialize().hex())
+        self.nodes[0].sendrawtransaction(bare_check_template_verify_tx.serialize().hex())
+
+        self.generate(self.nodes[0], 1)
+        assert_equal(self.nodes[0].getrawmempool(), [])
+
+        return
 
         self.log.info("Creating funding txn for 10 random outputs as a segwit script")
         segwit_ctv_funding_tx = create_transaction_to_script(

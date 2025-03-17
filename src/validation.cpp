@@ -2430,6 +2430,11 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
         flags |= SCRIPT_VERIFY_NULLDUMMY;
     }
 
+    // Enforce BIPXX
+    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_CHECKTEMPLATE)) {
+        flags |= SCRIPT_VERIFY_CHECKTEMPLATE;
+    }
+
     return flags;
 }
 

@@ -152,7 +152,7 @@ TxoutType Solver(const CScript& scriptPubKey, std::vector<std::vector<unsigned c
         return TxoutType::SCRIPTHASH;
     }
 
-    if (scriptPubKey.IsPayToBareDefaultCheckTemplateVerifyHash()) {
+    if (scriptPubKey.IsPayToCTV()) {
         return TxoutType::TX_BARE_DEFAULT_CHECKTEMPLATEVERIFY;
     }
 

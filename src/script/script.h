@@ -198,8 +198,7 @@ enum opcodetype
     OP_NOP2 = OP_CHECKLOCKTIMEVERIFY,
     OP_CHECKSEQUENCEVERIFY = 0xb2,
     OP_NOP3 = OP_CHECKSEQUENCEVERIFY,
-    OP_CHECKTEMPLATEVERIFY = 0xb3,
-    OP_NOP4 = OP_CHECKTEMPLATEVERIFY,
+    OP_NOP4 = 0xb3,
     OP_NOP5 = 0xb4,
     OP_NOP6 = 0xb5,
     OP_NOP7 = 0xb6,
@@ -209,6 +208,9 @@ enum opcodetype
 
     // Opcode added by BIP 342 (Tapscript)
     OP_CHECKSIGADD = 0xba,
+
+    // Opcode added by BIPXX
+    OP_CHECKTEMPLATE = 0xbd,
 
     OP_INVALIDOPCODE = 0xff,
 };
@@ -553,7 +555,8 @@ public:
      */
     static bool IsPayToAnchor(int version, const std::vector<unsigned char>& program);
 
-    bool IsPayToBareDefaultCheckTemplateVerifyHash() const;
+    bool IsPayToCTV() const;
+    static bool IsPayToCTV(int version, const std::vector<unsigned char>& program);
 
     bool IsPayToScriptHash() const;
     bool IsPayToWitnessScriptHash() const;

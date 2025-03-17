@@ -143,14 +143,11 @@ enum : uint32_t {
     // Making unknown public key versions (in BIP 342 scripts) non-standard
     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE = (1U << 20),
 
-    // CHECKTEMPLATEVERIFY validation (BIP-119)
-    SCRIPT_VERIFY_CHECKTEMPLATEVERIFY = (1U << 21),
+    // CHECKTEMPLATE validation (BIP-XX)
+    SCRIPT_VERIFY_CHECKTEMPLATE = (1U << 21),
 
-    // discourage upgradable OP_CHECKTEMPLATEVERIFY hashes
-    SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_CHECKTEMPLATEVERIFY = (1U << 22),
-
-    // discourage OP_CHECKTEMPLATEVERIFY
-    SCRIPT_VERIFY_DISCOURAGE_CHECKTEMPLATEVERIFY = (1U << 23),
+    // discourage upgradable OP_CHECKTEMPLATE hashes
+    SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_CHECKTEMPLATE = (1U << 22),
 
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
@@ -292,9 +289,9 @@ public:
          return false;
     }
 
-    virtual bool CheckDefaultCheckTemplateVerifyHash(const Span<const unsigned char>& hash) const
+    virtual std::optional<uint256> GetDefaultCheckTemplateVerifyHash() const
     {
-        return false;
+        return std::nullopt;
     }
 
     virtual ~BaseSignatureChecker() = default;
@@ -333,7 +330,7 @@ public:
     bool CheckSchnorrSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
     bool CheckLockTime(const CScriptNum& nLockTime) const override;
     bool CheckSequence(const CScriptNum& nSequence) const override;
-    bool CheckDefaultCheckTemplateVerifyHash(const Span<const unsigned char>& hash) const override;
+    std::optional<uint256> GetDefaultCheckTemplateVerifyHash() const override;
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;

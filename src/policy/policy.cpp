@@ -214,11 +214,6 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             if (subscript.GetSigOpCount(true) > MAX_P2SH_SIGOPS) {
                 return false;
             }
-        } else if (whichType == TxoutType::TX_BARE_DEFAULT_CHECKTEMPLATEVERIFY) {
-            // after activation, only allow bare with no scriptsig.
-            // pre-activation disallowing enforced via discouraged logic in the
-            // interpreter.
-            if (tx.vin[i].scriptSig.size() != 0) return false;
         }
     }
 
@@ -243,7 +238,7 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
         CScript prevScript = prev.scriptPubKey;
 
         // witness stuffing detected
-        if (prevScript.IsPayToAnchor()) {
+        if (prevScript.IsPayToAnchor() || prevScript.IsPayToCTV()) { // FIXME should CTV be consensus?
             return false;
         }
 

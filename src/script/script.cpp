@@ -138,7 +138,7 @@ std::string GetOpName(opcodetype opcode)
     case OP_NOP1                   : return "OP_NOP1";
     case OP_CHECKLOCKTIMEVERIFY    : return "OP_CHECKLOCKTIMEVERIFY";
     case OP_CHECKSEQUENCEVERIFY    : return "OP_CHECKSEQUENCEVERIFY";
-    case OP_CHECKTEMPLATEVERIFY    : return "OP_CHECKTEMPLATEVERIFY";
+    case OP_NOP4                   : return "OP_NOP4";
     case OP_NOP5                   : return "OP_NOP5";
     case OP_NOP6                   : return "OP_NOP6";
     case OP_NOP7                   : return "OP_NOP7";
@@ -148,6 +148,9 @@ std::string GetOpName(opcodetype opcode)
 
     // Opcode added by BIP 342 (Tapscript)
     case OP_CHECKSIGADD            : return "OP_CHECKSIGADD";
+
+    // Opcode added by BIP XX
+    case OP_CHECKTEMPLATE          : return "OP_CHECKTEMPLATE";
 
     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
 
@@ -221,12 +224,17 @@ bool CScript::IsPayToAnchor(int version, const std::vector<unsigned char>& progr
         program[1] == 0x73;
 }
 
-bool CScript::IsPayToBareDefaultCheckTemplateVerifyHash() const
+bool CScript::IsPayToCTV() const
 {
-    // Extra-fast test for pay-to-bare-default-check-template-verify-hash CScripts:
-    return (this->size() == 34 &&
-            (*this)[0] == 0x20 &&
-            (*this)[33] == OP_CHECKTEMPLATEVERIFY);
+    return this->size() == 34 &&
+        (*this)[0] == OP_2 &&
+        (*this)[1] == 0x20;
+}
+
+bool CScript::IsPayToCTV(int version, const std::vector<unsigned char>& program)
+{
+    return version == 2 &&
+        program.size() == 32;
 }
 
 bool CScript::IsPayToScriptHash() const

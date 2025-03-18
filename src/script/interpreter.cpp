@@ -593,6 +593,12 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
 
                 case OP_CHECKTEMPLATEVERIFY:
                 {
+                    // Top-level evaluation only triggers outside of script execution,
+                    // inside it is still a no-op unless is native segwit or taproot
+                    if (sigversion == SigVersion::BASE) {
+                        break;
+                    }
+
                     if (flags & SCRIPT_VERIFY_DISCOURAGE_CHECKTEMPLATEVERIFY) {
                         return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS);
                     }
@@ -2109,6 +2115,21 @@ bool VerifyScript(const CScript& scriptSig, const CScript& scriptPubKey, const C
         return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
     if (CastToBool(stack.back()) == false)
         return set_error(serror, SCRIPT_ERR_EVAL_FALSE);
+
+    // YOLO fork, see if tests fail
+    if ((flags & SCRIPT_VERIFY_CHECKTEMPLATEVERIFY)) {
+        if (scriptPubKey.IsPayToBareDefaultCheckTemplateVerifyHash()) {
+            if ((flags & SCRIPT_VERIFY_DISCOURAGE_CHECKTEMPLATEVERIFY)) {
+                return set_error(serror, SCRIPT_ERR_DISCOURAGE_UPGRADABLE_NOPS);
+            }
+            // Top of the stack should be hash, regardless of scriptSig
+            assert(stack.back().size() == 32);
+            const Span<const unsigned char> hash{stack.back()};
+            if (!checker.CheckDefaultCheckTemplateVerifyHash(hash)) {
+                return set_error(serror, SCRIPT_ERR_TEMPLATE_MISMATCH);
+            }
+        }
+    }
 
     // Bare witness programs
     int witnessversion;

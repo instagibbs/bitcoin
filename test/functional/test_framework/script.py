@@ -254,6 +254,9 @@ OP_NOP10 = CScriptOp(0xb9)
 # BIP 342 opcodes (Tapscript)
 OP_CHECKSIGADD = CScriptOp(0xba)
 
+# BIP 348 (OP_SUCCESS204)
+OP_CHECKSIGFROMSTACK = CScriptOp(0xcc)
+
 OP_CHECKSIGFROMSTACK = CScriptOp(0xcc)
 
 OP_INVALIDOPCODE = CScriptOp(0xff)

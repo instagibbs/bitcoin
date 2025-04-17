@@ -1258,6 +1258,16 @@ def bip348_csfs_spenders():
     pubs = [compute_xonly_pubkey(sec)[0] for sec in secs]
 
     CSFS_MSG = random.randbytes(random.randrange(0, 520))
+
+    # Grow, shrink the message being signed, and pick random bytes
+    TRUNC_CSFS_MSG = CSFS_MSG[:] if len(CSFS_MSG) > 0 else None
+    if TRUNC_CSFS_MSG is not None:
+        prune_index = random.randrange(len(TRUNC_CSFS_MSG))
+        TRUNC_CSFS_MSG = TRUNC_CSFS_MSG[:prune_index] + TRUNC_CSFS_MSG[prune_index+1:]
+    extendable_length = 520 - len(CSFS_MSG)
+    EXTEND_CSFS_MSG = None
+    if extendable_length > 0:
+        EXTEND_CSFS_MSG = CSFS_MSG + random.randbytes(random.randrange(1, extendable_length))
     OTHER_CSFS_MSG = CSFS_MSG
 
     while OTHER_CSFS_MSG == CSFS_MSG:
@@ -1283,6 +1293,10 @@ def bip348_csfs_spenders():
 
     # "sighash" is actually the bip340 message being directly verified against
     add_spender(spenders, comment="bip348_csfs/simple", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, failure={"sighash": OTHER_CSFS_MSG}, **ERR_SIG_SCHNORR)
+    if TRUNC_CSFS_MSG is not None:
+        add_spender(spenders, comment="bip348_csfs/trunc_msg", tap=tap, leaf="onearg_csfs", key=secs[0], inputs=[getter("sign"), CSFS_MSG], standard=len(CSFS_MSG)<=80, sighash=CSFS_MSG, failure={"inputs": [getter("sign"), TRUNC_CSFS_MSG]}, **ERR_SIG_SCHNORR)
+    if EXTEND_CSFS_MSG is not None:
+        add_spender(spenders, comment="bip348_csfs/extend_msg", tap=tap, leaf="onearg_csfs", key=secs[0], inputs=[getter("sign"), CSFS_MSG], standard=len(CSFS_MSG)<=80, sighash=CSFS_MSG, failure={"inputs": [getter("sign"), EXTEND_CSFS_MSG]}, **ERR_SIG_SCHNORR)
 
     # Empty signature pushes zero onto stack and continues, unless the pubkey is empty
     add_spender(spenders, comment="bip348_csfs/simple_fail", tap=tap, leaf="simple_fail_csfs", inputs=[b''], failure={"leaf": "empty_pk_csfs", "inputs": [OTHER_CSFS_MSG]}, **ERR_UNKNOWN_PUBKEY)

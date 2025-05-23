@@ -272,6 +272,55 @@ struct SimTxGraph
         }
         return true;
     }
+
+    /** Returns a vector of tuples representing parent/child dependencies to add to make the entire graph one cluster */
+    std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> StitchClusters()
+    {
+        std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> ret;
+
+        auto todo = graph.Positions();
+
+        TxGraph::Ref* last_ref = nullptr;
+
+        // Walk all clusters and stitch them together "unidirectionally"
+        while (todo.Any()) {
+            auto component = graph.FindConnectedComponent(todo);
+
+            if (last_ref != nullptr) {
+                ret.push_back(std::make_pair(last_ref, GetRef(component.First())));
+            }
+
+            // New parent for next cluster
+            last_ref = GetRef(component.Last());
+
+            todo -= component;
+        }
+
+        return ret;
+    }
+
+    // Attach N-1 clusters to last cluster via direct deps
+    std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> StitchClusters2()
+    {
+        std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> ret;
+
+        auto todo = graph.Positions();
+
+        auto last_component = graph.FindConnectedComponent(todo);
+        todo -= last_component;
+
+        // Walk all clusters and stitch them together "unidirectionally" to last_component
+        while (todo.Any()) {
+            auto component = graph.FindConnectedComponent(todo);
+
+            ret.push_back(std::make_pair(GetRef(last_component.First()), GetRef(component.First())));
+
+            todo -= component;
+        }
+
+        return ret;
+    }
+
 };
 
 } // namespace
@@ -837,6 +886,51 @@ FUZZ_TARGET(txgraph)
                     top_sim.RemoveTransaction(top_sim.GetRef(simpos));
                 }
                 assert(!top_sim.IsOversized());
+                break;
+            }  else if ((block_builders.empty() || sims.size() > 1) &&
+                         top_sim.GetTransactionCount() > max_cluster_count && !top_sim.IsOversized() && command-- == 0) {
+                // Merge clusters via unidirectional dependencies then Trim.
+                // This is used to avoid cycles in the implicit graph during Trim.
+
+                // Calculate max_sized_tx, we should have min(max_cluster_count, max_cluster_size/max_sized_tx)
+                // transactions in a single cluster left after the Trim later
+                // We need to have dependencies applied and linearizations fixed to avoid circular dependencies in
+                // implied graph; trigger it via whatever means
+                std::vector<TxGraph::Ref*> refs;
+                real->CountDistinctClusters(refs, false);
+
+                auto deps_to_add = alt ? top_sim.StitchClusters() : top_sim.StitchClusters2();
+
+                for (auto& [par, chl] : deps_to_add) {
+                    top_sim.AddDependency(par, chl);
+                    real->AddDependency(*par, *chl);
+                }
+
+                // Check oversizedness directly since we're doing another step next
+                assert(real->IsOversized());
+                assert(top_sim.IsOversized());
+
+                int32_t max_sized_tx = 0;
+                for (auto i : top_sim.graph.Positions()) {
+                    const auto size = top_sim.graph.FeeRate(i).size;
+                    if (size > max_sized_tx) {
+                        max_sized_tx = size;
+                    }
+                }
+
+                auto removed = real->Trim();
+                assert(!real->IsOversized());
+
+                auto removed_set = top_sim.MakeSet(removed);
+                for (auto simpos : removed_set) {
+                    top_sim.RemoveTransaction(top_sim.GetRef(simpos));
+                }
+                assert(!top_sim.IsOversized());
+
+                // We should have some transactions left
+                uint64_t min_txs_left = std::min((uint64_t) max_cluster_count, max_cluster_size / max_sized_tx);
+                assert(top_sim.GetTransactionCount() >= min_txs_left);
+
                 break;
             }
         }

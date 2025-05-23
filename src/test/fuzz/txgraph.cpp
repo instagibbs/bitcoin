@@ -7,6 +7,7 @@
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/util/random.h>
+#include <test/util/cluster_linearize.h>
 #include <util/bitset.h>
 #include <util/feefrac.h>
 
@@ -17,6 +18,8 @@
 #include <set>
 #include <stdint.h>
 #include <utility>
+
+#include <streams.h>
 
 using namespace cluster_linearize;
 
@@ -272,6 +275,55 @@ struct SimTxGraph
         }
         return true;
     }
+
+    /** Returns a vector of tuples representing parent/child dependencies to add to make the entire graph one cluster */
+    std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> StitchClusters()
+    {
+        std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> ret;
+
+        auto todo = graph.Positions();
+
+        TxGraph::Ref* last_ref = nullptr;
+
+        // Walk all clusters and stitch them together "unidirectionally"
+        while (todo.Any()) {
+            auto component = graph.FindConnectedComponent(todo);
+
+            if (last_ref != nullptr) {
+                ret.push_back(std::make_pair(last_ref, GetRef(component.First())));
+            }
+
+            // New parent for next cluster
+            last_ref = GetRef(component.Last());
+
+            todo -= component;
+        }
+
+        return ret;
+    }
+
+    // Attach N-1 clusters to last cluster via direct deps
+    std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> StitchClusters2()
+    {
+        std::vector<std::pair<TxGraph::Ref*, TxGraph::Ref*>> ret;
+
+        auto todo = graph.Positions();
+
+        auto last_component = graph.FindConnectedComponent(todo);
+        todo -= last_component;
+
+        // Walk all clusters and stitch them together "unidirectionally" to last_component
+        while (todo.Any()) {
+            auto component = graph.FindConnectedComponent(todo);
+
+            ret.push_back(std::make_pair(GetRef(last_component.First()), GetRef(component.First())));
+
+            todo -= component;
+        }
+
+        return ret;
+    }
+
 };
 
 } // namespace
@@ -393,6 +445,9 @@ FUZZ_TARGET(txgraph)
         return chunk_feerates;
     };
 
+    // Used for unique sizes when possible
+    int32_t emptynum{1};
+
     LIMITED_WHILE(provider.remaining_bytes() > 0, 200) {
         // Read a one-byte command.
         int command = provider.ConsumeIntegral<uint8_t>();
@@ -435,6 +490,10 @@ FUZZ_TARGET(txgraph)
                     size = provider.ConsumeIntegralInRange<uint32_t>(1, 0xff);
                 }
                 FeePerWeight feerate{fee, size};
+                if (fee == 0 && size == 1) {
+                    // make these more unique for debugging...
+                    feerate.size = emptynum++;
+                }
                 // Create a real TxGraph::Ref.
                 auto ref = real->AddTransaction(feerate);
                 // Create a shared_ptr place in the simulation to put the Ref in.
@@ -837,6 +896,67 @@ FUZZ_TARGET(txgraph)
                     top_sim.RemoveTransaction(top_sim.GetRef(simpos));
                 }
                 assert(!top_sim.IsOversized());
+                break;
+            }  else if ((block_builders.empty() || sims.size() > 1) &&
+                         top_sim.GetTransactionCount() > max_cluster_count && !top_sim.IsOversized() && command-- == 0) {
+                // Merge clusters via unidirectional dependencies then Trim.
+                // This is used to avoid cycles in the implicit graph during Trim.
+
+                // Calculate max_sized_tx, we should have min(max_cluster_count, max_cluster_size/max_sized_tx)
+                // transactions in a single cluster left after the Trim later
+//                auto deps_to_add = top_sim.StitchClusters();
+                auto deps_to_add = top_sim.StitchClusters2();
+
+                for (auto& [par, chl] : deps_to_add) {
+                    top_sim.AddDependency(par, chl);
+                    real->AddDependency(*par, *chl);
+                }
+
+                // Shouldn't add anymore
+                //auto dummy_deps = top_sim.StitchClusters();
+                //assert(dummy_deps.empty());
+
+                // Check oversizedness directly since we're doing another step next
+                assert(real->IsOversized());
+                assert(top_sim.IsOversized());
+
+                int32_t max_sized_tx = 0;
+                for (auto i : top_sim.graph.Positions()) {
+                    const auto size = top_sim.graph.FeeRate(i).size;
+                    if (size > max_sized_tx) {
+                        max_sized_tx = size;
+                    }
+                }
+
+                std::vector<unsigned char> ser;
+                VectorWriter writer(ser, 0);
+                writer << Using<DepGraphFormatter>(top_sim.graph);
+                for (auto byte : ser) {
+                    printf("%02x", byte);
+                }
+                printf("\n");
+
+                auto removed = real->Trim();
+                assert(!real->IsOversized());
+
+                auto removed_set = top_sim.MakeSet(removed);
+                for (auto simpos : removed_set) {
+                    top_sim.RemoveTransaction(top_sim.GetRef(simpos));
+                }
+                assert(!top_sim.IsOversized());
+
+                VectorWriter writer2(ser, 0);
+                ser.clear();
+                writer2 << Using<DepGraphFormatter>(top_sim.graph);
+                for (auto byte : ser) {
+                    printf("%02x", byte);
+                }
+                printf("\n");
+
+                // We should have some transactions left
+                uint64_t min_txs_left = std::min((uint64_t) max_cluster_count, max_cluster_size / max_sized_tx);
+                assert(top_sim.GetTransactionCount() >= min_txs_left);
+
                 break;
             }
         }

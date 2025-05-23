@@ -2796,7 +2796,9 @@ std::vector<TxGraph::Ref*> TxGraphImpl::Trim() noexcept
                 new_size += ptr->m_uf_size;
             }
             // Skip the entry if this would violate any limit.
-            if (new_count > m_max_cluster_count || new_size > m_max_cluster_size) break;
+            if (new_count > m_max_cluster_count || new_size > m_max_cluster_size) {
+                break;
+            }
 
             // Union the partitions this transactions and all its dependencies are in together.
             auto rep = &entry;
@@ -2810,6 +2812,9 @@ std::vector<TxGraph::Ref*> TxGraphImpl::Trim() noexcept
                 // Reduce the number of unmet dependencies of chl_it, and if that brings the number
                 // to zero, add it to the heap.
                 Assume(chl_it->m_deps_left > 0);
+                if (chl_it->m_index == 4) {
+                    chl_it;
+                }
                 if (--chl_it->m_deps_left == 0) {
                     // Initialize as a singleton partition.
                     chl_it->m_uf_parent = &*chl_it;

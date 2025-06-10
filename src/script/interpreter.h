@@ -271,6 +271,11 @@ public:
          return false;
     }
 
+    virtual uint256 GetTemplateHash(ScriptExecutionData& execdata) const
+    {
+        return {};
+    }
+
     virtual ~BaseSignatureChecker() = default;
 };
 
@@ -307,6 +312,7 @@ public:
     bool CheckSchnorrSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
     bool CheckLockTime(const CScriptNum& nLockTime) const override;
     bool CheckSequence(const CScriptNum& nSequence) const override;
+    uint256 GetTemplateHash(ScriptExecutionData& execdata) const override;
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;
@@ -337,6 +343,11 @@ public:
     bool CheckSequence(const CScriptNum& nSequence) const override
     {
         return m_checker.CheckSequence(nSequence);
+    }
+
+    uint256 GetTemplateHash(ScriptExecutionData& execdata) const override
+    {
+        return m_checker.GetTemplateHash(execdata);
     }
 };
 

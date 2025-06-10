@@ -1213,6 +1213,20 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 }
                 break;
 
+                case OP_TEMPLATEHASH:
+                {
+                    // OP_TEMPLATEHASH is only available in Tapscript. Note this is the exact same error
+                    // returned in the default case, which would be the one hit by OP_SUCCESS187 before
+                    // the introduction of OP_TEMPLATEHASH.
+                    if (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) {
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+                    }
+
+                    const uint256 template_hash{checker.GetTemplateHash(execdata)};
+                    stack.push_back({template_hash.begin(), template_hash.end()});
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -1461,6 +1475,7 @@ template PrecomputedTransactionData::PrecomputedTransactionData(const CMutableTr
 const HashWriter HASHER_TAPSIGHASH{TaggedHash("TapSighash")};
 const HashWriter HASHER_TAPLEAF{TaggedHash("TapLeaf")};
 const HashWriter HASHER_TAPBRANCH{TaggedHash("TapBranch")};
+const HashWriter HASHER_TEMPLATEHASH{TaggedHash("TemplateHash")};
 
 static bool HandleMissingData(MissingDataBehavior mdb)
 {
@@ -1781,6 +1796,27 @@ bool GenericTransactionSignatureChecker<T>::CheckSequence(const CScriptNum& nSeq
     return true;
 }
 
+template<class T>
+uint256 GenericTransactionSignatureChecker<T>::GetTemplateHash(ScriptExecutionData& execdata) const
+{
+    assert(txdata && txdata->m_bip341_taproot_ready);
+    assert(execdata.m_annex_init);
+
+    HashWriter ss{HASHER_TEMPLATEHASH};
+    ss << txTo->version;
+    ss << txTo->nLockTime;
+    ss << txdata->m_sequences_single_hash;
+    ss << txdata->m_outputs_single_hash;
+    const uint8_t annex_present = (execdata.m_annex_present ? 1 : 0);
+    ss << annex_present;
+    ss << nIn;
+    if (execdata.m_annex_present) {
+        ss << execdata.m_annex_hash;
+    }
+
+    return ss.GetSHA256();
+}
+
 // explicit instantiation
 template class GenericTransactionSignatureChecker<CTransaction>;
 template class GenericTransactionSignatureChecker<CMutableTransaction>;
@@ -1800,6 +1836,16 @@ static bool ExecuteWitnessScript(const std::span<const valtype>& stack_span, con
             }
             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
             if (IsOpSuccess(opcode)) {
+                // Do not return early success on OP_TEMPLATEHASH (OP_SUCCESS187) once it is active. It is
+                // non-standard until then.
+                if (opcode == OP_TEMPLATEHASH) {
+                    if (flags & SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH) {
+                        return set_error(serror, SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH);
+                    }
+                    if (flags & SCRIPT_VERIFY_TEMPLATEHASH) {
+                        continue;
+                    }
+                }
                 if (flags & SCRIPT_VERIFY_DISCOURAGE_OP_SUCCESS) {
                     return set_error(serror, SCRIPT_ERR_DISCOURAGE_OP_SUCCESS);
                 }

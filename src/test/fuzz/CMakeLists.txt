@@ -117,6 +117,7 @@ add_executable(fuzz
   string.cpp
   strprintf.cpp
   system.cpp
+  templatehash.cpp
   timeoffsets.cpp
   torcontrol.cpp
   transaction.cpp

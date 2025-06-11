@@ -1438,6 +1438,13 @@ void PrecomputedTransactionData::Init(const T& txTo, std::vector<CTxOut>&& spent
                 uses_bip143_segwit = true;
             }
         }
+        // P2TH re-uses the Taproot cached hashes.
+        if (m_spent_outputs_ready) {
+            const auto& spent_spk{m_spent_outputs[inpos].scriptPubKey};
+            if (spent_spk.size() == 2 + WITNESS_V2_TEMPLATEHASH_SIZE && spent_spk[0] == OP_2) {
+                uses_bip341_taproot = true;
+            }
+        }
         if (uses_bip341_taproot && uses_bip143_segwit) break; // No need to scan further if we already need all.
     }
 
@@ -1989,6 +1996,28 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
             }
             return set_success(serror);
         }
+    } else if (witversion == 2 && program.size() == WITNESS_V2_TEMPLATEHASH_SIZE && !is_p2sh) {
+        if (flags & SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH) {
+            return set_error(serror, SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH);
+        }
+        if (!(flags & SCRIPT_VERIFY_TEMPLATEHASH)) {
+            return set_success(serror);
+        }
+        // Pay to template hash allows for an annex similarly to Pay to Taproot.
+        execdata.m_annex_present = false;
+        if (!stack.empty() && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
+            const valtype& annex{SpanPopBack(stack)};
+            execdata.m_annex_hash = (HashWriter{} << annex).GetSHA256();
+            execdata.m_annex_present = true;
+        }
+        execdata.m_annex_init = true;
+        // Compare the committed template hash with this transaction's.
+        const uint256& template_hash{program};
+        const uint256 tx_to_hash{checker.GetTemplateHash(execdata)};
+        if (template_hash != tx_to_hash) {
+            return set_error(serror, ScriptError::SCRIPT_ERR_TEMPLATEHASH_MISMATCH);
+        }
+        return true;
     } else if (!is_p2sh && CScript::IsPayToAnchor(witversion, program)) {
         return true;
     } else {

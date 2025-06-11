@@ -391,21 +391,31 @@ class PackageRelayTest(BitcoinTestFramework):
 
         peer_sender = node.add_p2p_connection(P2PInterface())
 
-        for package in [[low_fee_parent_1, high_fee_child_1], [low_fee_parent_2, high_fee_child_2]]:
-            low_fee_parent, high_fee_child = package
+#        for package in [[low_fee_parent_1, high_fee_child_1], [low_fee_parent_2, high_fee_child_2]]:
+#            low_fee_parent, high_fee_child = package
 
-            # 1. Child is received first (perhaps the low feerate parent didn't meet feefilter or the requests were sent to different nodes). It is missing an input.
-            high_child_wtxid_int = int(high_fee_child["tx"].getwtxid(), 16)
-            peer_sender.send_and_ping(msg_inv([CInv(t=MSG_WTX, h=high_child_wtxid_int)]))
-            peer_sender.wait_for_getdata([high_child_wtxid_int])
-            peer_sender.send_and_ping(msg_tx(high_fee_child["tx"]))
+        from pdb import set_trace
+        set_trace()
+        # 1. Ulimate child is received first
+        high_child_2_wtxid_int = int(high_fee_child_2["tx"].getwtxid(), 16)
+        peer_sender.send_and_ping(msg_inv([CInv(t=MSG_WTX, h=high_child_2_wtxid_int)]))
+        peer_sender.wait_for_getdata([high_child_2_wtxid_int])
+        peer_sender.send_and_ping(msg_tx(high_fee_child_2["tx"]))
 
-            # 2. Node requests the missing parent by txid.
-            parent_txid_int = int(low_fee_parent["txid"], 16)
-            peer_sender.wait_for_getdata([parent_txid_int])
+        # 2. Node requests the missing parent by txid.
+        parent_2_txid_int = int(low_fee_parent_2["txid"], 16)
+        peer_sender.wait_for_getdata([parent_2_txid_int])
 
-            # 3. Sender relays the parent. Parent+Child are evaluated as a package and accepted.
-            peer_sender.send_and_ping(msg_tx(low_fee_parent["tx"]))
+        # 3. Sender relays the parent. Node requests first high-fee child
+        peer_sender.send_and_ping(msg_tx(low_fee_parent_2["tx"]))
+        child_1_txid_int = int(high_fee_child_1["txid"], 16)
+        peer_sender.wait_for_getdata([child_1_txid_int])
+
+        # 4. Send first child, then wait and respond to the final parent request
+        peer_sender.send_and_ping(msg_tx(high_fee_child_1["tx"]))
+        parent_1_txid_int = int(low_fee_parent_1["txid"], 16)
+        peer_sender.wait_for_getdata([parent_1_txid_int])
+        peer_sender.send_and_ping(msg_tx(low_fee_parent_1["tx"]))
 
         # 4. All transactions should now be in mempool.
         node_mempool = node.getrawmempool()

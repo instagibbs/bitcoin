@@ -82,6 +82,7 @@ class RPCPackagesTest(BitcoinTestFramework):
         self.independent_txns_testres_blank = [{
             "txid": res["txid"], "wtxid": res["wtxid"]} for res in self.independent_txns_testres]
 
+        self.test_chain_package_submit()
         self.test_independent(coin)
         self.test_chain()
         self.test_multiple_children()
@@ -500,6 +501,37 @@ class RPCPackagesTest(BitcoinTestFramework):
         assert "error" not in pkg_result["tx-results"][chained_txns_burn[0]["wtxid"]]
         assert_equal(pkg_result["tx-results"][tx.getwtxid()]["error"], "scriptpubkey")
         assert_equal(node.getrawmempool(), [chained_txns_burn[0]["txid"]])
+
+    def test_chain_package_submit(self):
+        self.log.info("Test that submitpackage can send a package that has in-mempool ancestors")
+        node = self.nodes[0]
+        peer = node.add_p2p_connection(P2PTxInvStore())
+
+        parent_tx = self.wallet.create_self_transfer()
+        child_tx = self.wallet.create_self_transfer(utxo_to_spend=parent_tx["new_utxo"])
+        grandchild_tx = self.wallet.create_self_transfer(utxo_to_spend=child_tx["new_utxo"])
+        ggrandchild_tx = self.wallet.create_self_transfer(utxo_to_spend=grandchild_tx["new_utxo"])
+
+        # Submit first package and check acceptance
+        submitpackage_result = node.submitpackage(package=[parent_tx["hex"], child_tx["hex"]])
+        mempool = node.getrawmempool()
+        assert parent_tx["txid"] in mempool
+        assert child_tx["txid"] in mempool
+        assert grandchild_tx["txid"] not in mempool
+        assert ggrandchild_tx["txid"] not in mempool
+
+        # Next submit final dependant package
+        submitpackage_result = node.submitpackage(package=[grandchild_tx["hex"], ggrandchild_tx["hex"]])
+        mempool = node.getrawmempool()
+        assert parent_tx["txid"] in mempool
+        assert child_tx["txid"] in mempool
+        assert grandchild_tx["txid"] in mempool
+        assert ggrandchild_tx["txid"] in mempool
+
+        # The node should announce each transaction.
+        peer.wait_for_broadcast([tx["tx"].getwtxid() for tx in [parent_tx, child_tx, grandchild_tx, ggrandchild_tx]])
+        self.generate(node, 1)
+
 
 if __name__ == "__main__":
     RPCPackagesTest(__file__).main()

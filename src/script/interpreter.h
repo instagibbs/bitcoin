@@ -146,6 +146,12 @@ enum class script_verify_flag_name : uint8_t {
     // Making unknown public key versions (in BIP 342 scripts) non-standard
     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
 
+    // OP_TEMPLATEHASH validation (BIP 446)
+    SCRIPT_VERIFY_TEMPLATEHASH,
+
+    // Make OP_TEMPLATEHASH spend non-standard before activation.
+    SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH,
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER

@@ -1233,7 +1233,12 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     const CTransaction& tx = *ws.m_ptx;
     TxValidationState& state = ws.m_state;
 
-    constexpr unsigned int scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
+    unsigned int scriptVerifyFlags = STANDARD_SCRIPT_VERIFY_FLAGS;
+
+    // Past activation, don't discourage OP_TEMPLATEHASH spends.
+    if (DeploymentActiveAt(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman, Consensus::DEPLOYMENT_TEMPLATEHASH)) {
+        scriptVerifyFlags &= ~SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH;
+    }
 
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
@@ -2404,6 +2409,11 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
     // Enforce BIP147 NULLDUMMY (activated simultaneously with segwit)
     if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_SEGWIT)) {
         flags |= SCRIPT_VERIFY_NULLDUMMY;
+    }
+
+    // Enforce OP_TEMPLATEHASH (BIPxx)
+    if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_TEMPLATEHASH)) {
+        flags |= SCRIPT_VERIFY_TEMPLATEHASH;
     }
 
     return flags;

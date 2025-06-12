@@ -136,6 +136,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 1815; // 90%
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 2016;
 
+        // Deployment of OP_TEMPLATEHASH
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].min_activation_height = 0;
+
         ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000001128750f82f4c366153a3a030"};
@@ -261,6 +267,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 1512; // 75%
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 2016;
 
+        // Deployment of OP_TEMPLATEHASH
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].min_activation_height = 0;
+
         ApplyDeploymentOptions(opts.dep_opts);
 
         consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000017dde1c649f3708d14b6"};
@@ -362,6 +374,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 1512; // 75%
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 2016;
+
+        // Deployment of OP_TEMPLATEHASH
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].min_activation_height = 0;
 
         ApplyDeploymentOptions(opts.dep_opts);
 
@@ -508,6 +526,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 1815; // 90%
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 2016;
 
+        // Deployment of OP_TEMPLATEHASH
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nStartTime = Consensus::BIP9Deployment::NEVER_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].min_activation_height = 0;
+
         ApplyDeploymentOptions(options.dep_opts);
 
         // message start is defined as the first 4 bytes of the sha256d of the block script
@@ -591,6 +615,14 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].min_activation_height = 0; // No activation delay
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].threshold = 108; // 75%
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY].period = 144; // Faster than normal for regtest (144 instead of 2016)
+
+        // Deployment of OP_TEMPLATEHASH
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].bit = 3;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nStartTime = Consensus::BIP9Deployment::ALWAYS_ACTIVE;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].min_activation_height = 0; // No activation delay
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].threshold = 108; // 75%
+        consensus.vDeployments[Consensus::DEPLOYMENT_TEMPLATEHASH].period = 144;
 
         consensus.nMinimumChainWork = uint256{};
         consensus.defaultAssumeValid = uint256{};

@@ -1812,7 +1812,7 @@ static void CheckTemplateMatch(const CMutableTransaction& tx, std::vector<CTxOut
     bool res{VerifyScript(tx.vin[in_index].scriptSig, spent_spk, &tx.vin[in_index].scriptWitness, FLAGS, checker, &err)};
 
     // Check script validation result, if not valid make sure the failure is the one expected for `<hash> OP_TEMPLATEHASH OP_EQUAL`.
-    BOOST_CHECK_MESSAGE(res == is_valid, std::string{"Script validation unexpectedly "} + (res ? "succeeded" : "failed") + ": " + comment);
+    BOOST_CHECK_MESSAGE(res == is_valid, std::string{"Script validation unexpectedly "} + (res ? "succeeded" : "failed") + " with err '" + ScriptErrorString(err) + "': " + comment);
     if (!is_valid) {
         BOOST_CHECK_MESSAGE(err == ScriptError::SCRIPT_ERR_EVAL_FALSE, std::string{"Unexpected error for '"} + comment + "': " + ScriptErrorString(err));
     }
@@ -2032,6 +2032,77 @@ BOOST_AUTO_TEST_CASE(templatehash)
     fputs(json_str.c_str(), file);
     fclose(file);
 #endif
+}
+
+/** Sanity check p2th. */
+BOOST_AUTO_TEST_CASE(paytotemplatehash)
+{
+    std::vector<TemplateHashTestCase> dummy_cases;
+
+    // The transaction whose template hash is to be checked.
+    CMutableTransaction tx;
+    tx.vin.resize(1);
+
+    // Construct the P2TH scriptpubkey.
+    const uint256 template_hash{GetTemplateHash(tx, 0)};
+    const auto spk{CScript() << OP_2 << template_hash};
+
+    // The outputs spent by the transaction being checked.
+    std::vector<CTxOut> spent_outputs(tx.vin.size());
+    spent_outputs[0] = CTxOut{424243, spk};
+
+    // Script validation must pass for the transaction which matches this template.
+    CheckTemplateMatch(tx, Clone(spent_outputs), 0, /*is_valid=*/true, dummy_cases, "");
+
+    // Check script validation results in a TEMPLATEHASH_MISMATCH error.
+    auto check_template_mismatches = [](const CMutableTransaction& tx, const CScript& spent_spk, unsigned in_index) {
+        constexpr unsigned FLAGS{MANDATORY_SCRIPT_VERIFY_FLAGS | SCRIPT_VERIFY_TEMPLATEHASH};
+        constexpr CAmount dummy_am{0}; // We never check signatures.
+        constexpr auto dummy_mdb{MissingDataBehavior::ASSERT_FAIL};
+
+        PrecomputedTransactionData precomp;
+        std::vector<CTxOut> spent_outputs(tx.vin.size());
+        spent_outputs[in_index] = CTxOut{424243, spent_spk};
+        precomp.Init(tx, std::move(spent_outputs));
+
+        const auto checker{GenericTransactionSignatureChecker(&tx, in_index, dummy_am, precomp, dummy_mdb)};
+        ScriptError err;
+        BOOST_CHECK(!VerifyScript(tx.vin[in_index].scriptSig, spent_spk, &tx.vin[in_index].scriptWitness, FLAGS, checker, &err));
+        BOOST_CHECK_EQUAL(err, ScriptError::SCRIPT_ERR_TEMPLATEHASH_MISMATCH);
+    };
+
+    // Script validation must fail if the spending transaction doesn't match.
+    {
+        CMutableTransaction tx2{tx};
+        tx2.nLockTime += 1;
+        check_template_mismatches(tx2, spk, 0);
+    }
+
+    // P2TH supports Taproot-like annexes. The above template hash did not commit to any.
+    {
+        CMutableTransaction tx2{tx};
+        const std::vector<uint8_t> annex{{ANNEX_TAG, 'n', 'o', 't', 'a', 'j', 'p', 'e', 'g'}};
+        tx2.vin[0].scriptWitness.stack.push_back(annex);
+        check_template_mismatches(tx2, spk, 0);
+    }
+
+    // However if we set one in the template hash commitment then script validation will pass.
+    {
+        CMutableTransaction tx2{tx};
+        const std::vector<uint8_t> annex{{ANNEX_TAG, 'a', 'j', 'p', 'e', 'g'}};
+        tx2.vin[0].scriptWitness.stack.push_back(annex);
+
+        const uint256 annexed_template_hash{GetTemplateHash(tx2, 0)};
+        const auto spk2 = CScript() << OP_2 << annexed_template_hash;
+
+        auto spent_outputs2{spent_outputs};
+        spent_outputs2[0] = CTxOut{989898, spk2};
+        CheckTemplateMatch(tx2, std::move(spent_outputs2), 0, /*is_valid=*/true, dummy_cases, "");
+
+        // And if the spending tx doesn't set the committed annex, it will fail.
+        tx2.vin[0].scriptWitness.stack.clear();
+        check_template_mismatches(tx2, spk2, 0);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

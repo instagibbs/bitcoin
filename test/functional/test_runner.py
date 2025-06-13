@@ -358,6 +358,7 @@ BASE_SCRIPTS = [
     'feature_framework_startup_failures.py',
     'feature_shutdown.py',
     'wallet_migration.py',
+    'feature_templatehash.py',
     'p2p_ibd_txrelay.py',
     'p2p_seednode.py',
     # Don't append tests at the end to avoid merge conflicts

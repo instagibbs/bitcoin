@@ -814,6 +814,21 @@ def BIP341_sha_sequences(txTo):
 def BIP341_sha_outputs(txTo):
     return sha256(b"".join(o.serialize() for o in txTo.vout))
 
+def TemplateMsg(txTo, input_index=0, annex=None):
+    assert (input_index < len(txTo.vin))
+    ss = txTo.version.to_bytes(4, "little")
+    ss += txTo.nLockTime.to_bytes(4, "little")
+    ss += BIP341_sha_sequences(txTo)
+    ss += BIP341_sha_outputs(txTo)
+    annex_present = 0
+    if annex is not None:
+        annex_present |= 1
+    ss += bytes([annex_present])
+    ss += input_index.to_bytes(4, "little")
+    if (annex is not None):
+        ss += sha256(ser_string(annex))
+    return ss
+
 def TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index=0, *, scriptpath=False, leaf_script=None, codeseparator_pos=-1, annex=None, leaf_ver=LEAF_VERSION_TAPSCRIPT):
     assert (len(txTo.vin) == len(spent_utxos))
     assert (input_index < len(txTo.vin))

@@ -73,7 +73,9 @@ from test_framework.script import (
     OP_NOTIF,
     OP_PUSHDATA1,
     OP_RETURN,
+    OP_SIZE,
     OP_SWAP,
+    OP_TEMPLATEHASH,
     OP_VERIFY,
     SIGHASH_DEFAULT,
     SIGHASH_ALL,
@@ -85,6 +87,7 @@ from test_framework.script import (
     SegwitV0SignatureMsg,
     TaggedHash,
     TaprootSignatureMsg,
+    TemplateMsg,
     is_op_success,
     taproot_construct,
 )
@@ -266,6 +269,18 @@ def default_sighash(ctx):
         else:
             return hash256(msg)
 
+def default_templatehash_message(ctx):
+    """Default expression for "template_hash_msg"."""
+    tx = get(ctx, "tx")
+    idx = get(ctx, "idx")
+    annex = get(ctx, "annex")
+    return TemplateMsg(tx, idx, annex=annex)
+
+def default_templatehash(ctx):
+    """Default expression for "template_hash": the tagged hash of the digest."""
+    msg = get(ctx, "template_hash_msg")
+    return TaggedHash("TemplateHash", msg)
+
 def default_tweak(ctx):
     """Default expression for "tweak": None if a leaf is specified, tap[0] otherwise."""
     if get(ctx, "leaf") is None:
@@ -393,6 +408,10 @@ DEFAULT_CONTEXT = {
     "sigmsg": default_sigmsg,
     # The sighash value (32 bytes)
     "sighash": default_sighash,
+    # The template msg value (preimage of template_hash)
+    "template_hash_msg": default_templatehash_message,
+    # The template_hash value (32 bytes)
+    "template_hash": default_templatehash,
     # The information about the chosen script path spend (TaprootLeafInfo object).
     "tapleaf": default_tapleaf,
     # The script to push, and include in the sighash, for a taproot script path spend.
@@ -626,6 +645,9 @@ ERR_UNDECODABLE = {"err_msg": "Opcode missing or not understood"}
 ERR_NO_SUCCESS = {"err_msg": "Script evaluated without error but finished with a false/empty top stack element"}
 ERR_EMPTY_WITNESS = {"err_msg": "Witness program was passed an empty witness"}
 ERR_CHECKSIGVERIFY = {"err_msg": "Script failed an OP_CHECKSIGVERIFY operation"}
+ERR_EVAL_FALSE = {"err_msg": "Script evaluated without error but finished with a false/empty top stack element"}
+ERR_BAD_OPCODE = {"err_msg": "Opcode missing or not understood"}
+ERR_EQUALVERIFY = {"err_msg": "Script failed an OP_EQUALVERIFY operation"}
 
 VALID_SIGHASHES_ECDSA = [
     SIGHASH_ALL,
@@ -1261,7 +1283,7 @@ def spenders_taproot_active():
                     add_spender(spenders, "legacy/pk-wrongkey", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, script=key_to_p2pk_script(pubkey1), **SINGLE_SIG, key=eckey1, failure={"key": eckey2}, sigops_weight=4-3*witv0, **ERR_NO_SUCCESS)
                     add_spender(spenders, "legacy/pkh-sighashflip", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, pkh=pubkey1, key=eckey1, **SIGHASH_BITFLIP, sigops_weight=4-3*witv0, **ERR_NO_SUCCESS)
 
-    # Verify that OP_CHECKSIGADD wasn't accidentally added to pre-taproot validation logic.
+    # Verify that OP_CHECKSIGADD, OP_CSFS, OP_IK and OP_TEMPLATEHASH weren't accidentally added to pre-taproot validation logic.
     for p2sh in [False, True]:
         for witv0 in [False, True]:
             for hashtype in VALID_SIGHASHES_ECDSA + [random.randrange(0x04, 0x80), random.randrange(0x84, 0x100)]:
@@ -1273,6 +1295,8 @@ def spenders_taproot_active():
             # so we use arb non-0 byte push via valid pubkey
             add_spender(spenders, "compat/nocsfs", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, b'', b'', pubs[0], OP_CHECKSIGFROMSTACK, OP_DROP, OP_ENDIF]), inputs=[pubs[0], b''], failure={"inputs": [pubs[0], pubs[0]]}, **ERR_UNDECODABLE)
             add_spender(spenders, "compat/noik", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, OP_INTERNALKEY, OP_RETURN, OP_ENDIF]), inputs=[pubs[0], b''], failure={"inputs": [pubs[0], pubs[0]]}, **ERR_UNDECODABLE)
+            add_spender(spenders, "compat/noth", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, OP_TEMPLATEHASH, OP_ENDIF, OP_1]), inputs=[b''], failure={"inputs": [b'\x01']}, **ERR_BAD_OPCODE)
+
     return spenders
 
 
@@ -1335,6 +1359,28 @@ def bip349_ik_spenders_nonstandard():
 
     return spenders
 
+
+def templatehash_spenders_nonstandard():
+    """Spenders for testing that pre-active TEMPLATEHASH usage is discouraged"""
+
+    spenders = []
+
+    sec = generate_privkey()
+    pub, _ = compute_xonly_pubkey(sec)
+    scripts = [
+        ("basic", CScript([OP_TEMPLATEHASH])),
+        ("emptystack", CScript([OP_TEMPLATEHASH, OP_DROP])),
+    ]
+    tap = taproot_construct(pub, scripts)
+
+    # Valid but non-standard until activation
+    add_spender(spenders, "discouraged_template/basic", tap=tap, leaf="basic", standard=False)
+    # This will fail after activation
+    add_spender(spenders, "discouraged_template/emptystack", tap=tap, leaf="emptystack", standard=False)
+
+    return spenders
+
+
 def bip348_csfs_spenders():
     secs = [generate_privkey() for _ in range(2)]
     pubs = [compute_xonly_pubkey(sec)[0] for sec in secs]
@@ -1396,6 +1442,64 @@ def bip348_csfs_spenders():
 
     return spenders
 
+
+def templatehash_spenders_active():
+    """Spenders for testing that post-active TEMPLATEHASH usage is enforced"""
+
+    spenders = []
+
+    sec = generate_privkey()
+    pub, _ = compute_xonly_pubkey(sec)
+    scripts = [
+        ("basic", CScript([OP_TEMPLATEHASH])),
+        ("emptystack", CScript([OP_TEMPLATEHASH, OP_DROP])),
+        ("2stack", CScript([OP_TEMPLATEHASH, OP_1])),
+        ("equality", CScript([OP_TEMPLATEHASH, OP_EQUAL])),
+        ("32bytes", CScript([OP_TEMPLATEHASH, OP_SIZE, 0x20, OP_EQUALVERIFY])),
+        ("wrongbytes", CScript([OP_TEMPLATEHASH, OP_SIZE, 0x21, OP_EQUALVERIFY])),
+        ("doublegood", CScript([OP_TEMPLATEHASH, OP_TEMPLATEHASH, OP_EQUAL])),
+    ]
+    tap = taproot_construct(pub, scripts)
+
+    add_spender(spenders, "template/basic", tap=tap, leaf="basic", failure={"leaf": "emptystack"}, **ERR_CLEANSTACK)
+    add_spender(spenders, "template/2stack", tap=tap, leaf="basic", failure={"leaf": "2stack"}, **ERR_CLEANSTACK)
+    add_spender(spenders, "template/32bytes", tap=tap, leaf="32bytes", failure={"leaf": "wrongbytes"}, **ERR_EQUALVERIFY)
+    add_spender(spenders, "template/doublegood", tap=tap, leaf="doublegood", failure={"inputs": [random.randbytes(1)]}, **ERR_CLEANSTACK)
+
+    TEMPLATEHASH_BITFLIP = {"failure": {"template_hash": bitflipper(default_templatehash)}}
+    TEMPLATEHASH_POP_BYTE = {"failure": {"template_hash": byte_popper(default_templatehash)}}
+    TEMPLATEHASH_ADD_ZERO = {"failure": {"template_hash": zero_appender(default_templatehash)}}
+
+    # Test various 31/32/33-byte pushes with mutations
+    for i, mutator in enumerate([TEMPLATEHASH_BITFLIP, TEMPLATEHASH_POP_BYTE, TEMPLATEHASH_ADD_ZERO]):
+        add_spender(spenders, f"template/equality_{i}", tap=tap, leaf="equality", inputs=[getter("template_hash")], **mutator, **ERR_EVAL_FALSE)
+
+    # Test random other lengths
+    for i in range(256):
+        if i == 32:
+            continue
+        wrongsize_template_hash = random.randbytes(i)
+        add_spender(spenders, f"template/equality_rand_{i}", tap=tap, leaf="equality", inputs=[getter("template_hash")], failure={"inputs": [wrongsize_template_hash]}, **ERR_EVAL_FALSE)
+
+    # Test annex commitment
+    for i in range(32):
+        # No annex commitment
+        add_spender(spenders, f"template/equality_annex_none_{i}", tap=tap, leaf="equality", inputs=[getter("template_hash")], failure={"template_hash": override(default_templatehash, annex=bytes([ANNEX_TAG]) + random.randbytes(i))}, **ERR_EVAL_FALSE)
+
+        # Annex committed, compared to none
+        add_spender(spenders, f"template/equality_annex_{i}", tap=tap, leaf="equality", standard=False, annex=bytes([ANNEX_TAG]) + random.randbytes(i), inputs=[getter("template_hash")], failure={"template_hash": override(default_templatehash, annex=None)}, **ERR_EVAL_FALSE)
+
+        # Both have annex, no collision allowed
+        if i > 0:
+            annex = bytes([ANNEX_TAG]) + random.randbytes(i)
+            wrong_annex = None
+            while wrong_annex is None or wrong_annex == annex:
+                wrong_annex = bytes([ANNEX_TAG]) + random.randbytes(i)
+            add_spender(spenders, f"template/equality_annex_mismatch_{i}", tap=tap, leaf="equality", annex=annex, standard=False, inputs=[getter("template_hash")], failure={"template_hash": override(default_sighash, annex=wrong_annex)}, **ERR_EVAL_FALSE)
+
+    return spenders
+
+
 # Consensus validation flags to use in dumps for tests with "legacy/" or "inactive/" prefix.
 LEGACY_FLAGS = "P2SH,DERSIG,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS,NULLDUMMY"
 # Consensus validation flags to use in dumps for all other tests.
@@ -1454,7 +1558,8 @@ class TaprootTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.extra_args = [["-vbparams=checksigfromstack:0:3999999999",
-                            "-vbparams=internalkey:0:3999999999"]]
+                            "-vbparams=internalkey:0:3999999999",
+                            "-vbparams=templatehash:0:3999999999"]]
         self.setup_clean_chain = True
 
     def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, sigops_weight=0, witness=False, accept=False):
@@ -1927,20 +2032,24 @@ class TaprootTest(BitcoinTestFramework):
     def run_test(self):
         self.gen_test_vectors()
 
-        self.log.info("CSFS and IK Pre-activation tests...")
+        self.log.info("CSFS, IK and TEMPLATEHASH Pre-activation tests...")
         assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["checksigfromstack"]["heretical"]["status"],"defined")
         assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["internalkey"]["heretical"]["status"],"defined")
+        assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["templatehash"]["heretical"]["status"], "defined")
         self.generate(self.nodes[0], 144)
         assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["checksigfromstack"]["heretical"]["status"],"started")
         assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["internalkey"]["heretical"]["status"],"started")
+        assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["templatehash"]["heretical"]["status"], "started")
         signal_ver_csfs = int(self.nodes[0].getdeploymentinfo()["deployments"]["checksigfromstack"]["heretical"]["signal_activate"], 16)
         signal_ver_ik = int(self.nodes[0].getdeploymentinfo()["deployments"]["internalkey"]["heretical"]["signal_activate"], 16)
+        signal_ver_th = int(self.nodes[0].getdeploymentinfo()["deployments"]["templatehash"]["heretical"]["signal_activate"], 16)
 
-        self.test_spenders(self.nodes[0], bip348_csfs_spenders_nonstandard() + bip349_ik_spenders_nonstandard(), input_counts=[1, 2])
+        nonstd_spenders = bip348_csfs_spenders_nonstandard() + bip349_ik_spenders_nonstandard() + templatehash_spenders_nonstandard()
+        self.test_spenders(self.nodes[0], nonstd_spenders, input_counts=[1, 2])
 
-        self.log.info("Activating CSFS and IK")
+        self.log.info("Activating CSFS, IK and TEMPLATEHASH")
         now = self.nodes[0].getblock(self.nodes[0].getbestblockhash())["time"]
-        for signal in [signal_ver_csfs, signal_ver_ik]:
+        for signal in [signal_ver_csfs, signal_ver_ik, signal_ver_th]:
             coinbase_tx = create_coinbase(self.nodes[0].getblockcount() + 1)
             block = create_block(hashprev=int(self.nodes[0].getbestblockhash(), 16), ntime=now, coinbase=coinbase_tx, version=signal)
             block.solve()
@@ -1949,9 +2058,11 @@ class TaprootTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 288)
         assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["checksigfromstack"]["heretical"]["status"],"active")
         assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["internalkey"]["heretical"]["status"],"active")
+        assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["templatehash"]["heretical"]["status"], "active")
 
         self.log.info("Post-activation tests...")
-        consensus_spenders = spenders_taproot_active() + bip348_csfs_spenders() + spenders_internalkey_active()
+
+        consensus_spenders = spenders_taproot_active() + bip348_csfs_spenders() + spenders_internalkey_active() + templatehash_spenders_active()
         self.test_spenders(self.nodes[0], consensus_spenders, input_counts=[1, 2, 2, 2, 2, 3])
         # Run each test twice; once in isolation, and once combined with others. Testing in isolation
         # means that the standardness is verified in every test (as combined transactions are only standard

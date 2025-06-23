@@ -65,6 +65,7 @@ from test_framework.script import (
     OP_EQUAL,
     OP_EQUALVERIFY,
     OP_IF,
+    OP_INTERNALKEY,
     OP_NOP,
     OP_NOT,
     OP_NOTIF,
@@ -660,6 +661,22 @@ MIN_FEE = 50000
 
 # === Actual test cases ===
 
+def spenders_internalkey_active():
+
+    secs = [generate_privkey() for _ in range(8)]
+    pubs = [compute_xonly_pubkey(sec)[0] for sec in secs]
+
+    spenders = []
+
+    scripts = [
+        ("ik", CScript([OP_INTERNALKEY, OP_EQUAL])),
+    ]
+
+    tap = taproot_construct(pubs[0], scripts)
+
+    add_spender(spenders, "ik/success", tap=tap, leaf="ik", inputs=[pubs[0]], failure={"inputs": [pubs[1]]})
+
+    return spenders
 
 def spenders_taproot_active():
     """Return a list of Spenders for testing post-Taproot activation behavior."""
@@ -1784,7 +1801,7 @@ class TaprootTest(BitcoinTestFramework):
         self.gen_test_vectors()
 
         self.log.info("Post-activation tests...")
-        self.test_spenders(self.nodes[0], spenders_taproot_active(), input_counts=[1, 2, 2, 2, 2, 3])
+        self.test_spenders(self.nodes[0], spenders_taproot_active() + spenders_internalkey_active(), input_counts=[1, 2, 2, 2, 2, 3])
         # Run each test twice; once in isolation, and once combined with others. Testing in isolation
         # means that the standardness is verified in every test (as combined transactions are only standard
         # when all their inputs are standard).

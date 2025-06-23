@@ -663,7 +663,7 @@ MIN_FEE = 50000
 # === Actual test cases ===
 
 
-def spenders_taproot_active():
+def spenders_taproot_active(bip348_active):
     """Return a list of Spenders for testing post-Taproot activation behavior."""
 
     secs = [generate_privkey() for _ in range(8)]
@@ -1101,14 +1101,17 @@ def spenders_taproot_active():
         lambda n, pk: (CScript([OP_DROP, OP_0, pk, OP_CHECKSIG, OP_NOT, OP_VERIFY, pk] + [OP_2DUP, OP_CHECKSIG, OP_VERIFY] * n + [OP_CHECKSIG]), n + 1),
         # n OP_CHECKSIGADDs and 1 OP_CHECKSIG, but also an OP_CHECKSIGADD with an empty signature.
         lambda n, pk: (CScript([OP_DROP, OP_0, OP_10, pk, OP_CHECKSIGADD, OP_10, OP_EQUALVERIFY, pk] + [OP_2DUP, OP_16, OP_SWAP, OP_CHECKSIGADD, b'\x11', OP_EQUALVERIFY] * n + [OP_CHECKSIG]), n + 1),
-        # n OP_CHECKSIGFROMSTACKs, dropping the signature given, and just validate against embedded sigs
-        lambda n, pk: (CScript([OP_2DROP, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n),
-        # 1 CHECKSIGVERIFY followed by n OP_CHECKSIGFROMSTACKs, all signatures non-empty and validated
-        lambda n, pk: (CScript([OP_DROP, pk, OP_CHECKSIGVERIFY, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n+1),
-        # 1 empty CHECKSIG followed by 1 empty OP_CHECKSIGFROMSTACKs, then finally n OP_CHECKSIGFROMSTACKs
-        lambda n, pk: (CScript([OP_2DROP, OP_0, pk, OP_CHECKSIG, OP_DROP, OP_0, CSFS_MSG, pk, OP_CHECKSIGFROMSTACK, OP_DROP, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n),
-
     ]
+    if bip348_active:
+        SIGOPS_RATIO_SCRIPTS += [
+            # n OP_CHECKSIGFROMSTACKs, dropping the signature given, and just validate against embedded sigs
+            lambda n, pk: (CScript([OP_2DROP, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n),
+            # 1 CHECKSIGVERIFY followed by n OP_CHECKSIGFROMSTACKs, all signatures non-empty and validated
+            lambda n, pk: (CScript([OP_DROP, pk, OP_CHECKSIGVERIFY, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n+1),
+            # 1 empty CHECKSIG followed by 1 empty OP_CHECKSIGFROMSTACKs, then finally n OP_CHECKSIGFROMSTACKs
+            lambda n, pk: (CScript([OP_2DROP, OP_0, pk, OP_CHECKSIG, OP_DROP, OP_0, CSFS_MSG, pk, OP_CHECKSIGFROMSTACK, OP_DROP, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n),
+
+        ]
 
     for annex in [None, bytes([ANNEX_TAG]) + random.randbytes(random.randrange(1000))]:
         for hashtype in [SIGHASH_DEFAULT, SIGHASH_ALL]:
@@ -1181,7 +1184,7 @@ def spenders_taproot_active():
     hashtype = lambda _: random.choice(VALID_SIGHASHES_TAPROOT)
     for opval in range(76, 0x100):
         opcode = CScriptOp(opval)
-        if not is_op_success(opcode):
+        if not is_op_success(opcode, bip348_active):
             continue
         scripts = [
             ("bare_success", CScript([opcode])),
@@ -1212,7 +1215,7 @@ def spenders_taproot_active():
     # Non-OP_SUCCESSx (verify that those aren't accidentally treated as OP_SUCCESSx)
     for opval in range(0, 0x100):
         opcode = CScriptOp(opval)
-        if is_op_success(opcode):
+        if is_op_success(opcode, bip348_active):
             continue
         scripts = [
             ("normal", CScript([OP_RETURN, opcode] + [OP_NOP] * 75)),
@@ -1268,6 +1271,40 @@ def spenders_taproot_nonstandard():
     add_spender(spenders, "inactive/scriptpath_invalid_unkleaf", key=sec, tap=tap, leaf="future_leaf", standard=False, inputs=[getter("sign")], sighash=bitflipper(default_sighash))
     add_spender(spenders, "inactive/scriptpath_valid_opsuccess", key=sec, tap=tap, leaf="op_success", standard=False, inputs=[getter("sign")])
     add_spender(spenders, "inactive/scriptpath_valid_opsuccess", key=sec, tap=tap, leaf="op_success", standard=False, inputs=[getter("sign")], sighash=bitflipper(default_sighash))
+
+    return spenders
+
+def nonstd_bip348_csfs_spenders():
+    secs = [generate_privkey() for _ in range(1)]
+    pubs = [compute_xonly_pubkey(sec)[0] for sec in secs]
+
+    CSFS_MSG = random.randbytes(random.randrange(0, 520))
+
+    scripts = [
+        ("simple_csfs", CScript([CSFS_MSG, pubs[0], OP_CHECKSIGFROMSTACK, OP_1, OP_EQUAL])),
+        ("simple_fail_csfs", CScript([CSFS_MSG, pubs[0], OP_CHECKSIGFROMSTACK, OP_0, OP_EQUAL])),
+        ("empty_pk_csfs", CScript([CSFS_MSG, OP_0, OP_CHECKSIGFROMSTACK, OP_0, OP_EQUAL])),
+        ("undecodeable_csfs", CScript([OP_CHECKSIGFROMSTACK, OP_PUSHDATA1])),
+    ]
+
+    tap = taproot_construct(pubs[0], scripts)
+
+    spenders = []
+
+    # The script doesn't even have to be encoded properly to be valid in block, but discouraged
+    add_spender(spenders, comment="bip348_csfs/nonstd_undecode_success", tap=tap, leaf="undecodeable_csfs", standard=False)
+
+    # Future-legal spend is valid in block but discouraged
+    add_spender(spenders, comment="bip348_csfs/nonstd_simple", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, standard=False)
+
+    # Non-empty signature failure still ok, just discouraged
+    add_spender(spenders, comment="bip348_csfs/nontstd_simple_nonempty", tap=tap, leaf="simple_fail_csfs", inputs=[b'\x00'], standard=False)
+
+    # Random byte signatures ok in block, but discouraged
+    add_spender(spenders, comment="bip348_csfs/nonstd_simple_60_sig", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[random.randbytes(60)], standard=False)
+
+    # Empty pubkey succeeds but is discouraged
+    add_spender(spenders, comment="bip348_csfs/nonstd_empty_pk", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[random.randbytes(60)], standard=False)
 
     return spenders
 
@@ -1390,7 +1427,7 @@ class TaprootTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-par=1"]]
+        self.extra_args = [["-par=1", f"-vbparams=checksigfromstack:0:{2**63 - 1}"]]
 
     def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, sigops_weight=0, witness=False, accept=False):
 
@@ -1861,8 +1898,23 @@ class TaprootTest(BitcoinTestFramework):
     def run_test(self):
         self.gen_test_vectors()
 
+        self.log.info("OP_CSFS Pre-activation tests...")
+#        self.test_spenders(self.nodes[0], spenders_taproot_active(bip348_active=False), input_counts=[1, 2, 2, 2, 2, 3])
+        # Run each test twice; once in isolation, and once combined with others. Testing in isolation
+        # means that the standardness is verified in every test (as combined transactions are only standard
+        # when all their inputs are standard).
+#        nonstd_spenders = spenders_taproot_nonstandard() + nonstd_bip348_csfs_spenders()
+#        self.test_spenders(self.nodes[0], spenders_taproot_nonstandard(), input_counts=[1])
+#        self.test_spenders(self.nodes[0], spenders_taproot_nonstandard(), input_counts=[2, 3])
+
+        self.log.info("Activating...")
+        self.generate(self.nodes[0], 432)
+        from pdb import set_trace
+        set_trace()
+        assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["checksigfromstack"]["active"], "active")
+
         self.log.info("Post-activation tests...")
-        consensus_spenders = spenders_taproot_active() + bip348_csfs_spenders()
+        consensus_spenders = bip348_csfs_spenders()#spenders_taproot_active(bip348_active=False) + bip348_csfs_spenders()
         self.test_spenders(self.nodes[0], consensus_spenders, input_counts=[1, 2, 2, 2, 2, 3])
         # Run each test twice; once in isolation, and once combined with others. Testing in isolation
         # means that the standardness is verified in every test (as combined transactions are only standard

@@ -168,6 +168,44 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
     return true;
 }
 
+static bool IsTxBIP54LegacySigopsValid(const CTransaction& tx, const CCoinsViewCache& map_inputs)
+{
+     if (tx.IsCoinBase()) {
+        return true; // Coinbases don't use vin normally
+    }
+
+    unsigned int sigops{0};
+    for (unsigned int i = 0; i < tx.vin.size(); i++) {
+        const CTxOut& prev = map_inputs.AccessCoin(tx.vin[i].prevout).out;
+
+        std::vector<std::vector<unsigned char> > vSolutions;
+        TxoutType whichType = Solver(prev.scriptPubKey, vSolutions);
+        if (whichType == TxoutType::SCRIPTHASH) {
+            std::vector<std::vector<unsigned char> > stack;
+            // convert the scriptSig into a stack, so we can inspect the redeemScript
+            if (!EvalScript(stack, tx.vin[i].scriptSig, SCRIPT_VERIFY_NONE, BaseSignatureChecker(), SigVersion::BASE))
+                return false;
+            if (stack.empty())
+                return false;
+            CScript subscript(stack.back().begin(), stack.back().end());
+            sigops += subscript.GetSigOpCount(/*fAccurate=*/true);
+        }
+
+        // Unlike the existing block wide sigop limit, BIP54 counts sigops when they are actually executed.
+        // This means sigops in the spent scriptpubkey count toward the limit.
+        // `fAccurate` means correctly accounting sigops for CHECKMULTISIGs with 16 pubkeys or less. This
+        // method of accounting was introduced by BIP16, and BIP54 reuses it.
+        sigops += tx.vin[i].scriptSig.GetSigOpCount(/*fAccurate=*/true);
+        sigops += prev.scriptPubKey.GetSigOpCount(/*fAccurate=*/true);
+
+        if (sigops > MAX_TX_LEGACY_SIGOPS) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 /**
  * Check transaction inputs.
  *
@@ -192,7 +230,6 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
         return true; // Coinbases don't use vin normally
     }
 
-    unsigned int sigops{0};
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxOut& prev = mapInputs.AccessCoin(tx.vin[i].prevout).out;
 
@@ -212,23 +249,14 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
             if (stack.empty())
                 return false;
             CScript subscript(stack.back().begin(), stack.back().end());
-            const auto p2sh_sigops{subscript.GetSigOpCount(true)};
-            if (p2sh_sigops > MAX_P2SH_SIGOPS) {
+            if (subscript.GetSigOpCount(true) > MAX_P2SH_SIGOPS) {
                 return false;
             }
-            sigops += p2sh_sigops;
         }
+    }
 
-        // Unlike the existing block wide sigop limit, BIP54 counts sigops when they are actually executed.
-        // This means sigops in the spent scriptpubkey count toward the limit.
-        // `fAccurate` means correctly accounting sigops for CHECKMULTISIGs with 16 pubkeys or less. This
-        // method of accounting was introduced by BIP16, and BIP54 reuses it.
-        sigops += tx.vin[i].scriptSig.GetSigOpCount(/*fAccurate=*/true);
-        sigops += prev.scriptPubKey.GetSigOpCount(/*fAccurate=*/true);
-
-        if (sigops > MAX_TX_LEGACY_SIGOPS) {
-            return false;
-        }
+    if (!IsTxBIP54LegacySigopsValid(tx, mapInputs)) {
+        return false;
     }
 
     return true;

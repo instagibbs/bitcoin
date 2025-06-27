@@ -889,7 +889,11 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         return state.Invalid(TxValidationResult::TX_WITNESS_MUTATED, "bad-witness-nonstandard");
     }
 
-    int64_t nSigOpsCost = GetTransactionSigOpCost(tx, m_view, STANDARD_SCRIPT_VERIFY_FLAGS);
+    const auto [legacy_sigops_cost, nSigOpsCost] = GetTransactionSigOpCost(tx, m_view, STANDARD_SCRIPT_VERIFY_FLAGS);
+
+    if (m_pool.m_opts.require_standard && legacy_sigops_cost > MAX_TX_LEGACY_SIGOPS)
+        return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txn-too-many-legacy-sigops",
+                strprintf("%d", nSigOpsCost));
 
     // Keep track of transactions that spend a coinbase, which we re-scan
     // during reorgs to ensure COINBASE_MATURITY is still met.
@@ -2663,7 +2667,13 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         // * legacy (always)
         // * p2sh (when P2SH enabled in flags and excludes coinbase)
         // * witness (when witness enabled in flags and excludes coinbase)
-        nSigOpsCost += GetTransactionSigOpCost(tx, view, flags);
+        const auto [legacy_sigops_cost, all_sigops_cost] = GetTransactionSigOpCost(tx, view, flags);
+        if (legacy_sigops_cost > MAX_TX_LEGACY_SIGOPS) {
+            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-legacy-sigops", "too many legacy sigops in single tx");
+            break;
+        }
+
+        nSigOpsCost += all_sigops_cost;
         if (nSigOpsCost > MAX_BLOCK_SIGOPS_COST) {
             state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-sigops", "too many sigops");
             break;

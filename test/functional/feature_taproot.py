@@ -70,7 +70,9 @@ from test_framework.script import (
     OP_NOTIF,
     OP_PUSHDATA1,
     OP_RETURN,
+    OP_SIZE,
     OP_SWAP,
+    OP_TEMPLATEHASH,
     OP_VERIFY,
     SIGHASH_DEFAULT,
     SIGHASH_ALL,
@@ -80,6 +82,7 @@ from test_framework.script import (
     SegwitV0SignatureMsg,
     TaggedHash,
     TaprootSignatureMsg,
+    TemplateMsg,
     is_op_success,
     taproot_construct,
 )
@@ -257,6 +260,18 @@ def default_sighash(ctx):
         else:
             return hash256(msg)
 
+def default_templatehash_message(ctx):
+    """Default expression for "template_hash_msg"."""
+    tx = get(ctx, "tx")
+    idx = get(ctx, "idx")
+    annex = get(ctx, "annex")
+    return TemplateMsg(tx, idx, annex=annex)
+
+def default_templatehash(ctx):
+    """Default expression for "template_hash": the tagged hash of the digest."""
+    msg = get(ctx, "template_hash_msg")
+    return TaggedHash("TemplateHash", msg)
+
 def default_tweak(ctx):
     """Default expression for "tweak": None if a leaf is specified, tap[0] otherwise."""
     if get(ctx, "leaf") is None:
@@ -384,6 +399,10 @@ DEFAULT_CONTEXT = {
     "sigmsg": default_sigmsg,
     # The sighash value (32 bytes)
     "sighash": default_sighash,
+    # The template msg value (preimage of template_hash)
+    "template_hash_msg": default_templatehash_message,
+    # The template_hash value (32 bytes)
+    "template_hash": default_templatehash,
     # The information about the chosen script path spend (TaprootLeafInfo object).
     "tapleaf": default_tapleaf,
     # The script to push, and include in the sighash, for a taproot script path spend.
@@ -615,6 +634,7 @@ ERR_BAD_OPCODE = {"err_msg": "Opcode missing or not understood"}
 ERR_EVAL_FALSE = {"err_msg": "Script evaluated without error but finished with a false/empty top stack element"}
 ERR_WITNESS_PROGRAM_WITNESS_EMPTY = {"err_msg": "Witness program was passed an empty witness"}
 ERR_CHECKSIGVERIFY = {"err_msg": "Script failed an OP_CHECKSIGVERIFY operation"}
+SCRIPT_ERR_EQUALVERIFY = {"err_msg": "Script failed an OP_EQUALVERIFY operation"}
 
 VALID_SIGHASHES_ECDSA = [
     SIGHASH_ALL,
@@ -645,7 +665,7 @@ MIN_FEE = 50000
 # === Actual test cases ===
 
 
-def spenders_taproot_active():
+def spenders_taproot_active(template_active):
     """Return a list of Spenders for testing post-Taproot activation behavior."""
 
     secs = [generate_privkey() for _ in range(8)]
@@ -1141,7 +1161,7 @@ def spenders_taproot_active():
     hashtype = lambda _: random.choice(VALID_SIGHASHES_TAPROOT)
     for opval in range(76, 0x100):
         opcode = CScriptOp(opval)
-        if not is_op_success(opcode):
+        if not is_op_success(opcode, is_temphash_active=template_active):
             continue
         scripts = [
             ("bare_success", CScript([opcode])),
@@ -1172,7 +1192,7 @@ def spenders_taproot_active():
     # Non-OP_SUCCESSx (verify that those aren't accidentally treated as OP_SUCCESSx)
     for opval in range(0, 0x100):
         opcode = CScriptOp(opval)
-        if is_op_success(opcode):
+        if is_op_success(opcode, is_temphash_active=template_active):
             continue
         scripts = [
             ("normal", CScript([OP_RETURN, opcode] + [OP_NOP] * 75)),
@@ -1200,12 +1220,91 @@ def spenders_taproot_active():
                     add_spender(spenders, "legacy/pk-wrongkey", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, script=key_to_p2pk_script(pubkey1), **SINGLE_SIG, key=eckey1, failure={"key": eckey2}, sigops_weight=4-3*witv0, **ERR_EVAL_FALSE)
                     add_spender(spenders, "legacy/pkh-sighashflip", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, pkh=pubkey1, key=eckey1, **SIGHASH_BITFLIP, sigops_weight=4-3*witv0, **ERR_EVAL_FALSE)
 
-    # Verify that OP_CHECKSIGADD wasn't accidentally added to pre-taproot validation logic.
+    # Verify that OP_CHECKSIGADD, OP_TEMPLATEHASH weren't accidentally added to pre-taproot validation logic.
     for p2sh in [False, True]:
         for witv0 in [False, True]:
             for hashtype in VALID_SIGHASHES_ECDSA + [random.randrange(0x04, 0x80), random.randrange(0x84, 0x100)]:
                 standard = hashtype in VALID_SIGHASHES_ECDSA and (p2sh or witv0)
                 add_spender(spenders, "compat/nocsa", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, script=CScript([OP_IF, OP_11, pubkey1, OP_CHECKSIGADD, OP_12, OP_EQUAL, OP_ELSE, pubkey1, OP_CHECKSIG, OP_ENDIF]), key=eckey1, sigops_weight=4-3*witv0, inputs=[getter("sign"), b''], failure={"inputs": [getter("sign"), b'\x01']}, **ERR_BAD_OPCODE)
+
+            # Should still fail if not in executed branch
+            add_spender(spenders, "compat/noth", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, OP_TEMPLATEHASH, OP_ENDIF, OP_1]), inputs=[b''], failure={"inputs": [b'\x01']}, **ERR_BAD_OPCODE)
+
+    return spenders
+
+def generate_template_spenders_consensus():
+    """Spenders for testing that post-active TEMPLATEHASH usage is enforced"""
+
+    spenders = []
+
+    sec = generate_privkey()
+    pub, _ = compute_xonly_pubkey(sec)
+    scripts = [
+        ("basic", CScript([OP_TEMPLATEHASH])),
+        ("emptystack", CScript([OP_TEMPLATEHASH, OP_DROP])),
+        ("2stack", CScript([OP_TEMPLATEHASH, OP_1])),
+        ("equality", CScript([OP_TEMPLATEHASH, OP_EQUAL])),
+        ("32bytes", CScript([OP_TEMPLATEHASH, OP_SIZE, 0x20, OP_EQUALVERIFY])),
+        ("wrongbytes", CScript([OP_TEMPLATEHASH, OP_SIZE, 0x21, OP_EQUALVERIFY])),
+        ("doublegood", CScript([OP_TEMPLATEHASH, OP_TEMPLATEHASH, OP_EQUAL])),
+    ]
+    tap = taproot_construct(pub, scripts)
+
+    add_spender(spenders, "template/basic", tap=tap, leaf="basic", failure={"leaf": "emptystack"}, **ERR_CLEANSTACK)
+    add_spender(spenders, "template/2stack", tap=tap, leaf="basic", failure={"leaf": "2stack"}, **ERR_CLEANSTACK)
+    add_spender(spenders, "template/32bytes", tap=tap, leaf="32bytes", failure={"leaf": "wrongbytes"}, **SCRIPT_ERR_EQUALVERIFY)
+    add_spender(spenders, "template/doublegood", tap=tap, leaf="doublegood", failure={"inputs": [random.randbytes(1)]}, **ERR_CLEANSTACK)
+
+    TEMPLATEHASH_BITFLIP = {"failure": {"template_hash": bitflipper(default_templatehash)}}
+    TEMPLATEHASH_POP_BYTE = {"failure": {"template_hash": byte_popper(default_templatehash)}}
+    TEMPLATEHASH_ADD_ZERO = {"failure": {"template_hash": zero_appender(default_templatehash)}}
+
+    # Test various 31/32/33-byte pushes with mutations
+    for i, mutator in enumerate([TEMPLATEHASH_BITFLIP, TEMPLATEHASH_POP_BYTE, TEMPLATEHASH_ADD_ZERO]):
+        add_spender(spenders, f"template/equality_{i}", tap=tap, leaf="equality", inputs=[getter("template_hash")], **mutator, **ERR_EVAL_FALSE)
+
+    # Test random other lengths
+    for i in range(256):
+        if i == 32:
+            continue
+        wrongsize_template_hash = random.randbytes(i)
+        add_spender(spenders, f"template/equality_rand_{i}", tap=tap, leaf="equality", inputs=[getter("template_hash")], failure={"inputs": [wrongsize_template_hash]}, **ERR_EVAL_FALSE)
+
+    # Test annex commitment
+    for i in range(32):
+        # No annex commitment
+        add_spender(spenders, f"template/equality_annex_none_{i}", tap=tap, leaf="equality", inputs=[getter("template_hash")], failure={"template_hash": override(default_templatehash, annex=bytes([ANNEX_TAG]) + random.randbytes(i))}, **ERR_EVAL_FALSE)
+
+        # Annex committed, compared to none
+        add_spender(spenders, f"template/equality_annex_{i}", tap=tap, leaf="equality", standard=False, annex=bytes([ANNEX_TAG]) + random.randbytes(i), inputs=[getter("template_hash")], failure={"template_hash": override(default_templatehash, annex=None)}, **ERR_EVAL_FALSE)
+
+        # Both have annex, no collision allowed
+        if i > 0:
+            annex = bytes([ANNEX_TAG]) + random.randbytes(i)
+            wrong_annex = None
+            while wrong_annex is None or wrong_annex == annex:
+                wrong_annex = bytes([ANNEX_TAG]) + random.randbytes(i)
+            add_spender(spenders, f"template/equality_annex_mismatch_{i}", tap=tap, leaf="equality", annex=annex, standard=False, inputs=[getter("template_hash")], failure={"template_hash": override(default_sighash, annex=wrong_annex)}, **ERR_EVAL_FALSE)
+
+    return spenders
+
+def generate_template_spenders_nonstandard():
+    """Spenders for testing that pre-active TEMPLATEHASH usage is discouraged"""
+
+    spenders = []
+
+    sec = generate_privkey()
+    pub, _ = compute_xonly_pubkey(sec)
+    scripts = [
+        ("basic", CScript([OP_TEMPLATEHASH])),
+        ("emptystack", CScript([OP_TEMPLATEHASH, OP_DROP])),
+    ]
+    tap = taproot_construct(pub, scripts)
+
+    # Valid but non-standard until activation
+    add_spender(spenders, "discouraged_template/basic", tap=tap, leaf="basic", standard=False)
+    # This will fail after activation
+    add_spender(spenders, "discouraged_template/emptystack", tap=tap, leaf="emptystack", standard=False)
 
     return spenders
 
@@ -1271,10 +1370,13 @@ LEGACY_FLAGS = "P2SH,DERSIG,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS,NULL
 # Consensus validation flags to use in dumps for all other tests.
 TAPROOT_FLAGS = "P2SH,DERSIG,CHECKLOCKTIMEVERIFY,CHECKSEQUENCEVERIFY,WITNESS,NULLDUMMY,TAPROOT"
 
-def dump_json_test(tx, input_utxos, idx, success, failure):
+def dump_json_test(tx, input_utxos, idx, success, failure, template_active):
     spender = input_utxos[idx].spender
     # Determine flags to dump
     flags = LEGACY_FLAGS if spender.comment.startswith("legacy/") or spender.comment.startswith("inactive/") else TAPROOT_FLAGS
+
+    if template_active and flags == TAPROOT_FLAGS:
+        flags += ",TEMPLATEHASH"
 
     fields = [
         ("tx", tx.serialize().hex()),
@@ -1320,6 +1422,7 @@ class TaprootTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
+        self.extra_args = [[f"-vbparams=templatehash:0:{2**63 - 1}"]] # test activation of templatehash
 
     def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, sigops_weight=0, witness=False, accept=False):
 
@@ -1353,7 +1456,7 @@ class TaprootTest(BitcoinTestFramework):
         self.lastblockheight = block['height']
         self.lastblocktime = block['time']
 
-    def test_spenders(self, node, spenders, input_counts):
+    def test_spenders(self, node, spenders, input_counts, template_active):
         """Run randomized tests with a number of "spenders".
 
         Steps:
@@ -1519,7 +1622,7 @@ class TaprootTest(BitcoinTestFramework):
                     fail = fn(tx, i, [utxo.output for utxo in input_utxos], False)
                 input_data.append((fail, success))
                 if self.options.dump_tests:
-                    dump_json_test(tx, input_utxos, i, success, fail)
+                    dump_json_test(tx, input_utxos, i, success, fail, template_active)
 
             # Sign each input incorrectly once on each complete signing pass, except the very last.
             for fail_input in list(range(len(input_utxos))) + [None]:
@@ -1792,19 +1895,39 @@ class TaprootTest(BitcoinTestFramework):
 
         self.log.info("Post-activation tests...")
 
-        # New sub-tests not checking standardness can be added to consensus_spenders
-        # to allow for increased coverage across input types.
-        # See sample_spenders for a minimal example
-        consensus_spenders = sample_spenders()
-        consensus_spenders += spenders_taproot_active()
-        self.test_spenders(self.nodes[0], consensus_spenders, input_counts=[1, 2, 2, 2, 2, 3])
+        # Run all non-TEMPLATEHASH tests pre and post-activation to avoid regressions
+        for template_active in [False, True]:
+            discouragement_spenders = spenders_taproot_nonstandard()
+            consensus_spenders = spenders_taproot_active(template_active=template_active)
 
-        # Run each test twice; once in isolation, and once combined with others. Testing in isolation
-        # means that the standardness is verified in every test (as combined transactions are only standard
-        # when all their inputs are standard).
-        nonstd_spenders = spenders_taproot_nonstandard()
-        self.test_spenders(self.nodes[0], nonstd_spenders, input_counts=[1])
-        self.test_spenders(self.nodes[0], nonstd_spenders, input_counts=[2, 3])
+            if not template_active:
+                self.log.info("TEMPLATEHASH Pre-activation tests...")
+                assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["templatehash"]["bip9"]["status"], "defined")
+
+                # Discouragement tests to ensure non-inclusion in mempool before activation
+                discouragement_spenders += generate_template_spenders_nonstandard()
+
+            else:
+                self.log.info("Activating TEMPLATEHASH softfork")
+                # Blocks being created until now have not signalled
+                self.generate(self.nodes[0], 432)
+                assert_equal(self.nodes[0].getdeploymentinfo()["deployments"]["templatehash"]["bip9"]["status"], "active")
+
+                self.log.info("TEMPLATEHASH Post-activation tests...")
+                # Test coverage for committed hash in outputs is not included here but in
+                # feature_templatehash.py
+                consensus_spenders += generate_template_spenders_consensus()
+
+            # New sub-tests not checking standardness can be added to consensus_spenders
+            # to allow for increased coverage across input types.
+            # See sample_spenders for a minimal example
+            self.test_spenders(self.nodes[0], consensus_spenders, input_counts=[1, 2, 2, 2, 2, 3], template_active=template_active)
+
+            # Run each test twice; once in isolation, and once combined with others. Testing in isolation
+            # means that the standardness is verified in every test (as combined transactions are only standard
+            # when all their inputs are standard).
+            self.test_spenders(self.nodes[0], discouragement_spenders, input_counts=[1], template_active=template_active)
+            self.test_spenders(self.nodes[0], discouragement_spenders, input_counts=[2, 3], template_active=template_active)
 
 
 if __name__ == '__main__':

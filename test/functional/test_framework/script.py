@@ -250,6 +250,9 @@ OP_NOP10 = CScriptOp(0xb9)
 # BIP 342 opcodes (Tapscript)
 OP_CHECKSIGADD = CScriptOp(0xba)
 
+# BIP xx opcode (Tapscript-only, formerly OP_SUCCESS187)
+OP_TEMPLATEHASH = CScriptOp(0xbb)
+
 OP_INVALIDOPCODE = CScriptOp(0xff)
 
 OPCODE_NAMES.update({
@@ -365,6 +368,7 @@ OPCODE_NAMES.update({
     OP_NOP9: 'OP_NOP9',
     OP_NOP10: 'OP_NOP10',
     OP_CHECKSIGADD: 'OP_CHECKSIGADD',
+    OP_TEMPLATEHASH: 'OP_TEMPLATEHASH',
     OP_INVALIDOPCODE: 'OP_INVALIDOPCODE',
 })
 
@@ -810,6 +814,21 @@ def BIP341_sha_sequences(txTo):
 def BIP341_sha_outputs(txTo):
     return sha256(b"".join(o.serialize() for o in txTo.vout))
 
+def TemplateMsg(txTo, input_index=0, annex=None):
+    assert (input_index < len(txTo.vin))
+    ss = txTo.version.to_bytes(4, "little")
+    ss += txTo.nLockTime.to_bytes(4, "little")
+    ss += BIP341_sha_sequences(txTo)
+    ss += BIP341_sha_outputs(txTo)
+    annex_present = 0
+    if annex is not None:
+        annex_present |= 1
+    ss += bytes([annex_present])
+    ss += input_index.to_bytes(4, "little")
+    if (annex is not None):
+        ss += sha256(ser_string(annex))
+    return ss
+
 def TaprootSignatureMsg(txTo, spent_utxos, hash_type, input_index=0, *, scriptpath=False, leaf_script=None, codeseparator_pos=-1, annex=None, leaf_ver=LEAF_VERSION_TAPSCRIPT):
     assert (len(txTo.vin) == len(spent_utxos))
     assert (input_index < len(txTo.vin))
@@ -936,5 +955,7 @@ def taproot_construct(pubkey, scripts=None, treat_internal_as_infinity=False):
     leaves = dict((name, TaprootLeafInfo(script, version, merklebranch, leaf)) for name, version, script, merklebranch, leaf in ret)
     return TaprootInfo(CScript([OP_1, tweaked]), pubkey, negated + 0, tweak, leaves, h, tweaked)
 
-def is_op_success(o):
+def is_op_success(o, is_temphash_active):
+    if o == OP_TEMPLATEHASH:
+        return not is_temphash_active
     return o == 0x50 or o == 0x62 or o == 0x89 or o == 0x8a or o == 0x8d or o == 0x8e or (o >= 0x7e and o <= 0x81) or (o >= 0x83 and o <= 0x86) or (o >= 0x95 and o <= 0x99) or (o >= 0xbb and o <= 0xfe)

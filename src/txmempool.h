@@ -302,8 +302,8 @@ public:
 
     void CalculateAncestorData(const CTxMemPoolEntry& entry, size_t& ancestor_count, size_t& ancestor_size, CAmount& ancestor_fees) const EXCLUSIVE_LOCKS_REQUIRED(cs);
     void CalculateDescendantData(const CTxMemPoolEntry& entry, size_t& descendant_count, size_t& descendant_size, CAmount& descendant_fees) const EXCLUSIVE_LOCKS_REQUIRED(cs);
-    int64_t GetNumDescendants(txiter it) const { LOCK(cs); return m_txgraph->GetDescendants(*it).size(); }
-    int64_t GetNumDescendants(const CTxMemPoolEntry &e) const { LOCK(cs); return m_txgraph->GetDescendants(e).size(); }
+    int64_t GetNumDescendants(txiter it) const { LOCK(cs); return m_txgraph->GetDescendants(*it, /*main_only=*/true).size(); }
+    int64_t GetNumDescendants(const CTxMemPoolEntry &e) const { LOCK(cs); return m_txgraph->GetDescendants(e, /*main_only=*/true).size(); }
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> GetChildren(const CTxMemPoolEntry &entry) const;
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> GetParents(const CTxMemPoolEntry &entry) const;
 
@@ -420,7 +420,7 @@ public:
     std::vector<const CTxMemPoolEntry*> GetCluster(Txid txid) const EXCLUSIVE_LOCKS_REQUIRED(cs) {
         auto tx = GetIter(txid);
         if (!tx) return {};
-        auto cluster = m_txgraph->GetCluster(**tx);
+        auto cluster = m_txgraph->GetCluster(**tx, /*main_only=*/true);
         std::vector<const CTxMemPoolEntry*> ret;
         for (const auto& tx : cluster) {
             ret.emplace_back(static_cast<const CTxMemPoolEntry*>(tx));
@@ -434,7 +434,7 @@ public:
         for (auto it : iters_conflicting) {
             entries.emplace_back(&*it);
         }
-        return m_txgraph->CountDistinctClusters(entries);
+        return m_txgraph->CountDistinctClusters(entries, /*main_only=*/true);
     }
 
 public:
@@ -666,6 +666,7 @@ public:
 
         const CTxMemPool::setEntries& GetRemovals() const { return m_to_remove; }
 
+        // Checks mempool limits with the changeset applied
         bool CheckMemPoolPolicyLimits();
 
         CTxMemPool::setEntries CalculateMemPoolAncestors(TxHandle tx)

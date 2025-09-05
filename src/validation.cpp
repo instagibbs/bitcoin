@@ -1086,15 +1086,6 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         return std::nullopt;
     }
 
-    // We can't return anything that would already be removed
-    // via conflict, check staging for removals
-    const auto& all_conflicts_iter_set = changeset.GetRemovals();
-    std::unordered_set<const CTxMemPoolEntry*> all_conflict_entries;
-    for (CTxMemPool::txiter it : all_conflicts_iter_set) {
-        const auto removed_entry = m_pool.GetEntry(it->GetTx().GetHash());
-        all_conflict_entries.insert(removed_entry);
-    }
-
     do {
         std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
         Chunk popped_chunk = heap_refs.back();
@@ -1108,16 +1099,17 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
 
             // We can't evict our package ancestors; continue because
             // next transaction in chunk might not be in ancestor set
-            if (all_ancestors.count(ref) > 0) continue;
+            if (all_ancestors.contains(ref)) continue;
 
-            // The tx might already be removed in staging from direct conflict, no-op in that case
-            // For logging purposes we skip
-            if (all_conflict_entries.contains(entry)) continue;
+            // If it doesn't exist in staging, that means it was removed with direct conflict.
+            // Skip reporting it, but process rest of chunk.
+            if (!graph->Exists(*ref, /*main_only=*/false)) continue;
 
             const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
             changeset.StageRemoval(entry_it);
             kindred_evicted.insert(entry_it);
 
+            // Stop early if we made the graph happy
             if (changeset.CheckMemPoolPolicyLimits()) break;
         }
     } while (!heap_refs.empty() && !changeset.CheckMemPoolPolicyLimits());

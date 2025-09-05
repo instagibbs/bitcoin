@@ -1050,7 +1050,6 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     std::set<TxGraph::Ref*> clusters_prefix;
     // Heap for popping lowest chunks first for eviction
     std::vector<Chunk> heap_refs;
-
     for (const auto& parent : parent_entries) {
         const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
         // If new cluster, process chunks

@@ -1023,6 +1023,22 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         return std::nullopt;
     }
 
+    std::vector<const TxGraph::Ref*> parent_refs;
+    std::transform(parent_entries.begin(),
+                   parent_entries.end(),
+                   std::back_inserter(parent_refs),
+                   [&](const std::reference_wrapper<const CTxMemPoolEntry>& e) {
+                        return static_cast<const TxGraph::Ref*>(&e.get());
+                   });
+
+    // Set of all ancestors of the added package (by definition, they cannot be evicted)
+    std::vector<TxGraph::Ref*> all_ancestors_vec{graph->GetAncestorsUnion(parent_refs, /*main_only=*/true)};
+    if (all_ancestors_vec.size() > MAX_CLUSTER_COUNT_LIMIT - 1) {
+        return std::nullopt;
+    }
+
+    std::unordered_set<TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
+
     // We will reconstruct chunks manually for eviction ordering
     using Chunk = std::vector<TxGraph::Ref*>;
 
@@ -1032,26 +1048,10 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
 
     // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
     std::set<TxGraph::Ref*> clusters_prefix;
-    // Set of all ancestors of the added package
-    std::unordered_set<TxGraph::Ref*> all_ancestors;
     // Heap for popping lowest chunks first for eviction
     std::vector<Chunk> heap_refs;
 
     for (const auto& parent : parent_entries) {
-        // Gather all ancestors (they can not be evicted)
-        // N.B. we may not have access to this call in future?
-        auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
-
-        // Can not possibly succeed if we're building a cluster with just these ancestors
-        // This bounds possible evaluations to (MAX_CLUSTER_COUNT_LIMIT - 1)^2
-        // since the main graph is not oversized.
-        // FIXME get from m_opts.limits.cluster_count, or have function live in mempool?
-        if (all_ancestors.size() + ancestors.size() > MAX_CLUSTER_COUNT_LIMIT - 1) {
-            return std::nullopt;
-        }
-
-        all_ancestors.insert(ancestors.begin(), ancestors.end());
-
         const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
         // If new cluster, process chunks
         if (!cluster.empty() && clusters_prefix.insert(cluster[0]).second) {

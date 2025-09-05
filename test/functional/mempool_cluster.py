@@ -26,28 +26,76 @@ class MempoolClusterTest(BitcoinTestFramework):
         self.wallet = MiniWallet(node)
 
         node = self.nodes[0]
-        # Second output of original parent will be used for kindred eviction
-        parent_tx = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2)
-        utxo_to_spend = parent_tx["new_utxos"][0]
-        utxo_for_kindred_eviction = parent_tx["new_utxos"][1]
-        historical_utxos_spent = [parent_tx["new_utxos"][0]]
-        ancestors = [parent_tx["txid"]]
-        while len(node.getrawmempool()) < MAX_CLUSTER_COUNT:
-            next_tx = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=utxo_to_spend)
-            # Confirm that each transaction is in the same cluster as the first.
-            assert node.getmempoolcluster(next_tx['txid']) == node.getmempoolcluster(parent_tx['txid'])
+        from pdb import set_trace
+        set_trace()
+        self.generate(self.wallet, 500)
 
-            # Confirm that the ancestors are what we expect
-            mempool_ancestors = node.getmempoolancestors(next_tx['txid'])
-            assert sorted(mempool_ancestors) == sorted(ancestors)
+        # Maximally pessimal clusters for kindred eviction
+        # 63 clusters being joined by a single child, causing
+        # 63 evictions each, each tx its own chunk
+        # Make +1 for other testing
+        num_clusters = MAX_CLUSTER_COUNT - 1
+        parent_txs = []
+        historical_utxos_spent_vec = []
+        utxos_for_kindred_eviction = []
+        ancestors_vec = []
+        utxos_to_spend = []
+        clusters = []
+        for _ in range(num_clusters):
+            # Second output of original parent will be used for kindred eviction
+            parent_tx = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, confirmed_only=True)
 
-            # Confirm that each successive transaction is added as a descendant.
-            assert all([ next_tx["txid"] in node.getmempooldescendants(x) for x in ancestors ])
+            utxo_to_spend = parent_tx["new_utxos"][0]
+            utxo_for_kindred_eviction = parent_tx["new_utxos"][1]
+            historical_utxos_spent = [parent_tx["new_utxos"][0]]
+            ancestors = [parent_tx["txid"]]
+            while len(ancestors) < MAX_CLUSTER_COUNT:
+                next_tx = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=utxo_to_spend)
+                # Confirm that each transaction is in the same cluster as the first.
+                assert node.getmempoolcluster(next_tx['txid']) == node.getmempoolcluster(parent_tx['txid'])
 
-            # Update for next iteration
-            ancestors.append(next_tx["txid"])
-            utxo_to_spend = next_tx["new_utxo"]
-            historical_utxos_spent.append(next_tx["new_utxo"])
+                # Confirm that the ancestors are what we expect
+                mempool_ancestors = node.getmempoolancestors(next_tx['txid'])
+                assert sorted(mempool_ancestors) == sorted(ancestors)
+
+                # Confirm that each successive transaction is added as a descendant.
+                assert all([ next_tx["txid"] in node.getmempooldescendants(x) for x in ancestors ])
+
+                # Update for next iteration
+                ancestors.append(next_tx["txid"])
+                utxo_to_spend = next_tx["new_utxo"]
+
+                historical_utxos_spent.append(next_tx["new_utxo"])
+
+            # Cache each chain info
+            #parent_txs.append(parent_tx)
+            #utxos_to_spend.append(utxo_to_spend)
+            #historical_utxos_spent_vec.append(historical_utxos_spent)
+            utxos_for_kindred_eviction.append(utxo_for_kindred_eviction)
+            #ancestors_vec.append(ancestors)
+            #clusters.append(node.getmempoolcluster(next_tx['txid']))
+        '''
+        assert_equal(len(clusters), num_clusters)
+        last_cluster = None
+        for parent_tx, cluster in zip(parent_txs, clusters):
+            assert_equal(len(cluster["txs"]), 64)
+            new_cluster = node.getmempoolcluster(parent_tx['txid'])
+            if last_cluster:
+                assert last_cluster != new_cluster
+        '''
+
+        # Now craft a single tx to evict the entire non-ancestry
+        kindred_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=utxos_for_kindred_eviction, fee_per_output=1000000000)
+        res = node.submitpackage([kindred_tx["tx"].serialize().hex()], maxfeerate=0)
+        from pdb import set_trace
+        set_trace()
+
+        node.getmempoolinfo()
+
+        return # FIXME the rest of the test
+        parent_tx = parent_txs[-1]
+        utxo_to_spend = utxos_to_spend[-1]
+        utxo_for_kindred_eviction = utxos_for_kindred_eviction[-1]
 
         assert node.getmempoolcluster(parent_tx['txid'])['txcount'] == MAX_CLUSTER_COUNT
         feeratediagram = node.getmempoolfeeratediagram()
@@ -103,6 +151,9 @@ class MempoolClusterTest(BitcoinTestFramework):
         assert last_remaining_ancestor_txid not in node.getrawmempool()
         assert huge_direct_and_kindred_tx["txid"] in node.getrawmempool()
         assert_equal(len(node.getrawmempool()), last_remaining_ancestor + 1 + 1 - 1)
+
+        from pdb import set_trace
+        set_trace()
 
         # TODO: verify that the size limits are also enforced.
         # TODO: add tests that exercise rbf, package submission, and package

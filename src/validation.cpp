@@ -1164,7 +1164,11 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
 
     // Direct conflicts applied via StageRemoval weren't enough; let's look for more potential conflicts
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+        const auto time{SteadyClock::now()};
         const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
+        LogDebug(BCLog::BENCH, "KindredEviction finished %.2fms\n",
+                 Ticks<MillisecondsDouble>(SteadyClock::now() - time));
+
         if (!kindred_eviction_candidates) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         }

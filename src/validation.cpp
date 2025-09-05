@@ -1089,7 +1089,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     // We can't return anything that would already be removed
     // via conflict, check staging for removals
     const auto& all_conflicts_iter_set = changeset.GetRemovals();
-    std::set<const CTxMemPoolEntry*> all_conflict_entries;
+    std::unordered_set<const CTxMemPoolEntry*> all_conflict_entries;
     for (CTxMemPool::txiter it : all_conflicts_iter_set) {
         const auto removed_entry = m_pool.GetEntry(it->GetTx().GetHash());
         all_conflict_entries.insert(removed_entry);
@@ -1112,7 +1112,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
 
             // The tx might already be removed in staging from direct conflict, no-op in that case
             // For logging purposes we skip
-            if (all_conflict_entries.contains(static_cast<CTxMemPoolEntry*>(ref))) continue;
+            if (all_conflict_entries.contains(entry)) continue;
 
             const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
             changeset.StageRemoval(entry_it);

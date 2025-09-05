@@ -1076,6 +1076,9 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
                 // Unable to recover chunks for some reason
                 return std::nullopt;
             }
+
+            Assume(heap_refs.size() < (MAX_CLUSTER_COUNT_LIMIT - 1) * (MAX_CLUSTER_COUNT_LIMIT - 1));
+
         }
     }
 

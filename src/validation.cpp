@@ -660,8 +660,8 @@ private:
     bool PreChecks(ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     // Until the staging graph is not over-sized, will StageRemoval transactions from the
-    // aggregate cluster that the new transaction(s) would have created. It also returns
-    // the set of of mempool entries corresponding to those staged for removal.
+    // aggregate cluster that the new transaction(s) would have created. It returns
+    // the set of of mempool entries corresponding to those staged for removal by this call.
     std::optional<CTxMemPool::setEntries> TryKindredEviction(CTxMemPool::ChangeSet& changeset, Workspace& ws);
 
     // Run checks for mempool replace-by-fee, only used in AcceptSingleTransaction.
@@ -1015,9 +1015,13 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         return kindred_evicted;
     }
 
-    // Grab all in-mempool ancestors. To extend this to packages,
-    // we just accumulate all the parents.
+    // Grab all in-mempool ancestors of package (currently size 1 only).
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> parent_entries{m_pool.GetParents(*ws.m_tx_handle)};
+
+    // No way this can succeed; abort
+    if (parent_entries.size() > MAX_CLUSTER_COUNT_LIMIT - 1) {
+        return std::nullopt;
+    }
 
     // We will reconstruct chunks manually for eviction ordering
     using Chunk = std::vector<TxGraph::Ref*>;
@@ -1029,15 +1033,23 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
     std::set<TxGraph::Ref*> clusters_prefix;
     // Set of all ancestors of the added package
-    std::set<TxGraph::Ref*> all_ancestors;
+    std::unordered_set<TxGraph::Ref*> all_ancestors;
     // Heap for popping lowest chunks first for eviction
     std::vector<Chunk> heap_refs;
 
     for (const auto& parent : parent_entries) {
         // Gather all ancestors (they can not be evicted)
         // N.B. we may not have access to this call in future?
-        // FIXME accumulate all_ancestors via GetAncestorsUnion
         auto ancestors = graph->GetAncestors(parent, /*main_only=*/true);
+
+        // Can not possibly succeed if we're building a cluster with just these ancestors
+        // This bounds possible evaluations to (MAX_CLUSTER_COUNT_LIMIT - 1)^2
+        // since the main graph is not oversized.
+        // FIXME get from m_opts.limits.cluster_count, or have function live in mempool?
+        if (all_ancestors.size() + ancestors.size() > MAX_CLUSTER_COUNT_LIMIT - 1) {
+            return std::nullopt;
+        }
+
         all_ancestors.insert(ancestors.begin(), ancestors.end());
 
         const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
@@ -1134,6 +1146,7 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         return true;
     }
 
+    // We have normal RBFs
     if (m_subpackage.m_rbf) {
         // Calculate all conflicting entries and enforce Rule #5.
         if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
@@ -1148,14 +1161,14 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         }
     }
 
-    // Direct conflicts weren't enough; let's look for more potential conflicts
+    // Direct conflicts applied via StageRemoval weren't enough; let's look for more potential conflicts
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
         const auto kindred_eviction_candidates{TryKindredEviction(*m_subpackage.m_changeset, ws)};
         if (!kindred_eviction_candidates) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         }
 
-        // We should not break cluster limits if RBF is applied
+        // Changeset was modified; We should not break cluster limits if new conflicts applied
         Assume(m_subpackage.m_changeset->CheckMemPoolPolicyLimits());
 
         // Turned into an RBF attempt via kindred eviction

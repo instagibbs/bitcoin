@@ -1019,7 +1019,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> parent_entries{m_pool.GetParents(*ws.m_tx_handle)};
 
     // No way this can succeed; abort
-    if (parent_entries.size() > MAX_CLUSTER_COUNT_LIMIT - 1) {
+    if (parent_entries.size() + 1 > MAX_CLUSTER_COUNT_LIMIT) {
         return std::nullopt;
     }
 
@@ -1031,13 +1031,19 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
                         return static_cast<const TxGraph::Ref*>(&e.get());
                    });
 
-    // Set of all ancestors of the added package (by definition, they cannot be evicted)
+    // Set of all ancestors of the added package, not including itself (by definition, no ancestors can be evicted)
     std::vector<TxGraph::Ref*> all_ancestors_vec{graph->GetAncestorsUnion(parent_refs, /*main_only=*/true)};
-    if (all_ancestors_vec.size() > MAX_CLUSTER_COUNT_LIMIT - 1) {
+
+    // Each parent could be a separate cluster with max count transactions 
+    Assume(all_ancestors_vec.size() <= parent_entries.size() * MAX_CLUSTER_COUNT_LIMIT);
+
+    // No way this can succeed; abort
+    if (all_ancestors_vec.size() + 1 > MAX_CLUSTER_COUNT_LIMIT) {
         return std::nullopt;
     }
 
     std::unordered_set<TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
+    Assume(all_ancestors.size() <= MAX_CLUSTER_COUNT_LIMIT - 1);
 
     // We will reconstruct chunks manually for eviction ordering
     using Chunk = std::vector<TxGraph::Ref*>;
@@ -1077,10 +1083,11 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
                 return std::nullopt;
             }
 
-            Assume(heap_refs.size() < (MAX_CLUSTER_COUNT_LIMIT - 1) * (MAX_CLUSTER_COUNT_LIMIT - 1));
-
         }
     }
+
+    // Should be reasonably bounded: each tx might be own chunk in worst case
+    Assume(heap_refs.size() < (MAX_CLUSTER_COUNT_LIMIT - 1) * (MAX_CLUSTER_COUNT_LIMIT - 1));
 
     if (!Assume(!heap_refs.empty())) {
         return std::nullopt;

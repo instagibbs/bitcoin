@@ -1034,7 +1034,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     // Set of all ancestors of the added package, not including itself (by definition, no ancestors can be evicted)
     std::vector<TxGraph::Ref*> all_ancestors_vec{graph->GetAncestorsUnion(parent_refs, /*main_only=*/true)};
 
-    // Each parent could be a separate cluster with max count transactions 
+    // Each parent (bound by MAX_CLUSTER_COUNT_LIMIT - 1 above) could be a separate cluster with MAX_CLUSTER_COUNT_LIMIT txns 
     Assume(all_ancestors_vec.size() <= parent_entries.size() * MAX_CLUSTER_COUNT_LIMIT);
 
     // No way this can succeed; abort

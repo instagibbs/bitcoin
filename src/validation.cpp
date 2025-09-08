@@ -1069,11 +1069,20 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
                 const auto ifr = graph->GetIndividualFeerate(*ref);
                 const auto cfr = graph->GetMainChunkFeerate(*ref);
 
+                // FIXME just nuke everything not ancestor-having
+                const auto entry = static_cast<CTxMemPoolEntry*>(ref);
+                // We can't evict our package ancestors; continue because
+                // next transaction in chunk might not be in ancestor set
+                if (all_ancestors.contains(ref)) continue;
+                const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
+                changeset.StageRemoval(entry_it);
+                kindred_evicted.insert(entry_it);
+
                 current_chunk.emplace_back(ref);
                 current_feerate += ifr;
 
                 if (cfr == current_feerate) {
-                    heap_refs.emplace_back(current_chunk);
+ //                   heap_refs.emplace_back(current_chunk);
                     current_chunk.clear();
                     current_feerate = FeeFrac{};
                 }
@@ -1085,6 +1094,9 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
 
         }
     }
+
+    // FIXME remove this
+    return kindred_evicted;
 
     // Should be reasonably bounded: each tx might be own chunk in worst case
     Assume(heap_refs.size() < (MAX_CLUSTER_COUNT_LIMIT - 1) * (MAX_CLUSTER_COUNT_LIMIT - 1));

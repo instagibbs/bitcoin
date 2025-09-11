@@ -634,7 +634,7 @@ public:
     std::strong_ordering CompareMainOrder(const Ref& a, const Ref& b) noexcept final;
     GraphIndex CountDistinctClusters(std::span<const Ref* const> refs, bool main_only = false) noexcept final;
     std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> GetMainStagingDiagrams() noexcept final;
-    std::vector<Ref*> Trim(std::set<const Ref*>* protected_refs) noexcept final;
+    std::vector<Ref*> Trim(std::unordered_set<const Ref*>* protected_refs) noexcept final;
 
     std::unique_ptr<BlockBuilder> GetBlockBuilder() noexcept final;
     std::pair<std::vector<Ref*>, FeePerWeight> GetWorstMainChunk() noexcept final;
@@ -2726,7 +2726,7 @@ std::pair<std::vector<TxGraph::Ref*>, FeePerWeight> TxGraphImpl::GetWorstMainChu
     return ret;
 }
 
-std::vector<TxGraph::Ref*> TxGraphImpl::Trim(std::set<const Ref*>* protected_refs) noexcept
+std::vector<TxGraph::Ref*> TxGraphImpl::Trim(std::unordered_set<const Ref*>* protected_refs) noexcept
 {
     int level = GetTopLevel();
     Assume(m_main_chunkindex_observers == 0 || level != 0);

@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <set>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -175,7 +175,7 @@ public:
      *  strategy such that the TxGraph's cluster and size limits are respected. Applies to staging
      *  if it exists, and to main otherwise. Returns the list of all removed transactions in
      *  unspecified order. This has no effect unless the relevant graph is oversized. */
-    virtual std::vector<Ref*> Trim(std::set<const Ref*>* protected_refs = nullptr) noexcept = 0;
+    virtual std::vector<Ref*> Trim(std::unordered_set<const Ref*>* protected_refs = nullptr) noexcept = 0;
 
     /** Interface returned by GetBlockBuilder. */
     class BlockBuilder

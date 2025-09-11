@@ -1016,6 +1016,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     }
 
     // Grab all in-mempool ancestors of package (currently size 1 only).
+    // FIXME we need to collect the ref for the package txns too
     std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> parent_entries{m_pool.GetParents(*ws.m_tx_handle)};
 
     // No way this can succeed; abort
@@ -1042,7 +1043,7 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         return std::nullopt;
     }
 
-    std::set<const TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
+    std::unordered_set<const TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
     Assume(all_ancestors.size() <= MAX_CLUSTER_COUNT_LIMIT - 1);
 
     // Bless the package and ancestors to try hardest to not evict it

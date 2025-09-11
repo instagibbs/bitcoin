@@ -1042,99 +1042,32 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
         return std::nullopt;
     }
 
-    std::unordered_set<TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
+    std::set<const TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
     Assume(all_ancestors.size() <= MAX_CLUSTER_COUNT_LIMIT - 1);
 
-    // We will reconstruct chunks manually for eviction ordering
-    using Chunk = std::vector<TxGraph::Ref*>;
+    // Bless the package and ancestors to try hardest to not evict it
+//    CAmount mod_fee{ws.m_tx_handle->GetModifiedFee()};
+//    const TxGraph::Ref* refptr = &(**m_pool.GetIter(ws.m_tx_handle->GetTx().GetHash()));
+//    Assume(refptr);
+//    graph->SetTransactionFee(*refptr, 21'000'000);
 
-    auto ref_cmp = [&graph](Chunk lhs, Chunk rhs) {
-        return std::is_lt(graph->CompareMainOrder(*lhs[0], *rhs[0]));
-    };
+    // Trim and set fee back
+    const auto trimmed{graph->Trim(/*protected_refs=*/&all_ancestors)};
+//    graph->SetTransactionFee(*refptr, mod_fee);
 
-    // Set with first entry of GetCluster result to ensure uniqueness in heap_refs
-    std::set<TxGraph::Ref*> clusters_prefix;
-    // Heap for popping lowest chunks first for eviction
-    std::vector<Chunk> heap_refs;
-    for (const auto& parent : parent_entries) {
-        const auto& cluster = graph->GetCluster(parent, /*main_only=*/true);
-        // If new cluster, process chunks
-        if (!cluster.empty() && clusters_prefix.insert(cluster[0]).second) {
-
-            // Accumulates transactions until package feerate matches measured chunkfeerate
-            // since that implies that is the chunk.
-            Chunk current_chunk;
-            FeeFrac current_feerate;
-            for (const auto& ref : cluster) {
-                const auto ifr = graph->GetIndividualFeerate(*ref);
-                const auto cfr = graph->GetMainChunkFeerate(*ref);
-
-                // FIXME just nuke everything not ancestor-having
-                const auto entry = static_cast<CTxMemPoolEntry*>(ref);
-                // We can't evict our package ancestors; continue because
-                // next transaction in chunk might not be in ancestor set
-                if (all_ancestors.contains(ref)) continue;
-                const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
-                changeset.StageRemoval(entry_it);
-                kindred_evicted.insert(entry_it);
-
-                current_chunk.emplace_back(ref);
-                current_feerate += ifr;
-
-                if (cfr == current_feerate) {
- //                   heap_refs.emplace_back(current_chunk);
-                    current_chunk.clear();
-                    current_feerate = FeeFrac{};
-                }
-            }
-            if (!Assume(current_chunk.empty()) || !Assume(current_feerate.IsEmpty())) {
-                // Unable to recover chunks for some reason
-                return std::nullopt;
-            }
-
+    // Return list if list doesn't consist of any part of the package
+    for (auto& trimmed_ref : trimmed) {
+        const auto entry = static_cast<CTxMemPoolEntry*>(trimmed_ref);
+        // Can't trim what we submitted and continue
+        if (entry->GetTx().GetHash() == ws.m_hash) {
+//            continue; // FIXME just for benchmarking, this really should cause failure
+            assert(false);
+            return std::nullopt;
         }
-    }
-
-    // FIXME remove this
-    return kindred_evicted;
-
-    // Should be reasonably bounded: each tx might be own chunk in worst case
-    Assume(heap_refs.size() < (MAX_CLUSTER_COUNT_LIMIT - 1) * (MAX_CLUSTER_COUNT_LIMIT - 1));
-
-    if (!Assume(!heap_refs.empty())) {
-        return std::nullopt;
-    }
-
-    do {
-        std::pop_heap(heap_refs.begin(), heap_refs.end(), ref_cmp);
-        Chunk popped_chunk = heap_refs.back();
-        heap_refs.pop_back();
-
-        // Walk backwards over chunk transactions; we might not have to evict all of it
-        for (size_t i{0}; i < popped_chunk.size() ; ++i) {
-            const auto ref = popped_chunk[popped_chunk.size() - 1 - i];
-
-            const auto entry = static_cast<CTxMemPoolEntry*>(ref);
-
-            // We can't evict our package ancestors; continue because
-            // next transaction in chunk might not be in ancestor set
-            if (all_ancestors.contains(ref)) continue;
-
-            // If it doesn't exist in staging, that means it was removed with direct conflict.
-            // Skip reporting it, but process rest of chunk.
-            if (!graph->Exists(*ref, /*main_only=*/false)) continue;
-
-            const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
-            changeset.StageRemoval(entry_it);
-            kindred_evicted.insert(entry_it);
-
-            // Stop early if we made the graph happy
-            if (changeset.CheckMemPoolPolicyLimits()) break;
-        }
-    } while (!heap_refs.empty() && !changeset.CheckMemPoolPolicyLimits());
-
-    if (!changeset.CheckMemPoolPolicyLimits()) {
-        return std::nullopt;
+        const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};
+        // Trim() has removed it already from staging, this is other bookkeeping
+        changeset.StageRemoval(entry_it);
+        kindred_evicted.insert(entry_it);
     }
 
     return kindred_evicted;
@@ -1182,6 +1115,7 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
                  Ticks<MillisecondsDouble>(SteadyClock::now() - time));
 
         if (!kindred_eviction_candidates) {
+            LogDebug(BCLog::BENCH, "But failed");
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         }
 

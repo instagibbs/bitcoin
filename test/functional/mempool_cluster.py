@@ -26,8 +26,6 @@ class MempoolClusterTest(BitcoinTestFramework):
         self.wallet = MiniWallet(node)
 
         node = self.nodes[0]
-        from pdb import set_trace
-        set_trace()
         self.generate(self.wallet, 500)
 
         # Maximally pessimal clusters for kindred eviction
@@ -41,7 +39,8 @@ class MempoolClusterTest(BitcoinTestFramework):
         ancestors_vec = []
         utxos_to_spend = []
         clusters = []
-        for _ in range(num_clusters):
+        for i in range(num_clusters):
+            self.log.info(f"Making cluster {i}")
             # Second output of original parent will be used for kindred eviction
             parent_tx = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, confirmed_only=True)
 
@@ -83,13 +82,12 @@ class MempoolClusterTest(BitcoinTestFramework):
             if last_cluster:
                 assert last_cluster != new_cluster
         '''
-
-        # Now craft a single tx to evict the entire non-ancestry
-        kindred_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=utxos_for_kindred_eviction, fee_per_output=1000000000)
-        res = node.submitpackage([kindred_tx["tx"].serialize().hex()], maxfeerate=0)
         from pdb import set_trace
         set_trace()
 
+        # Now craft a single tx to evict the entire non-ancestry
+        kindred_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=utxos_for_kindred_eviction, fee_per_output=50_000_000_000)
+        res = node.submitpackage([kindred_tx["tx"].serialize().hex()], maxfeerate=0)
         node.getmempoolinfo()
 
         return # FIXME the rest of the test

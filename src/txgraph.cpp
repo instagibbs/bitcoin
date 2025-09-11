@@ -634,7 +634,7 @@ public:
     std::strong_ordering CompareMainOrder(const Ref& a, const Ref& b) noexcept final;
     GraphIndex CountDistinctClusters(std::span<const Ref* const> refs, bool main_only = false) noexcept final;
     std::pair<std::vector<FeeFrac>, std::vector<FeeFrac>> GetMainStagingDiagrams() noexcept final;
-    std::vector<Ref*> Trim() noexcept final;
+    std::vector<Ref*> Trim(std::set<const Ref*>* protected_refs) noexcept final;
 
     std::unique_ptr<BlockBuilder> GetBlockBuilder() noexcept final;
     std::pair<std::vector<Ref*>, FeePerWeight> GetWorstMainChunk() noexcept final;
@@ -2726,7 +2726,7 @@ std::pair<std::vector<TxGraph::Ref*>, FeePerWeight> TxGraphImpl::GetWorstMainChu
     return ret;
 }
 
-std::vector<TxGraph::Ref*> TxGraphImpl::Trim() noexcept
+std::vector<TxGraph::Ref*> TxGraphImpl::Trim(std::set<const Ref*>* protected_refs) noexcept
 {
     int level = GetTopLevel();
     Assume(m_main_chunkindex_observers == 0 || level != 0);
@@ -2862,6 +2862,13 @@ std::vector<TxGraph::Ref*> TxGraphImpl::Trim() noexcept
         for (auto trim_it = trim_data.begin(); trim_it != trim_data.end(); ++trim_it) {
             trim_it->m_parent_offset = deps_it - deps_by_child.begin();
             trim_it->m_deps_left = 0;
+            // Protect via absurd fees so they are processed ASAP
+            if (protected_refs) {
+                const Ref* protected_ref = m_entries[trim_it->m_index].m_ref;
+                if (protected_refs->contains(protected_ref)) {
+                    trim_it->m_chunk_feerate = FeePerWeight::FromFeeFrac(FeeFrac{(int64_t) 2'100'000'000'000'000, 1});
+                }
+            }
             while (deps_it != deps_by_child.end() && deps_it->second == trim_it->m_index) {
                 ++trim_it->m_deps_left;
                 ++deps_it;

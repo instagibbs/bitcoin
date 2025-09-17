@@ -1008,61 +1008,40 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     // Running list of things we deem evict-worthy
     CTxMemPool::setEntries kindred_evicted;
 
-    auto& graph = m_pool.m_txgraph;
-
     // Nothing to do
     if (changeset.CheckMemPoolPolicyLimits()) {
         return kindred_evicted;
     }
 
-    // Grab all in-mempool ancestors of package (currently size 1 only).
-    // FIXME we need to collect the ref for the package txns too
-    std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef> parent_entries{m_pool.GetParents(*ws.m_tx_handle)};
-
-    // No way this can succeed; abort
-    if (parent_entries.size() + 1 > MAX_CLUSTER_COUNT_LIMIT) {
+    // Gates total number of possible ancestors fetched by CalculateMemPoolAncestors
+    // As well as the total work done trimming.
+    if (m_pool.GetParents(*ws.m_tx_handle).size() > 2) {
         return std::nullopt;
+    } 
+
+    // Already cached, no need to grab ancestors again
+    const auto ancestor_iter_set{changeset.CalculateMemPoolAncestors(ws.m_tx_handle)};
+    std::unordered_set<const TxGraph::Ref*> ancestor_set;
+
+    // Include subpackage in ancestor set
+    ancestor_set.insert(&*ws.m_tx_handle);
+    for (const auto& iter : ancestor_iter_set) {
+        ancestor_set.insert(&*iter);
     }
 
-    std::vector<const TxGraph::Ref*> parent_refs;
-    std::transform(parent_entries.begin(),
-                   parent_entries.end(),
-                   std::back_inserter(parent_refs),
-                   [&](const std::reference_wrapper<const CTxMemPoolEntry>& e) {
-                        return static_cast<const TxGraph::Ref*>(&e.get());
-                   });
-
-    // Set of all ancestors of the added package, not including itself (by definition, no ancestors can be evicted)
-    std::vector<TxGraph::Ref*> all_ancestors_vec{graph->GetAncestorsUnion(parent_refs, /*main_only=*/true)};
-
-    // Each parent (bound by MAX_CLUSTER_COUNT_LIMIT - 1 above) could be a separate cluster with MAX_CLUSTER_COUNT_LIMIT txns 
-    Assume(all_ancestors_vec.size() <= parent_entries.size() * MAX_CLUSTER_COUNT_LIMIT);
-
-    // No way this can succeed; abort
-    if (all_ancestors_vec.size() + 1 > MAX_CLUSTER_COUNT_LIMIT) {
+    // No chance of it working; abort
+    if (ancestor_set.size() > MAX_CLUSTER_COUNT_LIMIT) {
         return std::nullopt;
     }
-
-    std::unordered_set<const TxGraph::Ref*> all_ancestors{all_ancestors_vec.begin(), all_ancestors_vec.end()};
-    Assume(all_ancestors.size() <= MAX_CLUSTER_COUNT_LIMIT - 1);
-
-    // Bless the package and ancestors to try hardest to not evict it
-//    CAmount mod_fee{ws.m_tx_handle->GetModifiedFee()};
-//    const TxGraph::Ref* refptr = &(**m_pool.GetIter(ws.m_tx_handle->GetTx().GetHash()));
-//    Assume(refptr);
-//    graph->SetTransactionFee(*refptr, 21'000'000);
 
     // Trim and set fee back
-    const auto trimmed{graph->Trim(/*protected_refs=*/&all_ancestors)};
-//    graph->SetTransactionFee(*refptr, mod_fee);
+    const auto trimmed{m_pool.m_txgraph->Trim(/*protected_refs=*/&ancestor_set)};
 
     // Return list if list doesn't consist of any part of the package
     for (auto& trimmed_ref : trimmed) {
         const auto entry = static_cast<CTxMemPoolEntry*>(trimmed_ref);
         // Can't trim what we submitted and continue
         if (entry->GetTx().GetHash() == ws.m_hash) {
-//            continue; // FIXME just for benchmarking, this really should cause failure
-            assert(false);
             return std::nullopt;
         }
         const auto entry_it{*m_pool.GetIter(entry->GetTx().GetHash())};

@@ -32,7 +32,7 @@ class MempoolClusterTest(BitcoinTestFramework):
         # 63 clusters being joined by a single child, causing
         # 63 evictions each, each tx its own chunk
         # Make +1 for other testing
-        num_clusters = MAX_CLUSTER_COUNT - 1
+        num_clusters = 2#MAX_CLUSTER_COUNT - 1
         parent_txs = []
         historical_utxos_spent_vec = []
         utxos_for_kindred_eviction = []
@@ -86,7 +86,7 @@ class MempoolClusterTest(BitcoinTestFramework):
         set_trace()
 
         # Now craft a single tx to evict the entire non-ancestry
-        kindred_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=utxos_for_kindred_eviction, fee_per_output=50_000_000_000)
+        kindred_tx = self.wallet.create_self_transfer_multi(utxos_to_spend=utxos_for_kindred_eviction, fee_per_output=50_000_000)
         res = node.submitpackage([kindred_tx["tx"].serialize().hex()], maxfeerate=0)
         node.getmempoolinfo()
 

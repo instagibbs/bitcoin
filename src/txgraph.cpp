@@ -2862,11 +2862,11 @@ std::vector<TxGraph::Ref*> TxGraphImpl::Trim(std::unordered_set<const Ref*>* pro
         for (auto trim_it = trim_data.begin(); trim_it != trim_data.end(); ++trim_it) {
             trim_it->m_parent_offset = deps_it - deps_by_child.begin();
             trim_it->m_deps_left = 0;
-            // Protect via absurd fees so they are processed ASAP
+            // Undefined feerate sorts "last", or highest feerate possible
             if (protected_refs) {
                 const Ref* protected_ref = m_entries[trim_it->m_index].m_ref;
                 if (protected_refs->contains(protected_ref)) {
-                    trim_it->m_chunk_feerate = FeePerWeight::FromFeeFrac(FeeFrac{(int64_t) 2'100'000'000'000'000, 1});
+                    trim_it->m_chunk_feerate = FeePerWeight::FromFeeFrac(FeeFrac{});
                 }
             }
             while (deps_it != deps_by_child.end() && deps_it->second == trim_it->m_index) {

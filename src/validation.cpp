@@ -1005,17 +1005,20 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
 
+    Assume(!changeset.CheckMemPoolPolicyLimits());
+
     // Running list of things we deem evict-worthy
     CTxMemPool::setEntries kindred_evicted;
 
-    // Nothing to do
-    if (changeset.CheckMemPoolPolicyLimits()) {
-        return kindred_evicted;
+    const auto parents{m_pool.GetParents(*ws.m_tx_handle)};
+    std::vector<const TxGraph::Ref*> parent_refs;
+    for (auto& parent : parents) {
+        parent_refs.push_back(&parent.get());
     }
 
     // Gates total number of possible ancestors fetched by CalculateMemPoolAncestors
     // As well as the total work done trimming.
-    if (m_pool.GetParents(*ws.m_tx_handle).size() > 2) {
+    if (m_pool.m_txgraph->CountDistinctClusters(parent_refs) > 2) {
         return std::nullopt;
     } 
 

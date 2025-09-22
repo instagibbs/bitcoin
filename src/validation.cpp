@@ -1018,7 +1018,9 @@ std::optional<CTxMemPool::setEntries> MemPoolAccept::TryKindredEviction(CTxMemPo
 
     // Gates total number of possible ancestors fetched by CalculateMemPoolAncestors
     // As well as the total work done trimming.
-    if (m_pool.m_txgraph->CountDistinctClusters(parent_refs) > 2) {
+    size_t max_num_clusters{2};
+    if (parents.size() > MAX_CLUSTER_COUNT_LIMIT * max_num_clusters || // No chance to succeed next line so don't query graph
+        m_pool.m_txgraph->CountDistinctClusters(parent_refs) > max_num_clusters) {
         return std::nullopt;
     } 
 

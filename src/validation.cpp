@@ -1006,10 +1006,48 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
 
     CTxMemPool::setEntries all_conflicts;
 
-    // Calculate all conflicting entries and enforce Rule #5.
-    if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
-                             strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+    if (!m_subpackage.m_rbf && m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+        // Nothing to do
+        return true;
+    }
+
+    // Process explit RBFs if they exist
+    if (m_subpackage.m_rbf) {
+        // Calculate all conflicting entries and enforce Rule #5.
+        if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                 strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
+
+        // Add all the to-be-removed transactions to the changeset.
+        for (auto it : all_conflicts) {
+            m_subpackage.m_changeset->StageRemoval(it);
+        }
+    }
+
+    // Direct conflicts applied weren't enough; let's look for more potential conflicts
+    // via "kindred eviction"
+    bool kindred_eviction_attempted{false};
+    if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+        // This calls StageRemoval on each trimmed item already
+        const auto kindred_eviction_candidates{m_subpackage.m_changeset->TryKindredEviction(ws.m_tx_handle)};
+        if (!kindred_eviction_candidates) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        }
+        kindred_eviction_attempted = true;
+        m_subpackage.m_rbf = true;
+
+        // Impute new conflicts to be considered for further replacement checks
+        for (const auto eviction_candidate : *kindred_eviction_candidates) {
+            ws.m_iters_conflicting.insert(eviction_candidate);
+        }
+
+        // Fill out new all_conflicts from scratch; topology may violate assumptions of caller
+        all_conflicts.clear();
+        if (const auto err_string{GetEntriesForConflicts(tx, m_pool, ws.m_iters_conflicting, all_conflicts)}) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                 strprintf("too many potential replacements%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
     }
 
     // Check if it's economically rational to mine this transaction rather than the ones it
@@ -1026,11 +1064,6 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
                              strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
     }
 
-    // Add all the to-be-removed transactions to the changeset.
-    for (auto it : all_conflicts) {
-        m_subpackage.m_changeset->StageRemoval(it);
-    }
-
     // Run cluster size limit checks and fail if we exceed them.
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
         return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
@@ -1040,7 +1073,11 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         // We checked above for the cluster size limits being respected, so a
         // failure here can only be due to an insufficient fee.
         Assume(err_string->first == DiagramCheckError::FAILURE);
-        return state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
+        if (kindred_eviction_attempted) {
+            return state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed (including kindred eviction)", err_string->second);
+        } else {
+            return state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "replacement-failed", err_string->second);
+        }
     }
 
     return true;
@@ -1345,7 +1382,7 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransactionInternal(const CTransa
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 
-    if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
+    if (!ReplacementChecks(ws)) {
         if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
             // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
             return MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), single_wtxid);

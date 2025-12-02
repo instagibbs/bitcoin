@@ -171,8 +171,10 @@ public:
     /** Remove transactions (including their own descendants) according to a fast but best-effort
      *  strategy such that the TxGraph's cluster and size limits are respected. Applies to staging
      *  if it exists, and to main otherwise. Returns the list of all removed transactions in
-     *  unspecified order. This has no effect unless the relevant graph is oversized. */
-    virtual std::vector<Ref*> Trim() noexcept = 0;
+     *  unspecified order. The argument `protected_refs` will give preference to not evicting
+     *  these entries but provides no guarantees. This has no effect unless the relevant graph
+     *  is oversized. */
+    virtual std::vector<Ref*> Trim(const std::vector<const Ref*> protected_refs) noexcept = 0;
 
     /** Interface returned by GetBlockBuilder. */
     class BlockBuilder

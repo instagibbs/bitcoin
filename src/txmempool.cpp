@@ -109,7 +109,8 @@ void CTxMemPool::UpdateTransactionsFromBlock(const std::vector<Txid>& vHashesToU
         }
     }
 
-    auto txs_to_remove = m_txgraph->Trim(); // Enforce cluster size limits.
+    std::vector<const TxGraph::Ref*> dummy_refs;
+    auto txs_to_remove = m_txgraph->Trim(/*protected_refs=*/dummy_refs); // Enforce cluster size limits.
     for (auto txptr : txs_to_remove) {
         const CTxMemPoolEntry& entry = *(static_cast<const CTxMemPoolEntry*>(txptr));
         removeUnchecked(mapTx.iterator_to(entry), MemPoolRemovalReason::SIZELIMIT);

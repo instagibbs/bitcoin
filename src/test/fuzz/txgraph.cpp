@@ -872,7 +872,13 @@ FUZZ_TARGET(txgraph)
             } else if ((block_builders.empty() || sims.size() > 1) && command-- == 0) {
                 // Trim.
                 bool was_oversized = top_sim.IsOversized();
-                auto removed = real->Trim();
+                std::vector<const TxGraph::Ref*> protected_refs;
+                auto count = provider.ConsumeIntegralInRange<size_t>(0, 15);
+                protected_refs.resize(count);
+                for (size_t i = 0; i < count; ++i) {
+                    protected_refs[i] = pick_fn();
+                }
+                auto removed = real->Trim(protected_refs);
                 // Verify that something was removed if and only if there was an oversized cluster.
                 assert(was_oversized == !removed.empty());
                 if (!was_oversized) break;
@@ -988,7 +994,8 @@ FUZZ_TARGET(txgraph)
                 }
 
                 // Invoke Trim now on the definitely-oversized txgraph.
-                auto removed = real->Trim();
+                std::vector<const TxGraph::Ref*> dummy_refs;
+                auto removed = real->Trim(/*protected_refs=*/dummy_refs);
                 // Verify that the number of removals is within range.
                 assert(removed.size() >= 1);
                 assert(removed.size() <= max_removed);

@@ -68,7 +68,8 @@ BOOST_AUTO_TEST_CASE(txgraph_trim_zigzag)
     BOOST_CHECK(graph->IsOversized(TxGraph::Level::TOP));
 
     // Call Trim() to remove transactions and bring the cluster back within limits.
-    auto removed_refs = graph->Trim();
+    std::vector<const TxGraph::Ref*> dummy_refs;
+    auto removed_refs = graph->Trim(/*protected_refs=*/dummy_refs);
     graph->SanityCheck();
     BOOST_CHECK(!graph->IsOversized(TxGraph::Level::TOP));
 
@@ -126,7 +127,8 @@ BOOST_AUTO_TEST_CASE(txgraph_trim_flower)
     BOOST_CHECK(graph->IsOversized(TxGraph::Level::TOP));
 
     // Call Trim() to remove transactions and bring the cluster back within limits.
-    auto removed_refs = graph->Trim();
+    std::vector<const TxGraph::Ref*> dummy_refs;
+    auto removed_refs = graph->Trim(/*protected_refs=*/dummy_refs);
     graph->SanityCheck();
     BOOST_CHECK(!graph->IsOversized(TxGraph::Level::TOP));
 
@@ -243,7 +245,8 @@ BOOST_AUTO_TEST_CASE(txgraph_trim_huge)
     BOOST_CHECK(total_tx_count == NUM_TOTAL_TX);
 
     // Call Trim() to remove transactions and bring the cluster back within limits.
-    auto removed_refs = graph->Trim();
+    std::vector<const TxGraph::Ref*> dummy_refs;
+    auto removed_refs = graph->Trim(/*protected_refs=*/dummy_refs);
     BOOST_CHECK(!graph->IsOversized(TxGraph::Level::TOP));
     BOOST_CHECK(removed_refs.size() == total_tx_count - graph->GetTransactionCount(TxGraph::Level::TOP));
     graph->SanityCheck();
@@ -280,7 +283,8 @@ BOOST_AUTO_TEST_CASE(txgraph_trim_big_singletons)
     BOOST_CHECK(graph->IsOversized(TxGraph::Level::TOP));
 
     // Call Trim() to remove transactions and bring the cluster back within limits.
-    auto removed_refs = graph->Trim();
+    std::vector<const TxGraph::Ref*> dummy_refs;
+    auto removed_refs = graph->Trim(/*protected_refs=*/dummy_refs);
     graph->SanityCheck();
     BOOST_CHECK_EQUAL(graph->GetTransactionCount(TxGraph::Level::TOP), NUM_TOTAL_TX - 6);
     BOOST_CHECK(!graph->IsOversized(TxGraph::Level::TOP));

@@ -671,6 +671,10 @@ public:
         /** Check if any cluster limits are exceeded. Returns true if pass, false if fail. */
         bool CheckMemPoolPolicyLimits();
 
+        /** Does best-effort trimming of staging graph without evicting the given handle,
+          *  and reports a set of entries on success. Staging graph must be oversized. */
+        std::optional<CTxMemPool::setEntries> TryKindredEviction(TxHandle tx) EXCLUSIVE_LOCKS_REQUIRED(m_pool->cs, ::cs_main);
+
         CTxMemPool::setEntries CalculateMemPoolAncestors(TxHandle tx)
         {
             // Look up transaction in our cache first

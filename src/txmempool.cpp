@@ -1062,6 +1062,69 @@ bool CTxMemPool::ChangeSet::CheckMemPoolPolicyLimits()
     return !m_pool->m_txgraph->IsOversized(TxGraph::Level::TOP);
 }
 
+std::optional<CTxMemPool::setEntries> CTxMemPool::ChangeSet::TryKindredEviction(TxHandle tx)
+{
+    AssertLockHeld(m_pool->cs);
+    AssertLockHeld(::cs_main);
+
+    const auto wtxid{tx->GetTx().GetWitnessHash()};
+
+    // The maximum number of clusters that may be considered for trimming
+    // to make a single undersized cluster. This can affect worst case duration of
+    // Trim() operation substantially.
+    size_t max_affected_clusters{2};
+
+    const auto parents{m_pool->GetParents(*tx)};
+    // In-mempool parents imply more than max_affected_clusters affected once new tx applied
+    if (parents.size() >= MAX_CLUSTER_COUNT_LIMIT * max_affected_clusters) {
+        return std::nullopt;
+    }
+
+    std::vector<const TxGraph::Ref*> parent_refs;
+    for (auto& parent : parents) {
+        parent_refs.push_back(&parent.get());
+    }
+
+    if (m_pool->m_txgraph->CountDistinctClusters(parent_refs, TxGraph::Level::MAIN) > max_affected_clusters) {
+        return std::nullopt;
+    }
+
+    // Now that number of affected clusters is bounded, query the main graph
+    const auto ancestor_iter_set{CalculateMemPoolAncestors(tx)};
+
+    // Successful attempt would result in a single cluster; we cannot exceed the limit
+    if (ancestor_iter_set.size() + 1 > MAX_CLUSTER_COUNT_LIMIT) {
+        return std::nullopt;
+    }
+
+    // Include subpackage(this single tx) in ancestor set since it's a part of the staging graph
+    std::vector<const TxGraph::Ref*> ancestors;
+    ancestors.push_back(&*tx);
+    for (const auto& iter : ancestor_iter_set) {
+        ancestors.push_back(&*iter);
+    }
+
+    // Trim and set fee back
+    const auto trimmed{m_pool->m_txgraph->Trim(/*protected_refs=*/ancestors)};
+
+    CTxMemPool::setEntries kindred_evicted;
+
+    // Return list if list doesn't consist of any part of the package
+    for (auto& trimmed_ref : trimmed) {
+        const auto entry = static_cast<CTxMemPoolEntry*>(trimmed_ref);
+        // Don't trim what we submitted and report success
+        if (entry->GetTx().GetWitnessHash() == wtxid) {
+            return std::nullopt;
+        }
+        const auto entry_it{*m_pool->GetIter(entry->GetTx().GetHash())};
+        // Trim() has removed it already from staging, this is other bookkeeping
+        StageRemoval(entry_it);
+        kindred_evicted.insert(entry_it);
+    }
+
+    return kindred_evicted;
+}
+
 std::vector<FeePerWeight> CTxMemPool::GetFeerateDiagram() const
 {
     FeePerWeight zero{};

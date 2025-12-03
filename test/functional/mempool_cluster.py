@@ -166,6 +166,13 @@ class MempoolClusterTest(BitcoinTestFramework):
         self.log.info("Test that the resulting cluster count is correctly calculated in a package")
         self.test_limit_enforcement_package(cluster_submitted)
 
+        kindred_utxo = cluster_submitted[0]["new_utxos"][1]
+        too_lowfee_kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=kindred_utxo)
+        assert_raises_rpc_error(-26, "insufficient fee", node.sendrawtransaction, too_lowfee_kindred_tx["hex"])
+        highfee_kindred_tx = self.wallet.create_self_transfer(utxo_to_spend=kindred_utxo, fee=Decimal("0.01"))
+        node.sendrawtransaction(highfee_kindred_tx["hex"])
+        cluster_submitted[-1]["txid"] not in node.getrawmempool()
+
     @cleanup
     def test_cluster_size_limit(self, max_cluster_size_vbytes):
         node = self.nodes[0]

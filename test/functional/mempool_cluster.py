@@ -48,13 +48,15 @@ class MempoolClusterTest(BitcoinTestFramework):
         The topology is a chain: the i'th transaction depends on the (i-1)'th transaction.
         Optionally provide a target_vsize for each transaction.
         """
-        parent_tx = self.wallet.send_self_transfer(from_node=node, confirmed_only=True, target_vsize=target_vsize)
-        utxo_to_spend = parent_tx["new_utxo"]
+        parent_tx = self.wallet.send_self_transfer_multi(from_node=node, num_outputs=2, confirmed_only=True, target_vsize=target_vsize)
+        # Always spend first utxo to chain, reserving second output for kindred eviction
+        utxo_to_spend = parent_tx["new_utxos"][0]
         all_txids = [parent_tx["txid"]]
         all_results = [parent_tx]
 
         while len(all_results) < cluster_count:
-            next_tx = self.wallet.send_self_transfer(from_node=node, utxo_to_spend=utxo_to_spend, target_vsize=target_vsize)
+            # default fee_per_output is just not enough to cover minrelay; double it
+            next_tx = self.wallet.send_self_transfer_multi(from_node=node, utxos_to_spend=[utxo_to_spend], target_vsize=target_vsize, fee_per_output=2000)
             assert next_tx["txid"] in node.getrawmempool()
 
             # Confirm that each transaction is in the same cluster as the first.
@@ -70,7 +72,7 @@ class MempoolClusterTest(BitcoinTestFramework):
             # Update for next iteration
             all_results.append(next_tx)
             all_txids.append(next_tx["txid"])
-            utxo_to_spend = next_tx["new_utxo"]
+            utxo_to_spend = next_tx["new_utxos"][0]
 
         assert node.getmempoolcluster(parent_tx['txid'])['txcount'] == cluster_count
         return all_results
@@ -96,7 +98,7 @@ class MempoolClusterTest(BitcoinTestFramework):
         last_result = cluster_submitted[-1]
 
         # Test that adding one more transaction to the cluster will fail.
-        bad_tx = self.wallet.create_self_transfer(utxo_to_spend=last_result["new_utxo"], target_vsize=target_vsize_per_tx)
+        bad_tx = self.wallet.create_self_transfer(utxo_to_spend=last_result["new_utxos"][0], target_vsize=target_vsize_per_tx)
         assert_raises_rpc_error(-26, "too-large-cluster", node.sendrawtransaction, bad_tx["hex"])
 
         # It should also limit cluster sizes during replacement
@@ -110,7 +112,7 @@ class MempoolClusterTest(BitcoinTestFramework):
         # 10sat/vB
         fee_to_use = target_vsize_per_tx * 10 if target_vsize_per_tx is not None else int(fee * COIN * 5)
         bad_tx_also_replacement = self.wallet.create_self_transfer_multi(
-            utxos_to_spend=[last_result["new_utxo"], utxo_to_double_spend],
+            utxos_to_spend=[last_result["new_utxos"][0], utxo_to_double_spend],
             target_vsize=target_vsize_per_tx,
             fee_per_output=fee_to_use,
         )
@@ -118,7 +120,7 @@ class MempoolClusterTest(BitcoinTestFramework):
 
         # Replace the last transaction. We are extending the cluster by one, but also removing one: 64 + 1 - 1 = 64
         # In the case of vsize, it should similarly cancel out.
-        second_to_last_utxo = cluster_submitted[-2]["new_utxo"]
+        second_to_last_utxo = cluster_submitted[-2]["new_utxos"][0]
         fee_to_beat = cluster_submitted[-1]["fee"]
         vsize_to_use = cluster_submitted[-1]["tx"].get_vsize() if target_vsize_per_tx is not None else None
         good_tx_replacement = self.wallet.create_self_transfer(utxo_to_spend=second_to_last_utxo, fee=fee_to_beat * 5, target_vsize=vsize_to_use)
@@ -129,7 +131,7 @@ class MempoolClusterTest(BitcoinTestFramework):
     def test_limit_enforcement_package(self, cluster_submitted):
         node = self.nodes[0]
         # Create a package from the second to last transaction. This shouldn't work because the effect is 64 + 2 - 1 = 65
-        last_utxo = cluster_submitted[-2]["new_utxo"]
+        last_utxo = cluster_submitted[-2]["new_utxos"][0]
         fee_to_beat = cluster_submitted[-1]["fee"]
         # We do not use package RBF here because it has additional restrictions on mempool ancestors.
         parent_tx_bad = self.wallet.create_self_transfer(utxo_to_spend=last_utxo, fee=fee_to_beat * 5)
@@ -143,9 +145,9 @@ class MempoolClusterTest(BitcoinTestFramework):
         assert_equal(result_parent_only["tx-results"][child_tx_bad["wtxid"]]["error"], "too-large-cluster")
 
         # Now, create a package from the second to last transaction. This should work because the effect is 64 + 2 - 2 = 64
-        third_to_last_utxo = cluster_submitted[-3]["new_utxo"]
-        parent_tx_good = self.wallet.create_self_transfer(utxo_to_spend=third_to_last_utxo)
-        child_tx_good = self.wallet.create_self_transfer(utxo_to_spend=parent_tx_good["new_utxo"], fee=fee_to_beat * 5)
+        third_to_last_utxo = cluster_submitted[-3]["new_utxos"][0]
+        parent_tx_good = self.wallet.create_self_transfer(utxo_to_spend=third_to_last_utxo, locktime=1, fee=fee_to_beat * 10)
+        child_tx_good = self.wallet.create_self_transfer(utxo_to_spend=parent_tx_good["new_utxo"])
         result_both_good = node.submitpackage([parent_tx_good["hex"], child_tx_good["hex"]], maxfeerate=0)
         assert_equal(result_both_good["package_msg"], "success")
         assert parent_tx_good["txid"] in node.getrawmempool()
@@ -192,7 +194,7 @@ class MempoolClusterTest(BitcoinTestFramework):
             cluster1 = self.add_chain_cluster(node, num_txns_cluster1)
             for result in cluster1:
                 node.sendrawtransaction(result["hex"])
-            utxo_from_cluster1 = cluster1[-1]["new_utxo"]
+            utxo_from_cluster1 = cluster1[-1]["new_utxos"][0]
 
             # Make the next cluster, which contains the remaining transactions
             assert_greater_than(max_cluster_count, num_txns_cluster1)
@@ -200,7 +202,7 @@ class MempoolClusterTest(BitcoinTestFramework):
             cluster2 = self.add_chain_cluster(node, num_txns_cluster2)
             for result in cluster2:
                 node.sendrawtransaction(result["hex"])
-            utxo_from_cluster2 = cluster2[-1]["new_utxo"]
+            utxo_from_cluster2 = cluster2[-1]["new_utxos"][0]
 
             # Now create a transaction that spends from both clusters, which would merge them.
             tx_merger = self.wallet.create_self_transfer_multi(utxos_to_spend=[utxo_from_cluster1, utxo_from_cluster2])

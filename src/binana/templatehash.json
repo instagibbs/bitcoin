@@ -4,6 +4,6 @@
     "scriptverify": true,
     "scriptverify_discourage": true,
     "opcodes": {
-        "TEMPLATEHASH": "0xbb"
+        "TEMPLATEHASH": "0xce"
     }
 }

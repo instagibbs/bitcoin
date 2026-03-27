@@ -364,6 +364,67 @@ public:
     void SanityCheck(const TxGraphImpl& graph, int level) const final;
 };
 
+/** An implementation of Cluster for exactly 2 transactions in a parent->child chain.
+ *  No DepGraph, no vectors, no heap allocations. The linearization is trivially optimal
+ *  (parent first, child second). */
+class PairClusterImpl final : public Cluster
+{
+    friend class TxGraphImpl;
+
+    struct TxData {
+        GraphIndex graph_index{GraphIndex(-1)};
+        FeePerWeight feerate;
+    };
+    /** [0] = parent/root, [1] = child. */
+    TxData m_txdata[2];
+    /** Number of transactions currently in this cluster (0, 1, or 2). */
+    uint8_t m_count{0};
+
+public:
+    /** The smallest number of transactions this Cluster implementation is intended for. */
+    static constexpr DepGraphIndex MIN_INTENDED_TX_COUNT{2};
+    /** The largest number of transactions this Cluster implementation supports. */
+    static constexpr DepGraphIndex MAX_TX_COUNT{2};
+
+    PairClusterImpl() noexcept = delete;
+    /** Construct an empty PairClusterImpl. */
+    explicit PairClusterImpl(uint64_t sequence) noexcept : Cluster(sequence) {}
+
+    size_t TotalMemoryUsage() const noexcept final;
+    constexpr DepGraphIndex GetMinIntendedTxCount() const noexcept final { return MIN_INTENDED_TX_COUNT; }
+    constexpr DepGraphIndex GetMaxTxCount() const noexcept final { return MAX_TX_COUNT; }
+    LinearizationIndex GetTxCount() const noexcept final { return m_count; }
+    DepGraphIndex GetDepGraphIndexRange() const noexcept final { return m_count; }
+    uint64_t GetTotalTxSize() const noexcept final;
+    GraphIndex GetClusterEntry(DepGraphIndex index) const noexcept final { Assume(index < m_count); return m_txdata[index].graph_index; }
+    DepGraphIndex AppendTransaction(GraphIndex graph_idx, FeePerWeight feerate) noexcept final;
+    void AddDependencies(SetType parents, DepGraphIndex child) noexcept final;
+    void ExtractTransactions(const std::function<void (DepGraphIndex, GraphIndex, FeePerWeight)>& visit1_fn, const std::function<void (DepGraphIndex, GraphIndex, SetType)>& visit2_fn) noexcept final;
+    int GetLevel(const TxGraphImpl& graph) const noexcept final;
+    void UpdateMapping(DepGraphIndex cluster_idx, GraphIndex graph_idx) noexcept final { Assume(cluster_idx < m_count); m_txdata[cluster_idx].graph_index = graph_idx; }
+    void Updated(TxGraphImpl& graph, int level, bool rename) noexcept final;
+    void RemoveChunkData(TxGraphImpl& graph) noexcept final;
+    Cluster* CopyToStaging(TxGraphImpl& graph) const noexcept final;
+    void GetConflicts(const TxGraphImpl& graph, std::vector<Cluster*>& out) const noexcept final;
+    void MakeStagingTransactionsMissing(TxGraphImpl& graph) noexcept final;
+    void Clear(TxGraphImpl& graph, int level) noexcept final;
+    void MoveToMain(TxGraphImpl& graph) noexcept final;
+    void Compact() noexcept final;
+    void ApplyRemovals(TxGraphImpl& graph, int level, std::span<GraphIndex>& to_remove) noexcept final;
+    [[nodiscard]] bool Split(TxGraphImpl& graph, int level) noexcept final;
+    void Merge(TxGraphImpl& graph, int level, Cluster& cluster) noexcept final;
+    void ApplyDependencies(TxGraphImpl& graph, int level, std::span<std::pair<GraphIndex, GraphIndex>> to_apply) noexcept final;
+    std::pair<uint64_t, bool> Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept final;
+    void AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept final;
+    uint64_t AppendTrimData(std::vector<TrimTxData>& ret, std::vector<std::pair<GraphIndex, GraphIndex>>& deps) const noexcept final;
+    void GetAncestorRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
+    void GetDescendantRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept final;
+    bool GetClusterRefs(TxGraphImpl& graph, std::span<TxGraph::Ref*> range, LinearizationIndex start_pos) noexcept final;
+    FeePerWeight GetIndividualFeerate(DepGraphIndex idx) noexcept final;
+    void SetFee(TxGraphImpl& graph, int level, DepGraphIndex idx, int64_t fee) noexcept final;
+    void SanityCheck(const TxGraphImpl& graph, int level) const final;
+};
+
 /** The transaction graph, including staged changes.
  *
  * The overall design of the data structure consists of 3 interlinked representations:
@@ -391,6 +452,7 @@ class TxGraphImpl final : public TxGraph
 {
     friend class Cluster;
     friend class SingletonClusterImpl;
+    friend class PairClusterImpl;
     friend class GenericClusterImpl;
     friend class BlockBuilderImpl;
 private:
@@ -702,6 +764,11 @@ public:
     {
         return std::make_unique<SingletonClusterImpl>(m_next_sequence_counter++);
     }
+    /** Create an empty PairClusterImpl object. */
+    std::unique_ptr<PairClusterImpl> CreateEmptyPairCluster() noexcept
+    {
+        return std::make_unique<PairClusterImpl>(m_next_sequence_counter++);
+    }
     /** Create an empty Cluster of the appropriate implementation for the specified (maximum) tx
      *  count. */
     std::unique_ptr<Cluster> CreateEmptyCluster(DepGraphIndex tx_count) noexcept
@@ -709,6 +776,9 @@ public:
         if (tx_count >= SingletonClusterImpl::MIN_INTENDED_TX_COUNT && tx_count <= SingletonClusterImpl::MAX_TX_COUNT) {
             return CreateEmptySingletonCluster();
         }
+        // Note: PairClusterImpl is not created here. It is only used via CreateEmptyPairCluster()
+        // in the pair merge fast path in ApplyDependencies(). CreateEmptyCluster() is called from
+        // Merge() and Split() where a GenericClusterImpl is needed (to absorb arbitrary topologies).
         if (tx_count >= GenericClusterImpl::MIN_INTENDED_TX_COUNT && tx_count <= GenericClusterImpl::MAX_TX_COUNT) {
             return CreateEmptyGenericCluster();
         }
@@ -1598,6 +1668,482 @@ void SingletonClusterImpl::ApplyDependencies(TxGraphImpl&, int, std::span<std::p
     Assume(false);
 }
 
+// ======================================================================================
+// PairClusterImpl method implementations
+// ======================================================================================
+
+size_t PairClusterImpl::TotalMemoryUsage() const noexcept
+{
+    return // Memory usage of the allocated PairClusterImpl itself.
+           memusage::MallocUsage(sizeof(PairClusterImpl)) +
+           // Memory usage of the ClusterSet::m_clusters entry.
+           sizeof(std::unique_ptr<Cluster>);
+}
+
+uint64_t PairClusterImpl::GetTotalTxSize() const noexcept
+{
+    uint64_t ret{0};
+    for (uint8_t i = 0; i < m_count; ++i) {
+        ret += m_txdata[i].feerate.size;
+    }
+    return ret;
+}
+
+DepGraphIndex PairClusterImpl::AppendTransaction(GraphIndex graph_idx, FeePerWeight feerate) noexcept
+{
+    Assume(m_count < 2);
+    m_txdata[m_count].graph_index = graph_idx;
+    m_txdata[m_count].feerate = feerate;
+    return m_count++;
+}
+
+void PairClusterImpl::AddDependencies(SetType parents, DepGraphIndex child) noexcept
+{
+    // For a pair cluster, the only valid dependency is pos 0 -> pos 1.
+    // We just accept and ignore (the dep is implicit in the structure).
+    Assume(child < m_count);
+}
+
+void PairClusterImpl::ExtractTransactions(const std::function<void (DepGraphIndex, GraphIndex, FeePerWeight)>& visit1_fn, const std::function<void (DepGraphIndex, GraphIndex, SetType)>& visit2_fn) noexcept
+{
+    for (uint8_t i = 0; i < m_count; ++i) {
+        visit1_fn(i, m_txdata[i].graph_index, m_txdata[i].feerate);
+    }
+    for (uint8_t i = 0; i < m_count; ++i) {
+        SetType parents;
+        if (i > 0) parents.Set(i - 1);
+        visit2_fn(i, m_txdata[i].graph_index, parents);
+    }
+    m_count = 0;
+}
+
+int PairClusterImpl::GetLevel(const TxGraphImpl& graph) const noexcept
+{
+    // GetLevel() does not work for empty Clusters.
+    if (!Assume(m_count > 0)) return -1;
+
+    const auto& entry = graph.m_entries[m_txdata[0].graph_index];
+    for (int level = 0; level < MAX_LEVELS; ++level) {
+        if (entry.m_locator[level].cluster == this) return level;
+    }
+    assert(false);
+    return -1;
+}
+
+void PairClusterImpl::Updated(TxGraphImpl& graph, int level, bool rename) noexcept
+{
+    if (m_count == 0) return;
+
+    // Update locators and clear chunk data.
+    for (uint8_t i = 0; i < m_count; ++i) {
+        auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        if (level == 0 && !rename) graph.ClearChunkData(entry);
+        entry.m_locator[level].SetPresent(this, i);
+    }
+
+    if (level == 0 && (rename || IsAcceptable())) {
+        // Compute chunks using the backward-absorbing algorithm for a chain.
+        // Linearization order: pos 0 (parent), pos 1 (child).
+        // Start with parent as first chunk, then process child.
+        if (m_count == 1) {
+            // Single transaction remaining.
+            auto& entry = graph.m_entries[m_txdata[0].graph_index];
+            entry.m_main_lin_index = 0;
+            entry.m_main_chunk_feerate = m_txdata[0].feerate;
+            entry.m_main_equal_feerate_chunk_prefix_size = m_txdata[0].feerate.size;
+            entry.m_main_max_chunk_fallback = m_txdata[0].graph_index;
+            if (!rename) graph.CreateChunkData(m_txdata[0].graph_index, LinearizationIndex(-1));
+        } else {
+            // Two transactions. Compute chunking.
+            FeeFrac parent_fr = m_txdata[0].feerate;
+            FeeFrac child_fr = m_txdata[1].feerate;
+
+            if (child_fr >> parent_fr) {
+                // Child has strictly higher feerate: ONE chunk (child absorbs parent).
+                FeeFrac combined = parent_fr + child_fr;
+                FeePerWeight chunk_feerate = FeePerWeight::FromFeeFrac(combined);
+
+                // Determine max fallback element.
+                GraphIndex max_element = m_txdata[0].graph_index;
+                if (graph.m_fallback_order(*graph.m_entries[m_txdata[1].graph_index].m_ref, *graph.m_entries[m_txdata[0].graph_index].m_ref) > 0) {
+                    max_element = m_txdata[1].graph_index;
+                }
+
+                FeeFrac equal_feerate_chunk_feerate = combined;
+
+                for (uint8_t i = 0; i < 2; ++i) {
+                    auto& entry = graph.m_entries[m_txdata[i].graph_index];
+                    entry.m_main_lin_index = i;
+                    entry.m_main_chunk_feerate = chunk_feerate;
+                    entry.m_main_equal_feerate_chunk_prefix_size = equal_feerate_chunk_feerate.size;
+                    entry.m_main_max_chunk_fallback = max_element;
+                }
+                // Create chunk data for the last tx in the chunk.
+                if (!rename) graph.CreateChunkData(m_txdata[1].graph_index, 2);
+            } else {
+                // TWO chunks: parent is chunk 0, child is chunk 1.
+                FeePerWeight parent_chunk_feerate = FeePerWeight::FromFeeFrac(parent_fr);
+                FeePerWeight child_chunk_feerate = FeePerWeight::FromFeeFrac(child_fr);
+
+                // equal_feerate_chunk_feerate tracking
+                FeeFrac equal_feerate_chunk_feerate_0 = parent_fr;
+
+                FeeFrac equal_feerate_chunk_feerate_1;
+                if (child_fr << equal_feerate_chunk_feerate_0) {
+                    equal_feerate_chunk_feerate_1 = child_fr;
+                } else {
+                    equal_feerate_chunk_feerate_1 = equal_feerate_chunk_feerate_0 + child_fr;
+                }
+
+                // Chunk 0: parent only
+                {
+                    auto& entry = graph.m_entries[m_txdata[0].graph_index];
+                    entry.m_main_lin_index = 0;
+                    entry.m_main_chunk_feerate = parent_chunk_feerate;
+                    entry.m_main_equal_feerate_chunk_prefix_size = equal_feerate_chunk_feerate_0.size;
+                    entry.m_main_max_chunk_fallback = m_txdata[0].graph_index;
+                }
+                if (!rename) graph.CreateChunkData(m_txdata[0].graph_index, 1);
+
+                // Chunk 1: child only (last chunk, single tx => special -1)
+                {
+                    auto& entry = graph.m_entries[m_txdata[1].graph_index];
+                    entry.m_main_lin_index = 1;
+                    entry.m_main_chunk_feerate = child_chunk_feerate;
+                    entry.m_main_equal_feerate_chunk_prefix_size = equal_feerate_chunk_feerate_1.size;
+                    entry.m_main_max_chunk_fallback = m_txdata[1].graph_index;
+                }
+                if (!rename) graph.CreateChunkData(m_txdata[1].graph_index, LinearizationIndex(-1));
+            }
+        }
+    }
+}
+
+void PairClusterImpl::RemoveChunkData(TxGraphImpl& graph) noexcept
+{
+    for (uint8_t i = 0; i < m_count; ++i) {
+        auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        graph.ClearChunkData(entry);
+    }
+}
+
+void PairClusterImpl::GetConflicts(const TxGraphImpl& graph, std::vector<Cluster*>& out) const noexcept
+{
+    for (uint8_t i = 0; i < m_count; ++i) {
+        auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        if (entry.m_locator[0].IsPresent()) {
+            out.push_back(entry.m_locator[0].cluster);
+        }
+    }
+}
+
+Cluster* PairClusterImpl::CopyToStaging(TxGraphImpl& graph) const noexcept
+{
+    auto ret = graph.CreateEmptyPairCluster();
+    auto ptr = ret.get();
+    ptr->m_count = m_count;
+    for (uint8_t i = 0; i < m_count; ++i) {
+        ptr->m_txdata[i] = m_txdata[i];
+    }
+    graph.InsertCluster(/*level=*/1, std::move(ret), m_quality);
+    ptr->Updated(graph, /*level=*/1, /*rename=*/false);
+    graph.GetClusterSet(/*level=*/1).m_cluster_usage += ptr->TotalMemoryUsage();
+    return ptr;
+}
+
+void PairClusterImpl::MakeStagingTransactionsMissing(TxGraphImpl& graph) noexcept
+{
+    for (uint8_t i = 0; i < m_count; ++i) {
+        auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        entry.m_locator[1].SetMissing();
+    }
+}
+
+void PairClusterImpl::Clear(TxGraphImpl& graph, int level) noexcept
+{
+    Assume(m_count > 0);
+    graph.GetClusterSet(level).m_cluster_usage -= TotalMemoryUsage();
+    for (uint8_t i = 0; i < m_count; ++i) {
+        graph.ClearLocator(level, m_txdata[i].graph_index, false);
+    }
+    m_count = 0;
+}
+
+void PairClusterImpl::MoveToMain(TxGraphImpl& graph) noexcept
+{
+    for (uint8_t i = 0; i < m_count; ++i) {
+        auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        entry.m_locator[1].SetMissing();
+    }
+    auto quality = m_quality;
+    graph.GetClusterSet(/*level=*/1).m_cluster_usage -= TotalMemoryUsage();
+    auto cluster = graph.ExtractCluster(/*level=*/1, quality, m_setindex);
+    graph.InsertCluster(/*level=*/0, std::move(cluster), quality);
+    graph.GetClusterSet(/*level=*/0).m_cluster_usage += TotalMemoryUsage();
+    Updated(graph, /*level=*/0, /*rename=*/false);
+}
+
+void PairClusterImpl::Compact() noexcept
+{
+    // Nothing to compact; PairClusterImpl has no dynamic allocations.
+}
+
+void PairClusterImpl::ApplyRemovals(TxGraphImpl& graph, int level, std::span<GraphIndex>& to_remove) noexcept
+{
+    Assume(!to_remove.empty());
+    Assume(m_count > 0);
+
+    // Track which positions to remove.
+    bool remove[2] = {false, false};
+    do {
+        GraphIndex idx = to_remove.front();
+        Assume(idx < graph.m_entries.size());
+        auto& entry = graph.m_entries[idx];
+        auto& locator = entry.m_locator[level];
+        if (locator.cluster != this) break;
+        Assume(locator.index < m_count);
+        remove[locator.index] = true;
+        if (level == 0) {
+            entry.m_main_lin_index = LinearizationIndex(-1);
+        }
+        graph.ClearLocator(level, idx, false);
+        to_remove = to_remove.subspan(1);
+    } while (!to_remove.empty());
+
+    // Compact remaining txs.
+    uint8_t new_count = 0;
+    for (uint8_t i = 0; i < m_count; ++i) {
+        if (!remove[i]) {
+            if (new_count != i) {
+                m_txdata[new_count] = m_txdata[i];
+            }
+            ++new_count;
+        }
+    }
+    m_count = new_count;
+
+    graph.SetClusterQuality(level, m_quality, m_setindex, QualityLevel::NEEDS_SPLIT);
+    Updated(graph, /*level=*/level, /*rename=*/false);
+}
+
+bool PairClusterImpl::Split(TxGraphImpl& graph, int level) noexcept
+{
+    Assume(NeedsSplitting());
+    if (m_count == 0) {
+        graph.GetClusterSet(level).m_cluster_usage -= TotalMemoryUsage();
+        return true;
+    }
+    if (m_count == 1) {
+        // Create a singleton for the remaining tx.
+        graph.GetClusterSet(level).m_cluster_usage -= TotalMemoryUsage();
+        auto new_cluster = graph.CreateEmptySingletonCluster();
+        auto* ptr = new_cluster.get();
+        ptr->AppendTransaction(m_txdata[0].graph_index, m_txdata[0].feerate);
+        graph.InsertCluster(level, std::move(new_cluster), QualityLevel::OPTIMAL);
+        ptr->Updated(graph, /*level=*/level, /*rename=*/false);
+        ptr->Compact();
+        graph.GetClusterSet(level).m_cluster_usage += ptr->TotalMemoryUsage();
+        m_count = 0;
+        return true;
+    }
+    // m_count == 2: chain intact, just set OPTIMAL.
+    graph.SetClusterQuality(level, m_quality, m_setindex, QualityLevel::OPTIMAL);
+    Updated(graph, /*level=*/level, /*rename=*/false);
+    return false;
+}
+
+void PairClusterImpl::Merge(TxGraphImpl&, int, Cluster&) noexcept
+{
+    // PairClusters are never merge targets.
+    Assume(false);
+}
+
+void PairClusterImpl::ApplyDependencies(TxGraphImpl& graph, int level, std::span<std::pair<GraphIndex, GraphIndex>> to_apply) noexcept
+{
+    // The dependency is already implicit in the chain structure. Just verify and set quality.
+    Assume(m_count == 2);
+    Assume(!NeedsSplitting());
+    Assume(!IsOversized());
+    graph.SetClusterQuality(level, m_quality, m_setindex, QualityLevel::OPTIMAL);
+    Updated(graph, /*level=*/level, /*rename=*/false);
+}
+
+std::pair<uint64_t, bool> PairClusterImpl::Relinearize(TxGraphImpl& graph, int level, uint64_t max_cost) noexcept
+{
+    // Already optimal. Set OPTIMAL and update.
+    graph.SetClusterQuality(level, m_quality, m_setindex, QualityLevel::OPTIMAL);
+    Updated(graph, /*level=*/level, /*rename=*/false);
+    return {0, true};
+}
+
+void PairClusterImpl::AppendChunkFeerates(std::vector<FeeFrac>& ret) const noexcept
+{
+    if (m_count == 0) return;
+    if (m_count == 1) {
+        ret.push_back(m_txdata[0].feerate);
+        return;
+    }
+    // m_count == 2
+    FeeFrac parent_fr = m_txdata[0].feerate;
+    FeeFrac child_fr = m_txdata[1].feerate;
+    if (child_fr >> parent_fr) {
+        // One chunk.
+        ret.push_back(parent_fr + child_fr);
+    } else {
+        // Two chunks.
+        ret.push_back(parent_fr);
+        ret.push_back(child_fr);
+    }
+}
+
+uint64_t PairClusterImpl::AppendTrimData(std::vector<TrimTxData>& ret, std::vector<std::pair<GraphIndex, GraphIndex>>& deps) const noexcept
+{
+    if (m_count == 0) return 0;
+    Assume(IsAcceptable());
+
+    // Compute chunks.
+    FeeFrac parent_fr = m_txdata[0].feerate;
+    uint64_t size = 0;
+
+    if (m_count == 1) {
+        auto& entry = ret.emplace_back();
+        entry.m_chunk_feerate = FeePerWeight::FromFeeFrac(parent_fr);
+        entry.m_index = m_txdata[0].graph_index;
+        entry.m_tx_size = parent_fr.size;
+        return parent_fr.size;
+    }
+
+    // m_count == 2
+    FeeFrac child_fr = m_txdata[1].feerate;
+    bool one_chunk = child_fr >> parent_fr;
+
+    // Parent (pos 0)
+    {
+        auto& entry = ret.emplace_back();
+        entry.m_chunk_feerate = one_chunk ? FeePerWeight::FromFeeFrac(parent_fr + child_fr) : FeePerWeight::FromFeeFrac(parent_fr);
+        entry.m_index = m_txdata[0].graph_index;
+        entry.m_tx_size = parent_fr.size;
+        size += parent_fr.size;
+    }
+    // Child (pos 1) - has implicit dependency on parent
+    {
+        auto& entry = ret.emplace_back();
+        entry.m_chunk_feerate = one_chunk ? FeePerWeight::FromFeeFrac(parent_fr + child_fr) : FeePerWeight::FromFeeFrac(child_fr);
+        entry.m_index = m_txdata[1].graph_index;
+        entry.m_tx_size = child_fr.size;
+        size += child_fr.size;
+        deps.emplace_back(m_txdata[0].graph_index, m_txdata[1].graph_index);
+    }
+    return size;
+}
+
+void PairClusterImpl::GetAncestorRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept
+{
+    Assume(m_count > 0);
+    // For a chain, ancestors of pos i are positions 0..i. Find the max pos among all args.
+    DepGraphIndex max_pos = 0;
+    while (!args.empty()) {
+        if (args.front().first != this) break;
+        if (args.front().second > max_pos) max_pos = args.front().second;
+        args = args.subspan(1);
+    }
+    // Output refs for positions 0 through max_pos.
+    for (DepGraphIndex i = 0; i <= max_pos && i < m_count; ++i) {
+        const auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        Assume(entry.m_ref != nullptr);
+        output.push_back(entry.m_ref);
+    }
+}
+
+void PairClusterImpl::GetDescendantRefs(const TxGraphImpl& graph, std::span<std::pair<Cluster*, DepGraphIndex>>& args, std::vector<TxGraph::Ref*>& output) noexcept
+{
+    Assume(m_count > 0);
+    // For a chain, descendants of pos i are positions i..m_count-1. Find the min pos among all args.
+    DepGraphIndex min_pos = m_count - 1;
+    while (!args.empty()) {
+        if (args.front().first != this) break;
+        if (args.front().second < min_pos) min_pos = args.front().second;
+        args = args.subspan(1);
+    }
+    // Output refs for positions min_pos through m_count-1.
+    for (DepGraphIndex i = min_pos; i < m_count; ++i) {
+        const auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        Assume(entry.m_ref != nullptr);
+        output.push_back(entry.m_ref);
+    }
+}
+
+bool PairClusterImpl::GetClusterRefs(TxGraphImpl& graph, std::span<TxGraph::Ref*> range, LinearizationIndex start_pos) noexcept
+{
+    Assume(!range.empty());
+    Assume(m_count > 0);
+    for (auto& ref : range) {
+        Assume(start_pos < m_count);
+        const auto& entry = graph.m_entries[m_txdata[start_pos++].graph_index];
+        Assume(entry.m_ref != nullptr);
+        ref = entry.m_ref;
+    }
+    return start_pos == m_count;
+}
+
+FeePerWeight PairClusterImpl::GetIndividualFeerate(DepGraphIndex idx) noexcept
+{
+    Assume(idx < m_count);
+    return m_txdata[idx].feerate;
+}
+
+void PairClusterImpl::SetFee(TxGraphImpl& graph, int level, DepGraphIndex idx, int64_t fee) noexcept
+{
+    Assume(idx < m_count);
+    if (m_txdata[idx].feerate.fee == fee) return;
+    m_txdata[idx].feerate.fee = fee;
+    if (IsAcceptable()) {
+        graph.SetClusterQuality(level, m_quality, m_setindex, QualityLevel::NEEDS_RELINEARIZE);
+    }
+    Updated(graph, /*level=*/level, /*rename=*/false);
+}
+
+void PairClusterImpl::SanityCheck(const TxGraphImpl& graph, int level) const
+{
+    // PairClusters are optimal, need splitting, or need relinearize.
+    Assume(IsOptimal() || NeedsSplitting() || m_quality == QualityLevel::NEEDS_RELINEARIZE || m_quality == QualityLevel::NEEDS_FIX || IsAcceptable());
+    for (uint8_t i = 0; i < m_count; ++i) {
+        const auto& entry = graph.m_entries[m_txdata[i].graph_index];
+        assert(entry.m_locator[level].cluster == this);
+        assert(entry.m_locator[level].index == i);
+    }
+    if (level == 0 && IsAcceptable() && m_count > 0) {
+        // Verify chunk data for main level.
+        if (m_count == 1) {
+            const auto& entry = graph.m_entries[m_txdata[0].graph_index];
+            assert(entry.m_main_lin_index == 0);
+            assert(entry.m_main_chunk_feerate == m_txdata[0].feerate);
+            assert(entry.m_main_equal_feerate_chunk_prefix_size == m_txdata[0].feerate.size);
+        } else {
+            FeeFrac parent_fr = m_txdata[0].feerate;
+            FeeFrac child_fr = m_txdata[1].feerate;
+            if (child_fr >> parent_fr) {
+                // One chunk.
+                FeePerWeight combined = FeePerWeight::FromFeeFrac(parent_fr + child_fr);
+                const auto& entry0 = graph.m_entries[m_txdata[0].graph_index];
+                const auto& entry1 = graph.m_entries[m_txdata[1].graph_index];
+                assert(entry0.m_main_lin_index == 0);
+                assert(entry1.m_main_lin_index == 1);
+                assert(entry0.m_main_chunk_feerate == combined);
+                assert(entry1.m_main_chunk_feerate == combined);
+            } else {
+                // Two chunks.
+                const auto& entry0 = graph.m_entries[m_txdata[0].graph_index];
+                const auto& entry1 = graph.m_entries[m_txdata[1].graph_index];
+                assert(entry0.m_main_lin_index == 0);
+                assert(entry1.m_main_lin_index == 1);
+                assert(entry0.m_main_chunk_feerate == FeePerWeight::FromFeeFrac(parent_fr));
+                assert(entry1.m_main_chunk_feerate == FeePerWeight::FromFeeFrac(child_fr));
+            }
+        }
+    }
+}
+
 TxGraphImpl::~TxGraphImpl() noexcept
 {
     // If Refs outlive the TxGraphImpl they refer to, unlink them, so that their destructor does not
@@ -2134,13 +2680,61 @@ void TxGraphImpl::ApplyDependencies(int level) noexcept
                 cluster = PullIn(cluster, cluster->GetLevel(*this));
             }
         }
+
+        // Compute deps_span early so it can be used for pair detection.
+        auto deps_span = std::span{clusterset.m_deps_to_add}
+                             .subspan(group_entry.m_deps_offset, group_entry.m_deps_count);
+        Assume(!deps_span.empty());
+
+        // Try pair merge: 2 singletons being connected by dependency.
+        if (group_entry.m_cluster_count == 2 &&
+            cluster_span[0]->GetTxCount() == 1 && cluster_span[1]->GetTxCount() == 1) {
+            GraphIndex g0 = cluster_span[0]->GetClusterEntry(0);
+            GraphIndex g1 = cluster_span[1]->GetClusterEntry(0);
+
+            // All deps must go in the same direction.
+            GraphIndex parent_gi = deps_span[0].first;
+            GraphIndex child_gi = deps_span[0].second;
+            bool valid = true;
+            for (size_t i = 1; i < deps_span.size(); ++i) {
+                if (deps_span[i].first != parent_gi || deps_span[i].second != child_gi) {
+                    valid = false;
+                    break;
+                }
+            }
+
+            if (valid && ((parent_gi == g0 && child_gi == g1) || (parent_gi == g1 && child_gi == g0))) {
+                // Identify which cluster is parent, which is child.
+                Cluster* parent_cluster = (g0 == parent_gi) ? cluster_span[0] : cluster_span[1];
+                Cluster* child_cluster = (g0 == parent_gi) ? cluster_span[1] : cluster_span[0];
+                FeePerWeight parent_fee = parent_cluster->GetIndividualFeerate(0);
+                FeePerWeight child_fee = child_cluster->GetIndividualFeerate(0);
+
+                // Subtract memory usage for old clusters.
+                GetClusterSet(level).m_cluster_usage -= parent_cluster->TotalMemoryUsage();
+                GetClusterSet(level).m_cluster_usage -= child_cluster->TotalMemoryUsage();
+
+                // Create PairCluster.
+                auto new_pair = CreateEmptyPairCluster();
+                auto* pair_ptr = new_pair.get();
+                pair_ptr->AppendTransaction(parent_gi, parent_fee);
+                pair_ptr->AppendTransaction(child_gi, child_fee);
+                InsertCluster(level, std::move(new_pair), QualityLevel::OPTIMAL);
+                pair_ptr->Updated(*this, level, /*rename=*/false);
+                pair_ptr->Compact();
+                GetClusterSet(level).m_cluster_usage += pair_ptr->TotalMemoryUsage();
+
+                // Delete old clusters.
+                DeleteCluster(*parent_cluster, level);
+                DeleteCluster(*child_cluster, level);
+                continue;
+            }
+        }
+
         // Invoke Merge() to merge them into a single Cluster.
         Merge(cluster_span, level);
         // Actually apply all to-be-added dependencies (all parents and children from this grouping
         // belong to the same Cluster at this point because of the merging above).
-        auto deps_span = std::span{clusterset.m_deps_to_add}
-                             .subspan(group_entry.m_deps_offset, group_entry.m_deps_count);
-        Assume(!deps_span.empty());
         const auto& loc = m_entries[deps_span[0].second].m_locator[level];
         Assume(loc.IsPresent());
         loc.cluster->ApplyDependencies(*this, level, deps_span);

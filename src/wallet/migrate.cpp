@@ -379,10 +379,11 @@ public:
 class RecordsPage
 {
 public:
-    RecordsPage(const PageHeader& header) : m_header(header) {}
+    RecordsPage(const PageHeader& header, uint32_t page_size) : m_header(header), m_page_size(page_size) {}
     RecordsPage() = delete;
 
     PageHeader m_header;
+    uint32_t m_page_size;
 
     std::vector<uint16_t> indexes;
     std::vector<std::variant<DataRecord, OverflowRecord>> records;
@@ -392,6 +393,11 @@ public:
     {
         // Current position within the page
         int64_t pos = PageHeader::SIZE;
+
+        // The index table must fit within the page
+        if (PageHeader::SIZE + m_header.entries * sizeof(uint16_t) > m_page_size) {
+            throw std::runtime_error("Page entries count exceeds page capacity");
+        }
 
         // Get the items
         for (uint32_t i = 0; i < m_header.entries; ++i) {
@@ -418,6 +424,9 @@ public:
 
             switch (rec_hdr.type) {
             case RecordType::KEYDATA: {
+                if (index + RecordHeader::SIZE + rec_hdr.len > m_page_size) {
+                    throw std::runtime_error("Data record extends beyond page boundary");
+                }
                 DataRecord record(rec_hdr);
                 s >> record;
                 records.emplace_back(record);
@@ -425,6 +434,9 @@ public:
                 break;
             }
             case RecordType::OVERFLOW_DATA: {
+                if (index + RecordHeader::SIZE + OverflowRecord::SIZE > m_page_size) {
+                    throw std::runtime_error("Overflow record extends beyond page boundary");
+                }
                 OverflowRecord record(rec_hdr);
                 s >> record;
                 records.emplace_back(record);
@@ -469,10 +481,11 @@ public:
 class InternalPage
 {
 public:
-    InternalPage(const PageHeader& header) : m_header(header) {}
+    InternalPage(const PageHeader& header, uint32_t page_size) : m_header(header), m_page_size(page_size) {}
     InternalPage() = delete;
 
     PageHeader m_header;
+    uint32_t m_page_size;
 
     std::vector<uint16_t> indexes;
     std::vector<InternalRecord> records;
@@ -482,6 +495,11 @@ public:
     {
         // Current position within the page
         int64_t pos = PageHeader::SIZE;
+
+        // The index table must fit within the page
+        if (PageHeader::SIZE + m_header.entries * sizeof(uint16_t) > m_page_size) {
+            throw std::runtime_error("Page entries count exceeds page capacity");
+        }
 
         // Get the items
         for (uint32_t i = 0; i < m_header.entries; ++i) {
@@ -508,6 +526,9 @@ public:
 
             if (rec_hdr.type != RecordType::KEYDATA) {
                 throw std::runtime_error("Unknown record type in internal page");
+            }
+            if (index + RecordHeader::SIZE + InternalRecord::FIXED_SIZE + rec_hdr.len > m_page_size) {
+                throw std::runtime_error("Internal record extends beyond page boundary");
             }
             InternalRecord record(rec_hdr);
             s >> record;
@@ -593,7 +614,7 @@ void BerkeleyRODatabase::Open()
     if (header.entries != 2) {
         throw std::runtime_error("Unexpected number of entries in outer database root page");
     }
-    RecordsPage page(header);
+    RecordsPage page(header, page_size);
     db_file >> page;
 
     // First record should be the string "main"
@@ -648,7 +669,7 @@ void BerkeleyRODatabase::Open()
         db_file >> header;
         switch (header.type) {
         case PageType::BTREE_INTERNAL: {
-            InternalPage int_page(header);
+            InternalPage int_page(header, page_size);
             db_file >> int_page;
             for (const InternalRecord& rec : int_page.records) {
                 if (rec.m_header.deleted) continue;
@@ -657,7 +678,7 @@ void BerkeleyRODatabase::Open()
             break;
         }
         case PageType::BTREE_LEAF: {
-            RecordsPage rec_page(header);
+            RecordsPage rec_page(header, page_size);
             db_file >> rec_page;
             if (rec_page.records.size() % 2 != 0) {
                 // BDB stores key value pairs in consecutive records, thus an odd number of records is unexpected

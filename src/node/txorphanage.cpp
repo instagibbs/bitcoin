@@ -160,8 +160,8 @@ class TxOrphanageImpl final : public TxOrphanage {
         * limits are exceeded, it must be that there is a peer whose DoS score > 1. */
         FeeFrac GetDosScore(TxOrphanage::Count max_peer_latency_score, TxOrphanage::Usage max_peer_memory) const
         {
-            assert(max_peer_latency_score > 0);
-            assert(max_peer_memory > 0);
+            assert(max_peer_latency_score >= 0);
+            assert(max_peer_memory >= 0);
             const FeeFrac latency_score(m_total_latency_score, max_peer_latency_score);
             const FeeFrac mem_score(m_total_usage, max_peer_memory);
             return std::max<FeeFrac>(latency_score, mem_score);

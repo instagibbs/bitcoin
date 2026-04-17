@@ -416,6 +416,42 @@ BOOST_AUTO_TEST_CASE(peer_dos_limits)
         orphanage->SanityCheck();
     }
 }
+
+BOOST_AUTO_TEST_CASE(peer_count_exceeds_global_latency_score)
+{
+    FastRandomContext det_rand{true};
+
+    // Choose a small max_global_latency_score so we can trigger the condition
+    // with a handful of peers instead of 3000+. With 4 peers each contributing
+    // one orphan, MaxPeerLatencyScore() = 3 / 4 = 0.
+    constexpr unsigned int MAX_GLOBAL_LATENCY{3};
+    constexpr unsigned int NUM_PEERS{MAX_GLOBAL_LATENCY + 1};
+
+    auto orphanage = node::MakeTxOrphanage(/*max_global_latency_score=*/MAX_GLOBAL_LATENCY,
+                                           /*reserved_peer_usage=*/10'000'000);
+
+    // After the first MAX_GLOBAL_LATENCY additions the orphanage is exactly at
+    // the global latency limit, so no trim is triggered yet.
+    for (NodeId peer{0}; peer < static_cast<NodeId>(MAX_GLOBAL_LATENCY); ++peer) {
+        BOOST_CHECK(orphanage->AddTx(MakeTransactionSpending({}, det_rand), peer));
+    }
+    BOOST_CHECK_EQUAL(orphanage->TotalLatencyScore(), MAX_GLOBAL_LATENCY);
+    BOOST_CHECK_EQUAL(orphanage->MaxPeerLatencyScore(), 1);
+
+    // Adding one more orphan from a new peer pushes the peer count to
+    // NUM_PEERS = MAX_GLOBAL_LATENCY + 1, which drives MaxPeerLatencyScore()
+    // to 0 inside AddTx -> LimitOrphans.
+    // The 0-denominator latency FeeFrac is treated as
+    // "over budget" and LimitOrphans evicts until the orphanage is within
+    // global limits again.
+    BOOST_CHECK(orphanage->AddTx(MakeTransactionSpending({}, det_rand),
+                                 static_cast<NodeId>(NUM_PEERS - 1)));
+
+    orphanage->SanityCheck();
+    BOOST_CHECK(orphanage->TotalLatencyScore() <= orphanage->MaxGlobalLatencyScore());
+    BOOST_CHECK_GE(orphanage->MaxPeerLatencyScore(), 1U);
+}
+
 BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
 {
     // This test had non-deterministic coverage due to

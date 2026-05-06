@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 class CChain;
@@ -699,6 +700,78 @@ public:
     bool m_have_changeset GUARDED_BY(cs){false};
 
     friend class CTxMemPool::ChangeSet;
+
+    /*
+     * Dry-run undo log: records mutations so AcceptPackage can be run for its
+     * full validation effects (including cross-subpackage RBF) and then
+     * rolled back, leaving mapTx and m_txgraph observably unchanged. Powers
+     * the testsubmitpackage RPC.
+     *
+     * While active, addNewTransaction and removeUnchecked append a record
+     * per mutation. ScopedDryRun's destructor drains the log in reverse,
+     * undoing each op; flat structures (mapTx, mapNextTx, txns_randomized,
+     * counters) are restored exactly, while TxGraph cluster linearization
+     * within touched clusters is not bit-identical (functionally invisible
+     * to all external mempool APIs except CompareMainOrder, which only
+     * affects subsequently-built block templates).
+     */
+    struct DryRunUndo {
+        struct Add { Wtxid wtxid; };
+        struct Remove {
+            CTransactionRef tx;
+            CAmount fee;
+            int64_t time;
+            unsigned int entry_height;
+            uint64_t entry_sequence;
+            bool spends_coinbase;
+            int64_t sigops_cost;
+            LockPoints lp;
+            CAmount modified_fee_delta; // m_modified_fee - nFee at capture time
+            bool was_unbroadcast;
+        };
+        std::vector<std::variant<Add, Remove>> ops;
+        // Saved scalar counters bumped per-op without natural per-op reversal.
+        uint64_t saved_sequence_number{0};
+        unsigned int saved_n_transactions_updated{0};
+        // Set during rollback to suppress hook recursion.
+        bool draining{false};
+    };
+
+    /** RAII helper that arms the dry-run undo log on construction and drains
+     *  it (rolls back all captured mutations) on destruction. Caller must
+     *  hold cs for the entirety of the scope. */
+    class ScopedDryRun {
+        CTxMemPool* m_pool;
+    public:
+        explicit ScopedDryRun(CTxMemPool& pool) EXCLUSIVE_LOCKS_REQUIRED(pool.cs);
+        ~ScopedDryRun();
+        ScopedDryRun(const ScopedDryRun&) = delete;
+        ScopedDryRun& operator=(const ScopedDryRun&) = delete;
+    };
+
+    /** True iff a dry-run is currently armed (mutations being captured). False during the
+     *  destructor's drain phase even though m_dry_run_undo is still set. */
+    bool IsDryRunActive() const EXCLUSIVE_LOCKS_REQUIRED(cs)
+    {
+        AssertLockHeld(cs);
+        return m_dry_run_undo.has_value() && !m_dry_run_undo->draining;
+    }
+
+    /** True while a dry-run scope is in effect (including during drain). Used to gate
+     *  externally-observable side effects (signals, mempool-size limiting). */
+    bool InDryRunScope() const EXCLUSIVE_LOCKS_REQUIRED(cs)
+    {
+        AssertLockHeld(cs);
+        return m_dry_run_undo.has_value();
+    }
+
+private:
+    std::optional<DryRunUndo> m_dry_run_undo GUARDED_BY(cs);
+
+    /** Drain m_dry_run_undo, undoing each captured mutation. Called from ~ScopedDryRun. */
+    void RollbackDryRun() EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+public:
 
 private:
     // Apply the given changeset to the mempool, by removing transactions in

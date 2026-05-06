@@ -478,6 +478,13 @@ public:
          * Any individual transaction failing this check causes immediate failure.
          */
         const std::optional<CFeeRate> m_client_maxfeerate;
+        /** Dry-run mode: package is fully validated and applied (mutating mapTx
+         *  and m_txgraph) so subsequent subpackages observe prior accepts'
+         *  effects, but caller is expected to have armed CTxMemPool::ScopedDryRun
+         *  to roll everything back at end of call. Suppresses
+         *  TransactionAddedToMempool signals and the trailing LimitMempoolSize
+         *  call so observable side effects match testmempoolaccept. */
+        const bool m_dry_run;
 
         /** Parameters for single transaction mempool validation. */
         static ATMPArgs SingleAccept(const CChainParams& chainparams, int64_t accept_time,
@@ -493,6 +500,7 @@ public:
                             /*package_submission=*/ false,
                             /*package_feerates=*/ false,
                             /*client_maxfeerate=*/ {}, // checked by caller
+                            /*dry_run=*/ false,
             };
         }
 
@@ -509,6 +517,7 @@ public:
                             /*package_submission=*/ false, // not submitting to mempool
                             /*package_feerates=*/ false,
                             /*client_maxfeerate=*/ {}, // checked by caller
+                            /*dry_run=*/ false,
             };
         }
 
@@ -525,6 +534,27 @@ public:
                             /*package_submission=*/ true,
                             /*package_feerates=*/ true,
                             /*client_maxfeerate=*/ client_maxfeerate,
+                            /*dry_run=*/ false,
+            };
+        }
+
+        /** Parameters for dry-run package validation through testsubmitpackage.
+         *  Same shape as PackageChildWithParents (real submitpackage flow),
+         *  with m_dry_run=true so signal/limit side effects are suppressed.
+         *  Caller must arm a CTxMemPool::ScopedDryRun for the duration. */
+        static ATMPArgs PackageDryRun(const CChainParams& chainparams, int64_t accept_time,
+                                      std::vector<COutPoint>& coins_to_uncache, const std::optional<CFeeRate>& client_maxfeerate) {
+            return ATMPArgs{/*chainparams=*/ chainparams,
+                            /*accept_time=*/ accept_time,
+                            /*bypass_limits=*/ false,
+                            /*coins_to_uncache=*/ coins_to_uncache,
+                            /*test_accept=*/ false,
+                            /*allow_replacement=*/ true,
+                            /*allow_sibling_eviction=*/ false,
+                            /*package_submission=*/ true,
+                            /*package_feerates=*/ true,
+                            /*client_maxfeerate=*/ client_maxfeerate,
+                            /*dry_run=*/ true,
             };
         }
 
@@ -540,6 +570,7 @@ public:
                             /*package_submission=*/ true, // trim at the end of AcceptPackage()
                             /*package_feerates=*/ false, // only 1 transaction
                             /*client_maxfeerate=*/ package_args.m_client_maxfeerate,
+                            /*dry_run=*/ package_args.m_dry_run,
             };
         }
 
@@ -555,7 +586,8 @@ public:
                  bool allow_sibling_eviction,
                  bool package_submission,
                  bool package_feerates,
-                 std::optional<CFeeRate> client_maxfeerate)
+                 std::optional<CFeeRate> client_maxfeerate,
+                 bool dry_run)
             : m_chainparams{chainparams},
               m_accept_time{accept_time},
               m_bypass_limits{bypass_limits},
@@ -565,7 +597,8 @@ public:
               m_allow_sibling_eviction{allow_sibling_eviction},
               m_package_submission{package_submission},
               m_package_feerates{package_feerates},
-              m_client_maxfeerate{client_maxfeerate}
+              m_client_maxfeerate{client_maxfeerate},
+              m_dry_run{dry_run}
         {
             // If we are using package feerates, we must be doing package submission.
             // It also means sibling eviction is not permitted.
@@ -574,6 +607,9 @@ public:
                 Assume(!m_allow_sibling_eviction);
             }
             if (m_allow_sibling_eviction) Assume(m_allow_replacement);
+            // Dry-run is incompatible with test-accept (test-accept skips
+            // SubmitPackage entirely; dry-run runs it then rolls back).
+            if (m_dry_run) Assume(!m_test_accept);
         }
     };
 
@@ -1403,7 +1439,7 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransactionInternal(const CTransa
         }
     }
 
-    if (m_pool.m_opts.signals) {
+    if (m_pool.m_opts.signals && !args.m_dry_run) {
         const CTransaction& tx = *ws.m_ptx;
         auto iter = m_pool.GetIter(tx.GetHash());
         Assume(iter.has_value());
@@ -1725,7 +1761,11 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
     // Make sure we haven't exceeded max mempool size.
     // Package transactions that were submitted to mempool or already in mempool may be evicted.
     // If mempool contents change, then the m_view cache is dirty. It has already been cleared above.
-    LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+    // In dry-run mode the entire batch is rolled back at end of call, so eviction would be
+    // both pointless and observable (it touches non-package txs); skip it.
+    if (!args.m_dry_run) {
+        LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+    }
 
     for (const auto& tx : package) {
         const auto& wtxid = tx->GetWitnessHash();
@@ -1828,6 +1868,39 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
         }
     }
     // Ensure the coins cache is still within limits.
+    BlockValidationState state_dummy;
+    active_chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
+    return result;
+}
+
+PackageMempoolAcceptResult ProcessNewPackageDryRun(Chainstate& active_chainstate, CTxMemPool& pool,
+                                                   const Package& package, const std::optional<CFeeRate>& client_maxfeerate)
+{
+    AssertLockHeld(cs_main);
+    assert(!package.empty());
+    assert(std::all_of(package.cbegin(), package.cend(), [](const auto& tx){return tx != nullptr;}));
+
+    std::vector<COutPoint> coins_to_uncache;
+    const CChainParams& chainparams = active_chainstate.m_chainman.GetParams();
+    auto result = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        AssertLockHeld(cs_main);
+        LOCK(pool.cs);
+        // Arm the dry-run undo log: AcceptPackage runs the real submit flow
+        // (mutating mapTx and TxGraph so subpackage 2 sees subpackage 1's
+        // accepts, including for cross-subpackage RBF). The ScopedDryRun
+        // destructor rolls every mutation back, leaving the mempool
+        // observably unchanged. m_dry_run on ATMPArgs suppresses the
+        // signal-emitting and trim side effects in the meantime.
+        CTxMemPool::ScopedDryRun dry_run_scope(pool);
+        auto args = MemPoolAccept::ATMPArgs::PackageDryRun(chainparams, GetTime(), coins_to_uncache, client_maxfeerate);
+        return MemPoolAccept(pool, active_chainstate).AcceptPackage(package, args);
+    }();
+
+    // Uncache coins pertaining to transactions that were not (or no longer) in the mempool.
+    // For dry-run, nothing is left in the mempool by design, so always uncache.
+    for (const COutPoint& hashTx : coins_to_uncache) {
+        active_chainstate.CoinsTip().Uncache(hashTx);
+    }
     BlockValidationState state_dummy;
     active_chainstate.FlushStateToDisk(state_dummy, FlushStateMode::PERIODIC);
     return result;

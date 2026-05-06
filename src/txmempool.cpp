@@ -253,6 +253,10 @@ void CTxMemPool::addNewTransaction(CTxMemPool::txiter newit)
     txns_randomized.emplace_back(tx.GetWitnessHash(), newit);
     newit->idx_randomized = txns_randomized.size() - 1;
 
+    if (IsDryRunActive()) {
+        m_dry_run_undo->ops.emplace_back(DryRunUndo::Add{tx.GetWitnessHash()});
+    }
+
     TRACEPOINT(mempool, added,
         entry.GetTx().GetHash().data(),
         entry.GetTxSize(),
@@ -266,7 +270,28 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
     // even if not directly reported below.
     uint64_t mempool_sequence = GetAndIncrementSequence();
 
-    if (reason != MemPoolRemovalReason::BLOCK && m_opts.signals) {
+    // Capture undo state before any mutation/destruction. Skipped during
+    // drain so the rollback's own removeUnchecked calls don't recurse.
+    if (IsDryRunActive()) {
+        const auto& entry = *it;
+        m_dry_run_undo->ops.emplace_back(DryRunUndo::Remove{
+            .tx = entry.GetSharedTx(),
+            .fee = entry.GetFee(),
+            .time = std::chrono::duration_cast<std::chrono::seconds>(entry.GetTime()).count(),
+            .entry_height = entry.GetHeight(),
+            .entry_sequence = entry.GetSequence(),
+            .spends_coinbase = entry.GetSpendsCoinbase(),
+            .sigops_cost = entry.GetSigOpCost(),
+            .lp = entry.GetLockPoints(),
+            .modified_fee_delta = entry.GetModifiedFee() - entry.GetFee(),
+            .was_unbroadcast = m_unbroadcast_txids.contains(entry.GetTx().GetHash()),
+        });
+    }
+
+    // In-flight dry-run mutations are not externally observable; skip the
+    // signal so testsubmitpackage matches testmempoolaccept's side-effect
+    // profile. Tracepoints are debug-only so we leave them alone.
+    if (reason != MemPoolRemovalReason::BLOCK && m_opts.signals && !InDryRunScope()) {
         // Notify clients that a transaction has been removed from the mempool
         // for any reason except being included in a block. Clients interested
         // in transactions included in blocks can subscribe to the BlockConnected
@@ -1077,6 +1102,126 @@ bool CTxMemPool::ChangeSet::CheckMemPoolPolicyLimits()
     }
 
     return !m_pool->m_txgraph->IsOversized(TxGraph::Level::TOP);
+}
+
+CTxMemPool::ScopedDryRun::ScopedDryRun(CTxMemPool& pool) : m_pool{&pool}
+{
+    AssertLockHeld(m_pool->cs);
+    Assume(!m_pool->m_dry_run_undo);
+    Assume(!m_pool->m_have_changeset);
+    m_pool->m_dry_run_undo.emplace();
+    m_pool->m_dry_run_undo->saved_sequence_number = m_pool->m_sequence_number;
+    m_pool->m_dry_run_undo->saved_n_transactions_updated = m_pool->nTransactionsUpdated.load();
+}
+
+CTxMemPool::ScopedDryRun::~ScopedDryRun()
+{
+    AssertLockHeld(m_pool->cs);
+    m_pool->RollbackDryRun();
+}
+
+void CTxMemPool::RollbackDryRun()
+{
+    AssertLockHeld(cs);
+    Assume(m_dry_run_undo);
+    Assume(!m_have_changeset);
+
+    // Drain mode: subsequent calls into removeUnchecked / addNewTransaction
+    // (from the rollback ops below) must not record back into the log.
+    m_dry_run_undo->draining = true;
+
+    // Track entries re-inserted by Remove undo so we can rebuild their
+    // dependency edges in a second pass (a child may be re-inserted before
+    // its parent if removeUnchecked happened in that order during the run).
+    std::vector<txiter> reinserted;
+
+    for (auto rit = m_dry_run_undo->ops.rbegin(); rit != m_dry_run_undo->ops.rend(); ++rit) {
+        std::visit([&](auto&& op) {
+            using T = std::decay_t<decltype(op)>;
+            if constexpr (std::is_same_v<T, DryRunUndo::Add>) {
+                // Locate the in-flight addition via the wtxid index, then
+                // tear it down by hand (signal-less, equivalent to
+                // removeUnchecked minus signal/tracepoint/recording).
+                auto& by_wtxid = mapTx.get<index_by_wtxid>();
+                auto wit = by_wtxid.find(op.wtxid);
+                Assume(wit != by_wtxid.end());
+                txiter it = mapTx.project<0>(wit);
+                m_txgraph->RemoveTransaction(*it);
+                for (const CTxIn& txin : it->GetTx().vin) {
+                    mapNextTx.erase(txin.prevout);
+                }
+                if (txns_randomized.size() > 1) {
+                    txns_randomized[it->idx_randomized] = std::move(txns_randomized.back());
+                    txns_randomized[it->idx_randomized].second->idx_randomized = it->idx_randomized;
+                    txns_randomized.pop_back();
+                } else {
+                    txns_randomized.clear();
+                }
+                totalTxSize -= it->GetTxSize();
+                m_total_fee -= it->GetFee();
+                cachedInnerUsage -= it->DynamicMemoryUsage();
+                m_unbroadcast_txids.erase(it->GetTx().GetHash());
+                mapTx.erase(it);
+            } else if constexpr (std::is_same_v<T, DryRunUndo::Remove>) {
+                // Rebuild the entry from saved fields. The pre-removal entry
+                // object is already destructed; the new one is a value-equal
+                // replacement (nFee, time, height, sequence, lp, sigops_cost,
+                // modified_fee match exactly).
+                auto [it, inserted] = mapTx.emplace(op.tx, op.fee, op.time, op.entry_height,
+                                                    op.entry_sequence, op.spends_coinbase,
+                                                    op.sigops_cost, op.lp);
+                Assume(inserted);
+                FeePerWeight feerate(op.fee, GetSigOpsAdjustedWeight(GetTransactionWeight(*op.tx),
+                                                                     op.sigops_cost, ::nBytesPerSigOp));
+                m_txgraph->AddTransaction(const_cast<CTxMemPoolEntry&>(*it), feerate);
+                if (op.modified_fee_delta != 0) {
+                    it->UpdateModifiedFee(op.modified_fee_delta);
+                    m_txgraph->SetTransactionFee(*it, it->GetModifiedFee());
+                }
+                for (const CTxIn& txin : op.tx->vin) {
+                    mapNextTx.insert(std::make_pair(&txin.prevout, it));
+                }
+                txns_randomized.emplace_back(op.tx->GetWitnessHash(), it);
+                it->idx_randomized = txns_randomized.size() - 1;
+                cachedInnerUsage += it->DynamicMemoryUsage();
+                totalTxSize += it->GetTxSize();
+                m_total_fee += it->GetFee();
+                if (op.was_unbroadcast) {
+                    m_unbroadcast_txids.insert(op.tx->GetHash());
+                }
+                reinserted.push_back(it);
+            }
+        }, *rit);
+    }
+
+    // Phase 2: restore TxGraph dependency edges for re-inserted entries.
+    // We scan inputs (parent edges) and outputs (child edges via mapNextTx).
+    // TxGraph stores transitive closure and dedupes, so redundant calls when
+    // both endpoints are reinserted are harmless.
+    for (txiter it : reinserted) {
+        const CTransaction& tx = it->GetTx();
+        for (const CTxIn& txin : tx.vin) {
+            if (auto piter = GetIter(txin.prevout.hash)) {
+                m_txgraph->AddDependency(/*parent=*/**piter, /*child=*/*it);
+            }
+        }
+        for (uint32_t n = 0; n < tx.vout.size(); ++n) {
+            auto next_it = mapNextTx.find(COutPoint(tx.GetHash(), n));
+            if (next_it != mapNextTx.end()) {
+                m_txgraph->AddDependency(/*parent=*/*it, /*child=*/*next_it->second);
+            }
+        }
+    }
+
+    // Restore scalar counters bumped per-op without natural reversal.
+    m_sequence_number = m_dry_run_undo->saved_sequence_number;
+    nTransactionsUpdated.store(m_dry_run_undo->saved_n_transactions_updated);
+
+    m_dry_run_undo.reset();
+
+    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
+        LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after dry-run rollback.");
+    }
 }
 
 std::vector<FeePerWeight> CTxMemPool::GetFeerateDiagram() const

@@ -289,6 +289,25 @@ PackageMempoolAcceptResult ProcessNewPackage(Chainstate& active_chainstate, CTxM
                                                    const Package& txns, bool test_accept, const std::optional<CFeeRate>& client_maxfeerate)
                                                    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+/**
+ * Dry-run variant of ProcessNewPackage: runs the real submitpackage flow
+ * (mutating the mempool subpackage-by-subpackage so each subsequent
+ * subpackage observes prior subpackages' accepts — including for
+ * cross-subpackage RBF that testmempoolaccept can't model), and then rolls
+ * the entire batch back. Externally observable side effects
+ * (TransactionAddedToMempool / TransactionRemovedFromMempool signals,
+ * LimitMempoolSize evictions) are suppressed so the call profile matches
+ * testmempoolaccept. Powers the testsubmitpackage RPC.
+ *
+ * @returns a PackageMempoolAcceptResult shaped like ProcessNewPackage's
+ *          submit path: per-tx accept/reject decisions, fees/vsize, and
+ *          would-have-been-replaced txids — but with no persistent mempool
+ *          mutation.
+ */
+PackageMempoolAcceptResult ProcessNewPackageDryRun(Chainstate& active_chainstate, CTxMemPool& pool,
+                                                   const Package& txns, const std::optional<CFeeRate>& client_maxfeerate)
+                                                   EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 /* Mempool validation helper functions */
 
 /**

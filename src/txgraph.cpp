@@ -246,6 +246,11 @@ public:
     // Debugging functions.
 
     virtual void SanityCheck(const TxGraphImpl& graph, int level) const = 0;
+
+    /** Bespoke dump support: fill out.txs with this cluster's transactions in linearization
+     *  order. Called by TxGraphImpl::DumpClusters; out.sequence and out.quality are populated
+     *  by the caller. */
+    virtual void AppendDump(const TxGraphImpl& graph, int level, TxGraph::ClusterDump& out) const = 0;
 };
 
 /** An implementation of Cluster that uses a DepGraph and vectors, to support arbitrary numbers of
@@ -306,6 +311,7 @@ public:
     FeePerWeight GetIndividualFeerate(DepGraphIndex idx) noexcept final;
     void SetFee(TxGraphImpl& graph, int level, DepGraphIndex idx, int64_t fee) noexcept final;
     void SanityCheck(const TxGraphImpl& graph, int level) const final;
+    void AppendDump(const TxGraphImpl& graph, int level, TxGraph::ClusterDump& out) const final;
 };
 
 /** An implementation of Cluster that only supports 1 transaction. */
@@ -363,6 +369,7 @@ public:
     FeePerWeight GetIndividualFeerate(DepGraphIndex idx) noexcept final;
     void SetFee(TxGraphImpl& graph, int level, DepGraphIndex idx, int64_t fee) noexcept final;
     void SanityCheck(const TxGraphImpl& graph, int level) const final;
+    void AppendDump(const TxGraphImpl& graph, int level, TxGraph::ClusterDump& out) const final;
 };
 
 /** The transaction graph, including staged changes.
@@ -826,6 +833,7 @@ public:
 
     std::unique_ptr<BlockBuilder> GetBlockBuilder() noexcept final;
     std::pair<std::vector<Ref*>, FeePerWeight> GetWorstMainChunk() noexcept final;
+    std::vector<ClusterDump> DumpClusters(Level level, bool only_non_optimal) noexcept final;
 
     size_t GetMainMemoryUsage() noexcept final;
 
@@ -3278,6 +3286,95 @@ std::pair<std::vector<TxGraph::Ref*>, FeePerWeight> TxGraphImpl::GetWorstMainChu
             std::reverse(ret.first.begin(), ret.first.end());
         }
         ret.second = chunk_end_entry.m_main_chunk_feerate;
+    }
+    return ret;
+}
+
+namespace {
+TxGraph::ClusterQuality QualityToClusterQuality(QualityLevel q) noexcept
+{
+    switch (q) {
+    case QualityLevel::OVERSIZED_SINGLETON: return TxGraph::ClusterQuality::OVERSIZED_SINGLETON;
+    case QualityLevel::NEEDS_SPLIT_FIX:     return TxGraph::ClusterQuality::NEEDS_SPLIT_FIX;
+    case QualityLevel::NEEDS_SPLIT:         return TxGraph::ClusterQuality::NEEDS_SPLIT;
+    case QualityLevel::NEEDS_FIX:           return TxGraph::ClusterQuality::NEEDS_FIX;
+    case QualityLevel::NEEDS_RELINEARIZE:   return TxGraph::ClusterQuality::NEEDS_RELINEARIZE;
+    case QualityLevel::ACCEPTABLE:          return TxGraph::ClusterQuality::ACCEPTABLE;
+    case QualityLevel::OPTIMAL:             return TxGraph::ClusterQuality::OPTIMAL;
+    case QualityLevel::NONE: break;
+    }
+    Assume(false);
+    return TxGraph::ClusterQuality::NEEDS_FIX;
+}
+} // namespace
+
+void GenericClusterImpl::AppendDump(const TxGraphImpl& graph, int level, TxGraph::ClusterDump& out) const
+{
+    out.txs.reserve(m_linearization.size());
+    // Build a map from DepGraphIndex -> position in linearization, so reduced parents (which are
+    // expressed in DepGraphIndex space) can be translated to txs[] indices.
+    std::vector<uint32_t> dep_to_lin(m_depgraph.PositionRange(), uint32_t(-1));
+    for (uint32_t lin_idx = 0; lin_idx < m_linearization.size(); ++lin_idx) {
+        dep_to_lin[m_linearization[lin_idx]] = lin_idx;
+    }
+    for (uint32_t lin_idx = 0; lin_idx < m_linearization.size(); ++lin_idx) {
+        DepGraphIndex dep_idx = m_linearization[lin_idx];
+        const auto& entry = graph.m_entries[m_mapping[dep_idx]];
+        TxGraph::ClusterDumpEntry ent;
+        ent.ref = entry.m_ref;
+        ent.lin_index = lin_idx;
+        ent.individual_feerate = FeePerWeight::FromFeeFrac(m_depgraph.FeeRate(dep_idx));
+        // Chunk feerate is only populated in entry m_main_chunk_feerate when level==0 and the
+        // cluster is acceptable; otherwise leave empty.
+        if (level == 0 && IsAcceptable()) {
+            ent.chunk_feerate = entry.m_main_chunk_feerate;
+        } else {
+            ent.chunk_feerate = FeePerWeight{};
+        }
+        // Reduced parents within this cluster, translated into linearization positions.
+        SetType reduced = m_depgraph.GetReducedParents(dep_idx);
+        for (auto p : reduced) {
+            uint32_t pos = dep_to_lin[p];
+            Assume(pos != uint32_t(-1));
+            ent.parents.push_back(pos);
+        }
+        out.txs.push_back(std::move(ent));
+    }
+}
+
+void SingletonClusterImpl::AppendDump(const TxGraphImpl& graph, int level, TxGraph::ClusterDump& out) const
+{
+    if (GetTxCount() == 0) return;
+    const auto& entry = graph.m_entries[m_graph_index];
+    TxGraph::ClusterDumpEntry ent;
+    ent.ref = entry.m_ref;
+    ent.lin_index = 0;
+    ent.individual_feerate = m_feerate;
+    if (level == 0 && IsAcceptable()) {
+        ent.chunk_feerate = entry.m_main_chunk_feerate;
+    } else {
+        ent.chunk_feerate = FeePerWeight{};
+    }
+    out.txs.push_back(std::move(ent));
+}
+
+std::vector<TxGraph::ClusterDump> TxGraphImpl::DumpClusters(Level level_select, bool only_non_optimal) noexcept
+{
+    std::vector<ClusterDump> ret;
+    int level = GetSpecifiedLevel(level_select);
+    // Only iterate the queried ClusterSet if it actually exists. (For TOP, GetSpecifiedLevel falls
+    // back to 0 if staging doesn't exist, which is fine.)
+    if (level == 1 && !m_staging_clusterset.has_value()) return ret;
+    const auto& clusterset = GetClusterSet(level);
+    for (int q = 0; q < int(QualityLevel::NONE); ++q) {
+        if (only_non_optimal && q == int(QualityLevel::OPTIMAL)) continue;
+        for (const auto& cluster_uptr : clusterset.m_clusters[q]) {
+            ClusterDump dump;
+            dump.sequence = cluster_uptr->m_sequence;
+            dump.quality = QualityToClusterQuality(static_cast<QualityLevel>(q));
+            cluster_uptr->AppendDump(*this, level, dump);
+            ret.push_back(std::move(dump));
+        }
     }
     return ret;
 }

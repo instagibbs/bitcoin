@@ -17,6 +17,7 @@
 #include <tinyformat.h>
 #include <util/check.h>
 #include <util/feefrac.h>
+#include <util/fs.h>
 #include <util/log.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
@@ -27,15 +28,160 @@
 #include <validationinterface.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <numeric>
 #include <optional>
 #include <ranges>
+#include <sstream>
 #include <string_view>
 #include <utility>
 
 TRACEPOINT_SEMAPHORE(mempool, added);
 TRACEPOINT_SEMAPHORE(mempool, removed);
+
+namespace {
+// ============================================================================
+// Bespoke debug only (not for upstream): non-optimal cluster dumping.
+// Writes one JSON file per non-optimal-cluster event into the configured
+// directory. Triggered when CTxMemPool::Apply / removeForReorg / removeForBlock
+// observe TxGraph::DoWork() returning false.
+// ============================================================================
+
+std::string JsonString(std::string_view s)
+{
+    std::string out;
+    out.reserve(s.size() + 2);
+    out += '"';
+    for (char c : s) {
+        switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n";  break;
+        case '\r': out += "\\r";  break;
+        case '\t': out += "\\t";  break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                out += buf;
+            } else {
+                out += c;
+            }
+        }
+    }
+    out += '"';
+    return out;
+}
+
+const char* QualityName(TxGraph::ClusterQuality q)
+{
+    using Q = TxGraph::ClusterQuality;
+    switch (q) {
+    case Q::OVERSIZED_SINGLETON: return "OVERSIZED_SINGLETON";
+    case Q::NEEDS_SPLIT_FIX:     return "NEEDS_SPLIT_FIX";
+    case Q::NEEDS_SPLIT:         return "NEEDS_SPLIT";
+    case Q::NEEDS_FIX:           return "NEEDS_FIX";
+    case Q::NEEDS_RELINEARIZE:   return "NEEDS_RELINEARIZE";
+    case Q::ACCEPTABLE:          return "ACCEPTABLE";
+    case Q::OPTIMAL:             return "OPTIMAL";
+    }
+    return "UNKNOWN";
+}
+
+void WriteNonOptimalDump(
+    const fs::path& dir,
+    std::string_view trigger,
+    std::string_view extra_context_json_body, // JSON object body (no surrounding {}); may be empty
+    TxGraph& txgraph) noexcept
+{
+    if (dir.empty()) return;
+    std::vector<TxGraph::ClusterDump> clusters;
+    try {
+        clusters = txgraph.DumpClusters(TxGraph::Level::MAIN, /*only_non_optimal=*/true);
+    } catch (...) {
+        return;
+    }
+    if (clusters.empty()) return;
+
+    try {
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) {
+            fs::create_directories(dir, ec);
+            if (ec) {
+                LogDebug(BCLog::MEMPOOL, "nonoptimal dump: cannot create %s: %s\n",
+                         fs::PathToString(dir), ec.message());
+                return;
+            }
+        }
+        const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto now_s = now_ns / 1'000'000'000LL;
+        std::ostringstream filename;
+        filename << "cluster_dump_" << now_ns << "_" << trigger << ".json";
+        const fs::path path = dir / fs::PathFromString(filename.str());
+
+        std::ofstream out{path.std_path()};
+        if (!out.is_open()) {
+            LogDebug(BCLog::MEMPOOL, "nonoptimal dump: failed to open %s\n", fs::PathToString(path));
+            return;
+        }
+
+        out << "{\n";
+        out << "  \"ts_unix\": " << now_s << ",\n";
+        out << "  \"ts_unix_ns\": " << now_ns << ",\n";
+        out << "  \"trigger\": " << JsonString(trigger);
+        if (!extra_context_json_body.empty()) {
+            out << ",\n  " << extra_context_json_body;
+        }
+        out << ",\n  \"non_optimal_clusters\": [\n";
+        for (size_t ci = 0; ci < clusters.size(); ++ci) {
+            const auto& c = clusters[ci];
+            out << "    {\n";
+            out << "      \"sequence\": " << c.sequence << ",\n";
+            out << "      \"quality\": " << JsonString(QualityName(c.quality)) << ",\n";
+            out << "      \"tx_count\": " << c.txs.size() << ",\n";
+            out << "      \"txs\": [\n";
+            for (size_t ti = 0; ti < c.txs.size(); ++ti) {
+                const auto& t = c.txs[ti];
+                const auto* entry = static_cast<const CTxMemPoolEntry*>(t.ref);
+                out << "        {";
+                out << "\"lin_index\": " << t.lin_index;
+                out << ", \"txid\": " << JsonString(entry->GetTx().GetHash().ToString());
+                out << ", \"wtxid\": " << JsonString(entry->GetTx().GetWitnessHash().ToString());
+                out << ", \"vsize\": " << entry->GetTxSize();
+                out << ", \"weight\": " << entry->GetAdjustedWeight();
+                out << ", \"fee_sats\": " << entry->GetFee();
+                out << ", \"modified_fee_sats\": " << entry->GetModifiedFee();
+                out << ", \"individual_fee\": " << t.individual_feerate.fee;
+                out << ", \"individual_size\": " << t.individual_feerate.size;
+                out << ", \"chunk_fee\": " << t.chunk_feerate.fee;
+                out << ", \"chunk_size\": " << t.chunk_feerate.size;
+                out << ", \"parents_lin\": [";
+                for (size_t pi = 0; pi < t.parents.size(); ++pi) {
+                    if (pi) out << ", ";
+                    out << t.parents[pi];
+                }
+                out << "]}";
+                if (ti + 1 < c.txs.size()) out << ",";
+                out << "\n";
+            }
+            out << "      ]\n";
+            out << "    }";
+            if (ci + 1 < clusters.size()) out << ",";
+            out << "\n";
+        }
+        out << "  ]\n";
+        out << "}\n";
+        LogDebug(BCLog::MEMPOOL, "nonoptimal dump: wrote %zu cluster(s) to %s\n",
+                 clusters.size(), fs::PathToString(path));
+    } catch (const std::exception& e) {
+        LogDebug(BCLog::MEMPOOL, "nonoptimal dump exception: %s\n", e.what());
+    }
+}
+} // namespace
 
 bool TestLockPointValidity(CChain& active_chain, const LockPoints& lp)
 {
@@ -206,6 +352,21 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n)
 void CTxMemPool::Apply(ChangeSet* changeset)
 {
     AssertLockHeld(cs);
+
+    // Bespoke debug only: capture changeset txids before mutations invalidate iterators.
+    std::vector<std::string> dump_added_wtxids;
+    std::vector<std::string> dump_removed_txids;
+    if (!m_opts.nonoptimal_dump_dir.empty()) {
+        dump_added_wtxids.reserve(changeset->m_entry_vec.size());
+        for (const auto& it : changeset->m_entry_vec) {
+            dump_added_wtxids.push_back(it->GetTx().GetWitnessHash().ToString());
+        }
+        dump_removed_txids.reserve(changeset->m_to_remove.size());
+        for (const auto& it : changeset->m_to_remove) {
+            dump_removed_txids.push_back(it->GetTx().GetHash().ToString());
+        }
+    }
+
     m_txgraph->CommitStaging();
 
     RemoveStaged(changeset->m_to_remove, MemPoolRemovalReason::REPLACED);
@@ -223,6 +384,21 @@ void CTxMemPool::Apply(ChangeSet* changeset)
     }
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
         LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after addition(s).");
+        if (!m_opts.nonoptimal_dump_dir.empty()) {
+            std::ostringstream ctx;
+            ctx << "\"context\": {\"added_wtxids\": [";
+            for (size_t i = 0; i < dump_added_wtxids.size(); ++i) {
+                if (i) ctx << ", ";
+                ctx << JsonString(dump_added_wtxids[i]);
+            }
+            ctx << "], \"removed_txids\": [";
+            for (size_t i = 0; i < dump_removed_txids.size(); ++i) {
+                if (i) ctx << ", ";
+                ctx << JsonString(dump_removed_txids[i]);
+            }
+            ctx << "]}";
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "apply", ctx.str(), *m_txgraph);
+        }
     }
 }
 
@@ -382,6 +558,10 @@ void CTxMemPool::removeForReorg(CChain& chain, std::function<bool(txiter)> check
     }
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
         LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after reorg.");
+        if (!m_opts.nonoptimal_dump_dir.empty()) {
+            // No specific context payload for reorg beyond the trigger label.
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "reorg", {}, *m_txgraph);
+        }
     }
 }
 
@@ -427,6 +607,12 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
     blockSinceLastRollingFeeBump = true;
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
         LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after block.");
+        if (!m_opts.nonoptimal_dump_dir.empty()) {
+            std::ostringstream ctx;
+            ctx << "\"context\": {\"block_height\": " << nBlockHeight
+                << ", \"block_tx_count\": " << vtx.size() << "}";
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "block", ctx.str(), *m_txgraph);
+        }
     }
 }
 

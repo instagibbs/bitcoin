@@ -199,6 +199,51 @@ public:
      *  oversized. While the returned object exists, no mutators on the main graph are allowed.
      *  The BlockBuilder object must not outlive the TxGraph it was created with. */
     virtual std::unique_ptr<BlockBuilder> GetBlockBuilder() noexcept = 0;
+
+    // ---- BESPOKE DEBUG ONLY (not for upstream): cluster dumping for non-optimal triage ----
+
+    /** Cluster quality, exposed for offline analysis of non-optimal events. */
+    enum class ClusterQuality {
+        OVERSIZED_SINGLETON,
+        NEEDS_SPLIT_FIX,
+        NEEDS_SPLIT,
+        NEEDS_FIX,
+        NEEDS_RELINEARIZE,
+        ACCEPTABLE,
+        OPTIMAL,
+    };
+
+    /** Per-transaction information in a ClusterDump. */
+    struct ClusterDumpEntry {
+        /** Pointer to the Ref for this transaction. The caller can safely cast to a
+         *  user-inherited Ref subclass to recover its own metadata (txid etc.). */
+        Ref* ref;
+        /** Position in the cluster's linearization (0..tx_count-1). */
+        uint32_t lin_index;
+        /** Individual (single-tx) feerate. */
+        FeePerWeight individual_feerate;
+        /** Feerate of the chunk this transaction is part of. Only meaningful when
+         *  the cluster's quality is ACCEPTABLE or OPTIMAL; FeePerWeight{} otherwise. */
+        FeePerWeight chunk_feerate;
+        /** Reduced parents within this cluster, expressed as indices into the parent
+         *  ClusterDump's txs[] vector (i.e. positions in the linearization). */
+        std::vector<uint32_t> parents;
+    };
+
+    /** Dump of a single cluster's structure for offline analysis. */
+    struct ClusterDump {
+        /** Stable per-cluster sequence id assigned by the TxGraph implementation. */
+        uint64_t sequence;
+        ClusterQuality quality;
+        /** Transactions in linearization order. */
+        std::vector<ClusterDumpEntry> txs;
+    };
+
+    /** Snapshot every cluster at the requested level. If only_non_optimal is true, clusters
+     *  whose quality is OPTIMAL are omitted from the result. The graph is not mutated. The
+     *  queried level may be oversized; oversized singleton clusters are reported with quality
+     *  OVERSIZED_SINGLETON. */
+    virtual std::vector<ClusterDump> DumpClusters(Level level, bool only_non_optimal) noexcept = 0;
     /** Get the last chunk in the main graph, i.e., the last chunk that would be returned by a
      *  BlockBuilder created now, together with its feerate. The chunk is returned in
      *  reverse-topological order, so every element is preceded by all its descendants. The main

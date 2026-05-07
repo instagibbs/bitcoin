@@ -8,6 +8,7 @@
 
 #include <policy/feerate.h>
 #include <policy/policy.h>
+#include <util/fs.h>
 #include <util/time.h>
 
 #include <cstdint>
@@ -54,6 +55,10 @@ struct MemPoolOptions {
     bool permit_bare_multisig{DEFAULT_PERMIT_BAREMULTISIG};
     bool require_standard{true};
     bool persist_v1_dat{DEFAULT_PERSIST_V1_DAT};
+    /** Bespoke debug only (not for upstream): if non-empty, every time the mempool detects it
+     *  is in non-optimal cluster ordering after a changeset, reorg, or block, dump every
+     *  non-optimal cluster as a JSON file in this directory. Empty disables dumping. */
+    fs::path nonoptimal_dump_dir{};
     MemPoolLimits limits{};
 
     ValidationSignals* signals{nullptr};

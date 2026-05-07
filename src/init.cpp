@@ -1322,6 +1322,9 @@ static ChainstateLoadResult InitAndLoadChainstate(
         .signals = node.validation_signals.get(),
     };
     Assert(ApplyArgsManOptions(args, chainparams, mempool_opts)); // no error can happen, already checked in AppInitParameterInteraction
+    // Bespoke debug only (not for upstream): always-on dump of non-optimal cluster events
+    // into <datadir>/nonoptimal_dumps. The directory is created lazily on first write.
+    mempool_opts.nonoptimal_dump_dir = args.GetDataDirNet() / "nonoptimal_dumps";
     bilingual_str mempool_error;
     Assert(!node.mempool); // Was reset above
     node.mempool = std::make_unique<CTxMemPool>(mempool_opts, mempool_error);

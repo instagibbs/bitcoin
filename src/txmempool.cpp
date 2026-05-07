@@ -14,6 +14,8 @@
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <random.h>
+#include <serialize.h>
+#include <streams.h>
 #include <tinyformat.h>
 #include <util/check.h>
 #include <util/feefrac.h>
@@ -22,6 +24,7 @@
 #include <util/moneystr.h>
 #include <util/overflow.h>
 #include <util/result.h>
+#include <util/strencodings.h>
 #include <util/time.h>
 #include <util/trace.h>
 #include <util/translation.h>
@@ -91,10 +94,26 @@ const char* QualityName(TxGraph::ClusterQuality q)
     return "UNKNOWN";
 }
 
+std::string TxToHex(const CTransaction& tx)
+{
+    DataStream ss;
+    ss << TX_WITH_WITNESS(tx);
+    return HexStr(ss);
+}
+
+struct DumpConfig {
+    uint64_t acceptable_cost;
+    uint64_t post_change_cost;
+    uint32_t max_cluster_count;
+    uint64_t max_cluster_size_vbytes;
+    uint32_t bytes_per_sigop;
+};
+
 void WriteNonOptimalDump(
     const fs::path& dir,
     std::string_view trigger,
     std::string_view extra_context_json_body, // JSON object body (no surrounding {}); may be empty
+    const DumpConfig& cfg,
     TxGraph& txgraph) noexcept
 {
     if (dir.empty()) return;
@@ -111,8 +130,8 @@ void WriteNonOptimalDump(
         if (!fs::is_directory(dir, ec)) {
             fs::create_directories(dir, ec);
             if (ec) {
-                LogDebug(BCLog::MEMPOOL, "nonoptimal dump: cannot create %s: %s\n",
-                         fs::PathToString(dir), ec.message());
+                LogWarning("nonoptimal dump: cannot create %s: %s\n",
+                           fs::PathToString(dir), ec.message());
                 return;
             }
         }
@@ -125,14 +144,21 @@ void WriteNonOptimalDump(
 
         std::ofstream out{path.std_path()};
         if (!out.is_open()) {
-            LogDebug(BCLog::MEMPOOL, "nonoptimal dump: failed to open %s\n", fs::PathToString(path));
+            LogWarning("nonoptimal dump: failed to open %s\n", fs::PathToString(path));
             return;
         }
 
         out << "{\n";
         out << "  \"ts_unix\": " << now_s << ",\n";
         out << "  \"ts_unix_ns\": " << now_ns << ",\n";
-        out << "  \"trigger\": " << JsonString(trigger);
+        out << "  \"trigger\": " << JsonString(trigger) << ",\n";
+        out << "  \"config\": {"
+            << "\"acceptable_cost\": " << cfg.acceptable_cost
+            << ", \"post_change_cost\": " << cfg.post_change_cost
+            << ", \"max_cluster_count\": " << cfg.max_cluster_count
+            << ", \"max_cluster_size_vbytes\": " << cfg.max_cluster_size_vbytes
+            << ", \"bytes_per_sigop\": " << cfg.bytes_per_sigop
+            << "}";
         if (!extra_context_json_body.empty()) {
             out << ",\n  " << extra_context_json_body;
         }
@@ -147,12 +173,15 @@ void WriteNonOptimalDump(
             for (size_t ti = 0; ti < c.txs.size(); ++ti) {
                 const auto& t = c.txs[ti];
                 const auto* entry = static_cast<const CTxMemPoolEntry*>(t.ref);
+                const CTransaction& tx = entry->GetTx();
                 out << "        {";
                 out << "\"lin_index\": " << t.lin_index;
-                out << ", \"txid\": " << JsonString(entry->GetTx().GetHash().ToString());
-                out << ", \"wtxid\": " << JsonString(entry->GetTx().GetWitnessHash().ToString());
+                out << ", \"txid\": " << JsonString(tx.GetHash().ToString());
+                out << ", \"wtxid\": " << JsonString(tx.GetWitnessHash().ToString());
                 out << ", \"vsize\": " << entry->GetTxSize();
                 out << ", \"weight\": " << entry->GetAdjustedWeight();
+                out << ", \"sigops_cost\": " << entry->GetSigOpCost();
+                out << ", \"entry_time_unix\": " << entry->GetTime().count();
                 out << ", \"fee_sats\": " << entry->GetFee();
                 out << ", \"modified_fee_sats\": " << entry->GetModifiedFee();
                 out << ", \"individual_fee\": " << t.individual_feerate.fee;
@@ -164,7 +193,8 @@ void WriteNonOptimalDump(
                     if (pi) out << ", ";
                     out << t.parents[pi];
                 }
-                out << "]}";
+                out << "], \"tx_hex\": " << JsonString(TxToHex(tx));
+                out << "}";
                 if (ti + 1 < c.txs.size()) out << ",";
                 out << "\n";
             }
@@ -175,10 +205,10 @@ void WriteNonOptimalDump(
         }
         out << "  ]\n";
         out << "}\n";
-        LogDebug(BCLog::MEMPOOL, "nonoptimal dump: wrote %zu cluster(s) to %s\n",
-                 clusters.size(), fs::PathToString(path));
+        LogInfo("nonoptimal cluster dump: wrote %zu cluster(s) to %s",
+                clusters.size(), fs::PathToString(path));
     } catch (const std::exception& e) {
-        LogDebug(BCLog::MEMPOOL, "nonoptimal dump exception: %s\n", e.what());
+        LogWarning("nonoptimal dump exception: %s\n", e.what());
     }
 }
 } // namespace
@@ -383,8 +413,15 @@ void CTxMemPool::Apply(ChangeSet* changeset)
         addNewTransaction(it);
     }
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
-        LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after addition(s).");
+        LogInfo("Mempool in non-optimal ordering after addition(s).");
         if (!m_opts.nonoptimal_dump_dir.empty()) {
+            const DumpConfig dump_cfg{
+                ACCEPTABLE_COST,
+                POST_CHANGE_COST,
+                static_cast<uint32_t>(m_opts.limits.cluster_count),
+                static_cast<uint64_t>(m_opts.limits.cluster_size_vbytes),
+                ::nBytesPerSigOp,
+            };
             std::ostringstream ctx;
             ctx << "\"context\": {\"added_wtxids\": [";
             for (size_t i = 0; i < dump_added_wtxids.size(); ++i) {
@@ -397,7 +434,7 @@ void CTxMemPool::Apply(ChangeSet* changeset)
                 ctx << JsonString(dump_removed_txids[i]);
             }
             ctx << "]}";
-            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "apply", ctx.str(), *m_txgraph);
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "apply", ctx.str(), dump_cfg, *m_txgraph);
         }
     }
 }
@@ -557,10 +594,17 @@ void CTxMemPool::removeForReorg(CChain& chain, std::function<bool(txiter)> check
         assert(TestLockPointValidity(chain, it->GetLockPoints()));
     }
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
-        LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after reorg.");
+        LogInfo("Mempool in non-optimal ordering after reorg.");
         if (!m_opts.nonoptimal_dump_dir.empty()) {
+            const DumpConfig dump_cfg{
+                ACCEPTABLE_COST,
+                POST_CHANGE_COST,
+                static_cast<uint32_t>(m_opts.limits.cluster_count),
+                static_cast<uint64_t>(m_opts.limits.cluster_size_vbytes),
+                ::nBytesPerSigOp,
+            };
             // No specific context payload for reorg beyond the trigger label.
-            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "reorg", {}, *m_txgraph);
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "reorg", {}, dump_cfg, *m_txgraph);
         }
     }
 }
@@ -606,12 +650,19 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
     lastRollingFeeUpdate = GetTime();
     blockSinceLastRollingFeeBump = true;
     if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
-        LogDebug(BCLog::MEMPOOL, "Mempool in non-optimal ordering after block.");
+        LogInfo("Mempool in non-optimal ordering after block.");
         if (!m_opts.nonoptimal_dump_dir.empty()) {
+            const DumpConfig dump_cfg{
+                ACCEPTABLE_COST,
+                POST_CHANGE_COST,
+                static_cast<uint32_t>(m_opts.limits.cluster_count),
+                static_cast<uint64_t>(m_opts.limits.cluster_size_vbytes),
+                ::nBytesPerSigOp,
+            };
             std::ostringstream ctx;
             ctx << "\"context\": {\"block_height\": " << nBlockHeight
                 << ", \"block_tx_count\": " << vtx.size() << "}";
-            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "block", ctx.str(), *m_txgraph);
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "block", ctx.str(), dump_cfg, *m_txgraph);
         }
     }
 }

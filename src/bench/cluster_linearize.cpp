@@ -283,75 +283,118 @@ void DumpHardClusterAttackProjection(const char* label,
                                      const std::vector<std::vector<uint8_t>>& fixtures)
 {
     constexpr uint64_t POST_CHANGE_COST = 375'000;
-    constexpr uint64_t ACCEPTABLE_COST = 75'000;
+    [[maybe_unused]] constexpr uint64_t ACCEPTABLE_COST = 75'000;
     constexpr int N_SEEDS = 200;
 
     fprintf(stderr, "\n=== Hard-cluster relinearization cost projection: %s ===\n", label);
-    fprintf(stderr, "%4s %5s %5s %12s %12s %12s %12s %8s\n",
-            "#", "tx", "dep", "cold_avg", "cold_max", "warm_avg", "warm_max", "ratio");
+    fprintf(stderr, "%4s %5s %5s %10s %10s %10s %10s %10s %10s %7s %7s\n",
+            "#", "tx", "dep",
+            "cold_avg", "cold_max",
+            "verif_avg", "verif_max",
+            "nip_avg", "nip_max",
+            "v/cold", "n/cold");
 
-    uint64_t cold_total_avg = 0, warm_total_avg = 0;
-    uint64_t cold_hardest = 0, warm_hardest = 0;
-    int cold_hardest_idx = -1, warm_hardest_idx = -1;
-    int cold_hardest_tx = 0, warm_hardest_tx = 0;
+    uint64_t cold_total = 0, verify_total = 0, nip_total = 0;
+    uint64_t cold_hardest = 0, verify_hardest = 0, nip_hardest = 0;
+    int cold_hardest_idx = -1, nip_hardest_idx = -1;
+    int cold_hardest_tx = 0, nip_hardest_tx = 0;
 
     for (size_t i = 0; i < fixtures.size(); ++i) {
+        // Parse the original depgraph once for cold + verify variants.
         SpanReader reader{fixtures[i]};
         DepGraph<BitSet<64>> depgraph;
         reader >> Using<DepGraphFormatter>(depgraph);
 
         // Cold: Linearize from IndexTxOrder; capture the optimal linearization to reuse as seed.
         uint64_t cold_sum = 0, cold_max = 0;
-        std::vector<DepGraphIndex> last_optimal;
+        std::vector<DepGraphIndex> old_optimal;
         for (int seed = 0; seed < N_SEEDS; ++seed) {
             auto [lin, optimal, cost] = Linearize(depgraph, /*max_cost=*/100'000'000,
                                                   /*rng_seed=*/uint64_t(seed), IndexTxOrder{});
             assert(optimal);
             cold_sum += cost;
             if (cost > cold_max) cold_max = cost;
-            if (seed == 0) last_optimal = std::move(lin);
+            if (seed == 0) old_optimal = std::move(lin);
         }
         uint64_t cold_avg = cold_sum / N_SEEDS;
 
-        // Warm: Linearize with old_linearization=the just-computed optimal, is_topological=true.
-        // This models DoWork picking up a cluster whose m_linearization is the old optimal (the
-        // typical state after a leaf-only removal): the linearization is still topological and
-        // very close to optimal for the modified depgraph.
-        uint64_t warm_sum = 0, warm_max = 0;
+        // Verify-only warm: same depgraph, old_linearization = old_optimal, is_topological=true.
+        // Lower bound for warm-start cost: nothing changed, so just re-verify optimality.
+        uint64_t verify_sum = 0, verify_max = 0;
         for (int seed = 0; seed < N_SEEDS; ++seed) {
             auto [_lin, optimal, cost] = Linearize(depgraph, /*max_cost=*/100'000'000,
                                                     /*rng_seed=*/uint64_t(seed), IndexTxOrder{},
-                                                    std::span<const DepGraphIndex>{last_optimal},
+                                                    std::span<const DepGraphIndex>{old_optimal},
                                                     /*is_topological=*/true);
             assert(optimal);
-            warm_sum += cost;
-            if (cost > warm_max) warm_max = cost;
+            verify_sum += cost;
+            if (cost > verify_max) verify_max = cost;
         }
-        uint64_t warm_avg = warm_sum / N_SEEDS;
+        uint64_t verify_avg = verify_sum / N_SEEDS;
 
-        double ratio = double(warm_avg) / double(cold_avg);
-        fprintf(stderr, "%4zu %5u %5u %12llu %12llu %12llu %12llu %7.2fx\n",
+        // Tail-nip: actually mutate the depgraph by removing a leaf (tx with no descendants
+        // other than itself). The corresponding entry is also stripped from old_optimal. This
+        // is what really happens after an RBF that conflicts with one leaf tx of the cluster.
+        DepGraphIndex leaf = DepGraphIndex(-1);
+        for (DepGraphIndex idx : depgraph.Positions()) {
+            if (depgraph.Descendants(idx).Count() == 1) { // only itself ⇒ no children
+                leaf = idx;
+                break;
+            }
+        }
+        uint64_t nip_avg = 0, nip_max = 0;
+        if (leaf != DepGraphIndex(-1)) {
+            DepGraph<BitSet<64>> nipped = depgraph;
+            BitSet<64> to_remove;
+            to_remove.Set(leaf);
+            nipped.RemoveTransactions(to_remove);
+            std::vector<DepGraphIndex> nipped_seed;
+            nipped_seed.reserve(old_optimal.size() - 1);
+            for (auto idx : old_optimal) if (idx != leaf) nipped_seed.push_back(idx);
+
+            uint64_t nip_sum = 0;
+            for (int seed = 0; seed < N_SEEDS; ++seed) {
+                auto [_lin, optimal, cost] = Linearize(nipped, /*max_cost=*/100'000'000,
+                                                        /*rng_seed=*/uint64_t(seed), IndexTxOrder{},
+                                                        std::span<const DepGraphIndex>{nipped_seed},
+                                                        /*is_topological=*/true);
+                assert(optimal);
+                nip_sum += cost;
+                if (cost > nip_max) nip_max = cost;
+            }
+            nip_avg = nip_sum / N_SEEDS;
+        }
+
+        fprintf(stderr, "%4zu %5u %5u %10llu %10llu %10llu %10llu %10llu %10llu %6.2fx %6.2fx\n",
                 i, depgraph.TxCount(), depgraph.CountDependencies(),
                 (unsigned long long)cold_avg, (unsigned long long)cold_max,
-                (unsigned long long)warm_avg, (unsigned long long)warm_max,
-                ratio);
-        cold_total_avg += cold_avg;
-        warm_total_avg += warm_avg;
+                (unsigned long long)verify_avg, (unsigned long long)verify_max,
+                (unsigned long long)nip_avg, (unsigned long long)nip_max,
+                double(verify_avg) / double(cold_avg),
+                double(nip_avg) / double(cold_avg));
+
+        cold_total += cold_avg;
+        verify_total += verify_avg;
+        nip_total += nip_avg;
         if (cold_avg > cold_hardest) { cold_hardest = cold_avg; cold_hardest_idx = int(i); cold_hardest_tx = depgraph.TxCount(); }
-        if (warm_avg > warm_hardest) { warm_hardest = warm_avg; warm_hardest_idx = int(i); warm_hardest_tx = depgraph.TxCount(); }
+        if (verify_avg > verify_hardest) verify_hardest = verify_avg;
+        if (nip_avg > nip_hardest) { nip_hardest = nip_avg; nip_hardest_idx = int(i); nip_hardest_tx = depgraph.TxCount(); }
     }
 
     fprintf(stderr, "---\n");
-    fprintf(stderr, "Hardest cold cluster: #%d, %d tx, avg %llu\n",
+    fprintf(stderr, "Hardest cold:           #%d, %d tx, %llu\n",
             cold_hardest_idx, cold_hardest_tx, (unsigned long long)cold_hardest);
-    fprintf(stderr, "Hardest warm cluster: #%d, %d tx, avg %llu\n",
-            warm_hardest_idx, warm_hardest_tx, (unsigned long long)warm_hardest);
-    fprintf(stderr, "Sum across %zu fixtures: cold=%llu  warm=%llu  warm/cold=%.2fx\n",
-            fixtures.size(), (unsigned long long)cold_total_avg,
-            (unsigned long long)warm_total_avg,
-            double(warm_total_avg) / double(cold_total_avg));
+    fprintf(stderr, "Hardest verify-only:    %llu\n", (unsigned long long)verify_hardest);
+    fprintf(stderr, "Hardest post-tail-nip:  #%d, %d tx, %llu\n",
+            nip_hardest_idx, nip_hardest_tx, (unsigned long long)nip_hardest);
+    fprintf(stderr, "Sum across %zu fixtures: cold=%llu  verify=%llu (%.2fx)  nip=%llu (%.2fx)\n",
+            fixtures.size(),
+            (unsigned long long)cold_total,
+            (unsigned long long)verify_total, double(verify_total) / double(cold_total),
+            (unsigned long long)nip_total, double(nip_total) / double(cold_total));
 
     auto sweep = [&](const char* tag, uint64_t per) {
+        if (per == 0) return;
         fprintf(stderr, "\n  N copies of %s (per=%llu): DoWork calls at 375k budget:\n",
                 tag, (unsigned long long)per);
         fprintf(stderr, "  %5s %15s %12s\n", "N", "total_cost", "DoWork_calls");
@@ -361,9 +404,9 @@ void DumpHardClusterAttackProjection(const char* label,
             fprintf(stderr, "  %5d %15llu %12llu\n", N, (unsigned long long)total, (unsigned long long)calls);
         }
     };
-    sweep("hardest-cold (worst case, no old_lin available)", cold_hardest);
-    sweep("hardest-warm (post-RBF-tail-nip, old optimal seeded)", warm_hardest);
-    sweep("avg-warm (mixed shapes, old optimal seeded)", warm_total_avg / fixtures.size());
+    sweep("hardest cold (no old_lin)", cold_hardest);
+    sweep("hardest post-tail-nip (depgraph mutated, seeded with old_opt-minus-leaf)", nip_hardest);
+    sweep("avg post-tail-nip (mixed shapes)", nip_total / fixtures.size());
     fprintf(stderr, "===\n");
 }
 

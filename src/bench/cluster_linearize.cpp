@@ -138,6 +138,72 @@ static const std::vector<std::vector<uint8_t>> CLUSTERS_SYNTHETIC = {
     "824da926008527804e01871bca36028604b04f038558d62c04804a960f02048513d87301068229897103058675a07e03000b843c8311050201814e5d02030c87029e020109841dc65a0601038227a325070101088334801c06030102853ee538070005688b0d080200010d8406a94d0b000000000b852bbf050a020000000a811380750d0000000005825c935d0b000200000a871bcb700902020109824187140f00000000098614ec7f0d000003078621942b080800058454bb1c0e030000000a847e630d030001000b8601e07e0c0002030c8655bf0b030f00018306bb5705010c1487038e071200000000001b856f816f1000000100020018820a9a530a0208000a81398a74001321853a944a060a03000117835aaf1c09030701118529b8690709020201248621bd330e010001010202148022800104100981428234090800030100188517cd2007060100020305836dc031020209022782449b69040c0100000001108651ac0a0607010101000000022a8337c0610505040202000001228547cd7c0d02000102020000000d843eba2a0b0501000000020025810f94010b0002030101000000010e803c921006000008041b8453bb3a0a0600030000000000000017841bae620708030100000016813f9924110100000200000000000000000c8637f36205060200050006857eb53f08020900000000002d810b9e580c0005000201000000000786459b700207060101188536b7790a0601000000010000000006854d905f08070201000000001680578f6a09030200030031837c8419080006000000022e8518a8500500040501000028861dd07e0801010300003b8743b97202000002000105003b8545b730010200010000000000001f00"_hex_v_u8
 };
 
+/** Build a pure linear-chain DepGraph of length ntx with uniform feerate. Tx i depends only on
+ *  tx i-1, so the unique topological order is 0..ntx-1 and the chunked feerate diagram is a
+ *  single point — every topological ordering is optimal. */
+template<typename SetType>
+DepGraph<SetType> MakeUniformChain(DepGraphIndex ntx)
+{
+    DepGraph<SetType> depgraph;
+    for (DepGraphIndex i = 0; i < ntx; ++i) {
+        depgraph.AddTransaction({1, 1});
+        if (i > 0) depgraph.AddDependencies(SetType::Singleton(i - 1), i);
+    }
+    return depgraph;
+}
+
+/** Benchmark Linearize() on a uniform-feerate chain of the given length. Reports the
+ *  computed-once average cost (in optimization steps) across 100 rng seeds inside the bench
+ *  name so the chain-length-vs-cost curve is visible directly in the bench output.
+ *  topological=true emulates Cluster::Relinearize on a chain whose existing linearization is
+ *  already topological (the typical "block carved off some prefix" case); false emulates a
+ *  from-scratch linearization (no prior order). */
+void BenchLinearizeChain(benchmark::Bench& bench, DepGraphIndex ntx, bool topological)
+{
+    auto depgraph = MakeUniformChain<BitSet<64>>(ntx);
+    std::vector<DepGraphIndex> topo_lin;
+    if (topological) {
+        topo_lin.reserve(ntx);
+        for (DepGraphIndex i = 0; i < ntx; ++i) topo_lin.push_back(i);
+    }
+    constexpr uint64_t N_SEEDS = 100;
+    uint64_t total_cost = 0;
+    for (uint64_t seed = 0; seed < N_SEEDS; ++seed) {
+        auto [_lin, optimal, cost] = Linearize(
+            depgraph,
+            /*max_cost=*/1'000'000,
+            seed,
+            IndexTxOrder{},
+            std::span<const DepGraphIndex>{topo_lin},
+            /*is_topological=*/topological);
+        assert(optimal);
+        total_cost += cost;
+    }
+    const uint64_t avg_cost = total_cost / N_SEEDS;
+    auto name = strprintf("LinearizeChain_%s_len=%u_avgcost=%u",
+                          topological ? "Topo" : "Scratch", ntx, avg_cost);
+    bench.name(name).run([&] {
+        auto [_lin, optimal, _cost] = Linearize(
+            depgraph,
+            /*max_cost=*/1'000'000,
+            /*rng_seed=*/0,
+            IndexTxOrder{},
+            std::span<const DepGraphIndex>{topo_lin},
+            /*is_topological=*/topological);
+        assert(optimal);
+    });
+}
+
+static void LinearizeChainScratchByLen(benchmark::Bench& bench)
+{
+    for (DepGraphIndex n = 2; n <= 64; ++n) BenchLinearizeChain(bench, n, /*topological=*/false);
+}
+
+static void LinearizeChainTopoByLen(benchmark::Bench& bench)
+{
+    for (DepGraphIndex n = 2; n <= 64; ++n) BenchLinearizeChain(bench, n, /*topological=*/true);
+}
+
 static void LinearizeOptimallyTotal(benchmark::Bench& bench)
 {
     BenchLinearizeOptimallyTotal(bench, "LinearizeOptimallyHistoricalTotal", CLUSTERS_HISTORICAL);
@@ -159,3 +225,6 @@ BENCHMARK(PostLinearize99TxWorstCase);
 
 BENCHMARK(LinearizeOptimallyTotal);
 BENCHMARK(LinearizeOptimallyPerCost);
+
+BENCHMARK(LinearizeChainScratchByLen);
+BENCHMARK(LinearizeChainTopoByLen);

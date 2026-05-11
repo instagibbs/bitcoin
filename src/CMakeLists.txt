@@ -246,6 +246,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   policy/settings.cpp
   policy/truc_policy.cpp
   private_broadcast.cpp
+  private_broadcast_session.cpp
   rest.cpp
   rpc/blockchain.cpp
   rpc/external_signer.cpp

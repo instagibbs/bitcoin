@@ -45,6 +45,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <private_broadcast.h>
+#include <private_broadcast_session.h>
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
@@ -418,6 +419,13 @@ struct Peer {
         , m_our_services{our_services}
         , m_is_inbound{is_inbound}
     {}
+
+    /** Private-broadcast state machine. Non-null only when the underlying
+     *  CNode is `ConnectionType::PRIVATE_BROADCAST`. Owned by Peer so it shares
+     *  the peer's lifetime (created in InitializeNode, destroyed in
+     *  FinalizeNode via Peer destructor). Accessed only on the g_msgproc_mutex
+     *  thread (ProcessMessage / SendMessages / FinalizeNode). */
+    std::unique_ptr<PrivateBroadcastSession> m_priv_broadcast_session;
 
 private:
     mutable Mutex m_tx_relay_mutex;
@@ -966,12 +974,27 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
 
     /**
-     * Schedule an INV for a transaction to be sent to the given peer (via `PushMessage()`).
-     * The transaction is picked from the list of transactions for private broadcast.
-     * It is assumed that the connection to the peer is `ConnectionType::PRIVATE_BROADCAST`.
-     * Avoid calling this for other peers since it will degrade privacy.
+     * Adapter exposing the per-CNode effects PrivateBroadcastSession needs.
+     * Constructed transiently at each session-call site so it can close over
+     * the relevant CNode / Peer references without persisting any state.
      */
-    void PushPrivateBroadcastTx(CNode& node) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
+    class PrivateBroadcastSink final : public PrivateBroadcastSession::Sink
+    {
+    public:
+        PrivateBroadcastSink(PeerManagerImpl& pm, CNode& node, Peer& peer)
+            : m_pm{pm}, m_node{node}, m_peer{peer} {}
+        void SendInv(const uint256& txid) override
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
+        void SendTx(const CTransaction& tx) override
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
+        void QueuePing() override
+            EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
+        void Disconnect(std::string_view reason) override;
+    private:
+        PeerManagerImpl& m_pm;
+        CNode& m_node;
+        Peer& m_peer;
+    };
 
     /**
      * Dedicated message handler for `ConnectionType::PRIVATE_BROADCAST` peers.
@@ -992,11 +1015,11 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     /**
-     * FinalizeNode follow-up for private broadcast peers: if the peer disconnected
-     * without confirming reception and we still have queued txs, request that the
-     * connman open a replacement private broadcast connection.
+     * FinalizeNode follow-up for private broadcast peers: delegates to the
+     * session, which (if unconfirmed and queue still has work) asks for a
+     * replacement private broadcast conn.
      */
-    void FinalizeNodePrivateBroadcast(const CNode& node);
+    void FinalizeNodePrivateBroadcast(const CNode& node, Peer& peer);
 
     /**
      * When a peer sends us a valid block, instruct it to announce blocks to us
@@ -1640,6 +1663,10 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
     }
 
     PeerRef peer = std::make_shared<Peer>(nodeid, our_services, node.IsInboundConn());
+    if (node.IsPrivateBroadcastConn()) {
+        peer->m_priv_broadcast_session = std::make_unique<PrivateBroadcastSession>(
+            nodeid, CService{node.addr}, m_tx_for_private_broadcast);
+    }
     {
         LOCK(m_peer_mutex);
         m_peer_map.emplace_hint(m_peer_map.end(), nodeid, peer);
@@ -1700,6 +1727,10 @@ void PeerManagerImpl::ReattemptPrivateBroadcast(CScheduler& scheduler)
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
     NodeId nodeid = node.GetId();
+    // Removed from m_peer_map below, but the shared_ptr is kept alive across
+    // the cs_main scope so post-lock cleanup (e.g. private-broadcast finalize)
+    // can still reach the Peer's state.
+    PeerRef peer;
     {
     LOCK(cs_main);
     {
@@ -1708,7 +1739,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         // PeerRef, so the refcount is >= 1. Be careful not to do any
         // processing here that assumes Peer won't be changed before it's
         // destructed.
-        PeerRef peer = RemovePeer(nodeid);
+        peer = RemovePeer(nodeid);
         assert(peer != nullptr);
         m_wtxid_relay_peers -= peer->m_wtxid_relay;
         assert(m_wtxid_relay_peers >= 0);
@@ -1756,7 +1787,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     if (node.IsPrivateBroadcastConn()) {
         // Private broadcast conns deliberately do not update addrman (would leak
         // info) and may need a replacement conn opened if they died unconfirmed.
-        FinalizeNodePrivateBroadcast(node);
+        FinalizeNodePrivateBroadcast(node, *Assert(peer));
     } else if (node.fSuccessfullyConnected && !node.IsBlockOnlyConn() && !node.IsInboundConn()) {
         // Only change visible addrman state for full outbound peers.  We don't
         // call Connected() for feeler connections since they don't have
@@ -3573,23 +3604,27 @@ void PeerManagerImpl::LogBlockHeader(const CBlockIndex& index, const CNode& peer
     }
 }
 
-void PeerManagerImpl::PushPrivateBroadcastTx(CNode& node)
+void PeerManagerImpl::PrivateBroadcastSink::SendInv(const uint256& txid)
 {
-    Assume(node.IsPrivateBroadcastConn());
+    m_pm.MakeAndPushMessage(m_node, NetMsgType::INV,
+                            std::vector<CInv>{{CInv{MSG_TX, txid}}});
+}
 
-    const auto opt_tx{m_tx_for_private_broadcast.PickTxForSend(node.GetId(), CService{node.addr})};
-    if (!opt_tx) {
-        LogDebug(BCLog::PRIVBROADCAST, "Disconnecting: no more transactions for private broadcast (connected in vain), %s", node.LogPeer());
-        node.fDisconnect = true;
-        return;
-    }
-    const CTransactionRef& tx{*opt_tx};
+void PeerManagerImpl::PrivateBroadcastSink::SendTx(const CTransaction& tx)
+{
+    m_pm.MakeAndPushMessage(m_node, NetMsgType::TX, TX_WITH_WITNESS(tx));
+}
 
-    LogDebug(BCLog::PRIVBROADCAST, "P2P handshake completed, sending INV for txid=%s%s, %s",
-             tx->GetHash().ToString(), tx->HasWitness() ? strprintf(", wtxid=%s", tx->GetWitnessHash().ToString()) : "",
-             node.LogPeer());
+void PeerManagerImpl::PrivateBroadcastSink::QueuePing()
+{
+    m_peer.m_ping_queued = true; // Ensure a ping will be sent: mimic a request via RPC.
+    m_pm.MaybeSendPing(m_node, m_peer, NodeClock::now());
+}
 
-    MakeAndPushMessage(node, NetMsgType::INV, std::vector<CInv>{{CInv{MSG_TX, tx->GetHash().ToUint256()}}});
+void PeerManagerImpl::PrivateBroadcastSink::Disconnect(std::string_view reason)
+{
+    LogDebug(BCLog::PRIVBROADCAST, "Disconnecting: %s, %s", reason, m_node.LogPeer());
+    m_node.fDisconnect = true;
 }
 
 void PeerManagerImpl::ProcessMessagePrivateBroadcast(Peer& peer, CNode& pfrom, const std::string& msg_type,
@@ -3727,7 +3762,9 @@ void PeerManagerImpl::ProcessMessagePrivateBroadcast(Peer& peer, CNode& pfrom, c
         // them a transaction below their threshold. This is ok because this
         // relay logic is designed to work even in cases when the peer drops
         // the transaction (due to it being too cheap, or for other reasons).
-        PushPrivateBroadcastTx(pfrom);
+        PrivateBroadcastSink sink{*this, pfrom, peer};
+        Assume(peer.m_priv_broadcast_session);
+        peer.m_priv_broadcast_session->OnVerack(sink);
         return;
     }
 
@@ -3750,25 +3787,9 @@ void PeerManagerImpl::ProcessMessagePrivateBroadcast(Peer& peer, CNode& pfrom, c
             LogDebug(BCLog::NET, "received getdata for: %s peer=%d\n", vInv[0].ToString(), pfrom.GetId());
         }
 
-        const auto pushed_tx_opt{m_tx_for_private_broadcast.GetTxForNode(pfrom.GetId())};
-        if (!pushed_tx_opt) {
-            LogDebug(BCLog::PRIVBROADCAST, "Disconnecting: got GETDATA without sending an INV, %s",
-                     pfrom.LogPeer());
-            pfrom.fDisconnect = true;
-            return;
-        }
-
-        const CTransactionRef& pushed_tx{*pushed_tx_opt};
-
-        if (vInv.size() == 1 && vInv[0].IsMsgTx() && vInv[0].hash == pushed_tx->GetHash().ToUint256()) {
-            MakeAndPushMessage(pfrom, NetMsgType::TX, TX_WITH_WITNESS(*pushed_tx));
-            peer.m_ping_queued = true; // Ensure a ping will be sent: mimic a request via RPC.
-            MaybeSendPing(pfrom, peer, NodeClock::now());
-        } else {
-            LogDebug(BCLog::PRIVBROADCAST, "Disconnecting: got an unexpected GETDATA message, %s",
-                     pfrom.LogPeer());
-            pfrom.fDisconnect = true;
-        }
+        PrivateBroadcastSink sink{*this, pfrom, peer};
+        Assume(peer.m_priv_broadcast_session);
+        peer.m_priv_broadcast_session->OnGetData(sink, vInv);
         return;
     }
 
@@ -3800,11 +3821,11 @@ bool PeerManagerImpl::SendMessagesPrivateBroadcast(CNode& node)
     return true;
 }
 
-void PeerManagerImpl::FinalizeNodePrivateBroadcast(const CNode& node)
+void PeerManagerImpl::FinalizeNodePrivateBroadcast(const CNode& node, Peer& peer)
 {
     Assume(node.IsPrivateBroadcastConn());
-    if (!m_tx_for_private_broadcast.DidNodeConfirmReception(node.GetId()) &&
-        m_tx_for_private_broadcast.HavePendingTransactions()) {
+    Assume(peer.m_priv_broadcast_session);
+    if (peer.m_priv_broadcast_session->OnFinalize()) {
         m_connman.m_private_broadcast.NumToOpenAdd(1);
     }
 }
@@ -5761,10 +5782,9 @@ void PeerManagerImpl::ProcessPong(CNode& pfrom, Peer& peer, const NodeClock::tim
                     pfrom.PongReceived(ping_time);
                     if (pfrom.IsPrivateBroadcastConn()) {
                         // Reached via ProcessMessagePrivateBroadcast()->ProcessPong().
-                        m_tx_for_private_broadcast.NodeConfirmedReception(pfrom.GetId());
-                        LogDebug(BCLog::PRIVBROADCAST, "Got a PONG (the transaction will probably reach the network), marking for disconnect, %s",
-                                 pfrom.LogPeer());
-                        pfrom.fDisconnect = true;
+                        Assume(peer.m_priv_broadcast_session);
+                        PrivateBroadcastSink sink{*this, pfrom, peer};
+                        peer.m_priv_broadcast_session->OnPong(sink);
                     }
                 } else {
                     // This should never happen

@@ -287,69 +287,83 @@ void DumpHardClusterAttackProjection(const char* label,
     constexpr int N_SEEDS = 200;
 
     fprintf(stderr, "\n=== Hard-cluster relinearization cost projection: %s ===\n", label);
-    fprintf(stderr, "%4s %5s %5s %12s %12s %12s\n",
-            "#", "tx", "dep", "avg_cost", "max_seed", "fits_per75k");
+    fprintf(stderr, "%4s %5s %5s %12s %12s %12s %12s %8s\n",
+            "#", "tx", "dep", "cold_avg", "cold_max", "warm_avg", "warm_max", "ratio");
 
-    uint64_t total_avg_cost = 0;
-    uint64_t total_max_cost = 0;
-    uint64_t hardest_avg = 0;
-    int hardest_tx_count = 0;
-    int hardest_idx = -1;
+    uint64_t cold_total_avg = 0, warm_total_avg = 0;
+    uint64_t cold_hardest = 0, warm_hardest = 0;
+    int cold_hardest_idx = -1, warm_hardest_idx = -1;
+    int cold_hardest_tx = 0, warm_hardest_tx = 0;
 
     for (size_t i = 0; i < fixtures.size(); ++i) {
         SpanReader reader{fixtures[i]};
         DepGraph<BitSet<64>> depgraph;
         reader >> Using<DepGraphFormatter>(depgraph);
-        uint64_t sum_cost = 0;
-        uint64_t max_cost = 0;
+
+        // Cold: Linearize from IndexTxOrder; capture the optimal linearization to reuse as seed.
+        uint64_t cold_sum = 0, cold_max = 0;
+        std::vector<DepGraphIndex> last_optimal;
+        for (int seed = 0; seed < N_SEEDS; ++seed) {
+            auto [lin, optimal, cost] = Linearize(depgraph, /*max_cost=*/100'000'000,
+                                                  /*rng_seed=*/uint64_t(seed), IndexTxOrder{});
+            assert(optimal);
+            cold_sum += cost;
+            if (cost > cold_max) cold_max = cost;
+            if (seed == 0) last_optimal = std::move(lin);
+        }
+        uint64_t cold_avg = cold_sum / N_SEEDS;
+
+        // Warm: Linearize with old_linearization=the just-computed optimal, is_topological=true.
+        // This models DoWork picking up a cluster whose m_linearization is the old optimal (the
+        // typical state after a leaf-only removal): the linearization is still topological and
+        // very close to optimal for the modified depgraph.
+        uint64_t warm_sum = 0, warm_max = 0;
         for (int seed = 0; seed < N_SEEDS; ++seed) {
             auto [_lin, optimal, cost] = Linearize(depgraph, /*max_cost=*/100'000'000,
-                                                    /*rng_seed=*/uint64_t(seed), IndexTxOrder{});
+                                                    /*rng_seed=*/uint64_t(seed), IndexTxOrder{},
+                                                    std::span<const DepGraphIndex>{last_optimal},
+                                                    /*is_topological=*/true);
             assert(optimal);
-            sum_cost += cost;
-            if (cost > max_cost) max_cost = cost;
+            warm_sum += cost;
+            if (cost > warm_max) warm_max = cost;
         }
-        uint64_t avg = sum_cost / N_SEEDS;
-        bool fits_75k = avg <= ACCEPTABLE_COST;
-        fprintf(stderr, "%4zu %5u %5u %12llu %12llu %12s\n",
+        uint64_t warm_avg = warm_sum / N_SEEDS;
+
+        double ratio = double(warm_avg) / double(cold_avg);
+        fprintf(stderr, "%4zu %5u %5u %12llu %12llu %12llu %12llu %7.2fx\n",
                 i, depgraph.TxCount(), depgraph.CountDependencies(),
-                (unsigned long long)avg, (unsigned long long)max_cost,
-                fits_75k ? "yes" : "NO");
-        total_avg_cost += avg;
-        total_max_cost += max_cost;
-        if (avg > hardest_avg) { hardest_avg = avg; hardest_tx_count = depgraph.TxCount(); hardest_idx = int(i); }
+                (unsigned long long)cold_avg, (unsigned long long)cold_max,
+                (unsigned long long)warm_avg, (unsigned long long)warm_max,
+                ratio);
+        cold_total_avg += cold_avg;
+        warm_total_avg += warm_avg;
+        if (cold_avg > cold_hardest) { cold_hardest = cold_avg; cold_hardest_idx = int(i); cold_hardest_tx = depgraph.TxCount(); }
+        if (warm_avg > warm_hardest) { warm_hardest = warm_avg; warm_hardest_idx = int(i); warm_hardest_tx = depgraph.TxCount(); }
     }
+
     fprintf(stderr, "---\n");
-    fprintf(stderr, "Hardest single cluster: #%d, %d tx, avg cost %llu\n",
-            hardest_idx, hardest_tx_count, (unsigned long long)hardest_avg);
-    fprintf(stderr, "Sum across %zu distinct fixtures: avg %llu, sum-of-max %llu\n",
-            fixtures.size(), (unsigned long long)total_avg_cost, (unsigned long long)total_max_cost);
-    fprintf(stderr, "Per-cluster avg %llu = %.2f%% of acceptable_cost (75k); "
-            "%.2f%% of POST_CHANGE_COST (375k)\n",
-            (unsigned long long)(total_avg_cost / fixtures.size()),
-            100.0 * (total_avg_cost / fixtures.size()) / ACCEPTABLE_COST,
-            100.0 * (total_avg_cost / fixtures.size()) / POST_CHANGE_COST);
+    fprintf(stderr, "Hardest cold cluster: #%d, %d tx, avg %llu\n",
+            cold_hardest_idx, cold_hardest_tx, (unsigned long long)cold_hardest);
+    fprintf(stderr, "Hardest warm cluster: #%d, %d tx, avg %llu\n",
+            warm_hardest_idx, warm_hardest_tx, (unsigned long long)warm_hardest);
+    fprintf(stderr, "Sum across %zu fixtures: cold=%llu  warm=%llu  warm/cold=%.2fx\n",
+            fixtures.size(), (unsigned long long)cold_total_avg,
+            (unsigned long long)warm_total_avg,
+            double(warm_total_avg) / double(cold_total_avg));
 
-    fprintf(stderr, "\n  N copies of hardest-cluster (avg=%llu): DoWork calls needed at 375k budget:\n",
-            (unsigned long long)hardest_avg);
-    fprintf(stderr, "  %5s %15s %12s\n", "N", "total_cost", "DoWork_calls");
-    for (int N : {1, 10, 25, 50, 100, 200, 500, 1000}) {
-        uint64_t total = uint64_t(N) * hardest_avg;
-        uint64_t calls = (total + POST_CHANGE_COST - 1) / POST_CHANGE_COST;
-        fprintf(stderr, "  %5d %15llu %12llu\n", N, (unsigned long long)total, (unsigned long long)calls);
-    }
-
-    // Same sweep using the avg-of-all-fixtures cost, simulating "100 differently-shaped
-    // complex clusters all touched at once" rather than 100 of the same.
-    uint64_t mix_avg = total_avg_cost / fixtures.size();
-    fprintf(stderr, "\n  N copies of avg-fixture (avg=%llu): DoWork calls needed:\n",
-            (unsigned long long)mix_avg);
-    fprintf(stderr, "  %5s %15s %12s\n", "N", "total_cost", "DoWork_calls");
-    for (int N : {1, 10, 25, 50, 100, 200, 500, 1000}) {
-        uint64_t total = uint64_t(N) * mix_avg;
-        uint64_t calls = (total + POST_CHANGE_COST - 1) / POST_CHANGE_COST;
-        fprintf(stderr, "  %5d %15llu %12llu\n", N, (unsigned long long)total, (unsigned long long)calls);
-    }
+    auto sweep = [&](const char* tag, uint64_t per) {
+        fprintf(stderr, "\n  N copies of %s (per=%llu): DoWork calls at 375k budget:\n",
+                tag, (unsigned long long)per);
+        fprintf(stderr, "  %5s %15s %12s\n", "N", "total_cost", "DoWork_calls");
+        for (int N : {1, 10, 25, 50, 100, 200, 500, 1000}) {
+            uint64_t total = uint64_t(N) * per;
+            uint64_t calls = (total + POST_CHANGE_COST - 1) / POST_CHANGE_COST;
+            fprintf(stderr, "  %5d %15llu %12llu\n", N, (unsigned long long)total, (unsigned long long)calls);
+        }
+    };
+    sweep("hardest-cold (worst case, no old_lin available)", cold_hardest);
+    sweep("hardest-warm (post-RBF-tail-nip, old optimal seeded)", warm_hardest);
+    sweep("avg-warm (mixed shapes, old optimal seeded)", warm_total_avg / fixtures.size());
     fprintf(stderr, "===\n");
 }
 

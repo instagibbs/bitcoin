@@ -194,6 +194,82 @@ void BenchLinearizeChain(benchmark::Bench& bench, DepGraphIndex ntx, bool topolo
     });
 }
 
+/** Build a strictly-decreasing-feerate chain: tx 0 has feerate N, tx 1 has N-1, ... tx N-1
+ *  has 1. Topological order is already optimal *and* each tx forms its own chunk (no
+ *  merging needed). Used to contrast with the uniform-feerate case where everything
+ *  collapses into a single chunk. */
+template<typename SetType>
+DepGraph<SetType> MakeDecreasingChain(DepGraphIndex ntx)
+{
+    DepGraph<SetType> depgraph;
+    for (DepGraphIndex i = 0; i < ntx; ++i) {
+        depgraph.AddTransaction({int32_t(ntx - i), 1});
+        if (i > 0) depgraph.AddDependencies(SetType::Singleton(i - 1), i);
+    }
+    return depgraph;
+}
+
+/** Print a per-phase cost breakdown for chain linearization, comparing the Scratch
+ *  (no prior linearization → MakeTopological) vs Topo (chain order pre-loaded via
+ *  LoadLinearization) paths, for two feerate shapes:
+ *    - "uniform": all fees equal; entire chain collapses into one chunk.
+ *    - "decreasing": fees strictly decrease along the chain; each tx is its own chunk. */
+void DumpChainPhaseBreakdown()
+{
+    auto run_one = [](const char* feerate_label, auto make_depgraph) {
+        fprintf(stderr, "\n=== Linearize chain per-phase cost (%s feerate) ===\n", feerate_label);
+        fprintf(stderr, "%4s %8s %10s %10s %10s %10s %10s %10s\n",
+                "len", "variant", "init", "load_topo", "start_opt", "opt_steps", "min_steps", "total");
+        for (DepGraphIndex n : {2u, 5u, 10u, 15u, 20u, 25u, 32u, 48u, 64u}) {
+            for (int v = 0; v < 2; ++v) {
+                const bool topo = (v == 1);
+                const char* name = topo ? "Topo" : "Scratch";
+                auto depgraph = make_depgraph(n);
+                std::vector<DepGraphIndex> old_lin;
+                if (topo) {
+                    old_lin.reserve(n);
+                    for (DepGraphIndex i = 0; i < n; ++i) old_lin.push_back(i);
+                }
+                SpanningForestState<BitSet<64>> forest(depgraph, /*rng_seed=*/0);
+                const uint64_t c_init = forest.GetCost();
+                if (topo) {
+                    forest.LoadLinearization(old_lin);
+                } else {
+                    forest.MakeTopological();
+                }
+                const uint64_t c_load = forest.GetCost();
+                forest.StartOptimizing();
+                const uint64_t c_startopt = forest.GetCost();
+                while (forest.OptimizeStep()) {}
+                const uint64_t c_opt = forest.GetCost();
+                forest.StartMinimizing();
+                while (forest.MinimizeStep()) {}
+                const uint64_t c_min = forest.GetCost();
+                fprintf(stderr, "%4u %8s %10llu %10llu %10llu %10llu %10llu %10llu\n",
+                        n, name,
+                        (unsigned long long)c_init,
+                        (unsigned long long)(c_load - c_init),
+                        (unsigned long long)(c_startopt - c_load),
+                        (unsigned long long)(c_opt - c_startopt),
+                        (unsigned long long)(c_min - c_opt),
+                        (unsigned long long)c_min);
+            }
+        }
+        fprintf(stderr, "===\n");
+    };
+    run_one("uniform", [](DepGraphIndex n) { return MakeUniformChain<BitSet<64>>(n); });
+    run_one("decreasing", [](DepGraphIndex n) { return MakeDecreasingChain<BitSet<64>>(n); });
+    fprintf(stderr, "\n");
+}
+
+static void LinearizeChainPhaseBreakdown(benchmark::Bench& bench)
+{
+    DumpChainPhaseBreakdown();
+    // Bench framework requires at least one timed run; provide a trivial one.
+    int dummy = 0;
+    bench.name("LinearizeChainPhaseBreakdown_marker").run([&]{ ankerl::nanobench::doNotOptimizeAway(dummy); });
+}
+
 static void LinearizeChainScratchByLen(benchmark::Bench& bench)
 {
     for (DepGraphIndex n = 2; n <= 64; ++n) BenchLinearizeChain(bench, n, /*topological=*/false);
@@ -228,3 +304,4 @@ BENCHMARK(LinearizeOptimallyPerCost);
 
 BENCHMARK(LinearizeChainScratchByLen);
 BENCHMARK(LinearizeChainTopoByLen);
+BENCHMARK(LinearizeChainPhaseBreakdown);

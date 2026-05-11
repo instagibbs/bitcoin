@@ -270,6 +270,98 @@ static void LinearizeChainPhaseBreakdown(benchmark::Bench& bench)
     bench.name("LinearizeChainPhaseBreakdown_marker").run([&]{ ankerl::nanobench::doNotOptimizeAway(dummy); });
 }
 
+/** Compute the per-cluster Linearize cost (averaged over many seeds) for each fixture in a set
+ *  of pre-serialized hard clusters, and project the aggregate cost assuming N copies of every
+ *  cluster all need re-linearizing at once (the "RBF tail-nip" attack scenario: one replacement
+ *  transaction conflicts with the leaf of N otherwise-independent complex clusters, demoting
+ *  all N to NEEDS_RELINEARIZE in a single Apply).
+ *
+ *  Reports raw per-cluster costs, the worst single cluster (the bound on bail-in-one-cluster),
+ *  the sum across all distinct fixtures (= "every hard shape attacked once"), and a copy-count
+ *  sweep showing how many DoWork(POST_CHANGE_COST=375 000) calls are needed for various N. */
+void DumpHardClusterAttackProjection(const char* label,
+                                     const std::vector<std::vector<uint8_t>>& fixtures)
+{
+    constexpr uint64_t POST_CHANGE_COST = 375'000;
+    constexpr uint64_t ACCEPTABLE_COST = 75'000;
+    constexpr int N_SEEDS = 200;
+
+    fprintf(stderr, "\n=== Hard-cluster relinearization cost projection: %s ===\n", label);
+    fprintf(stderr, "%4s %5s %5s %12s %12s %12s\n",
+            "#", "tx", "dep", "avg_cost", "max_seed", "fits_per75k");
+
+    uint64_t total_avg_cost = 0;
+    uint64_t total_max_cost = 0;
+    uint64_t hardest_avg = 0;
+    int hardest_tx_count = 0;
+    int hardest_idx = -1;
+
+    for (size_t i = 0; i < fixtures.size(); ++i) {
+        SpanReader reader{fixtures[i]};
+        DepGraph<BitSet<64>> depgraph;
+        reader >> Using<DepGraphFormatter>(depgraph);
+        uint64_t sum_cost = 0;
+        uint64_t max_cost = 0;
+        for (int seed = 0; seed < N_SEEDS; ++seed) {
+            auto [_lin, optimal, cost] = Linearize(depgraph, /*max_cost=*/100'000'000,
+                                                    /*rng_seed=*/uint64_t(seed), IndexTxOrder{});
+            assert(optimal);
+            sum_cost += cost;
+            if (cost > max_cost) max_cost = cost;
+        }
+        uint64_t avg = sum_cost / N_SEEDS;
+        bool fits_75k = avg <= ACCEPTABLE_COST;
+        fprintf(stderr, "%4zu %5u %5u %12llu %12llu %12s\n",
+                i, depgraph.TxCount(), depgraph.CountDependencies(),
+                (unsigned long long)avg, (unsigned long long)max_cost,
+                fits_75k ? "yes" : "NO");
+        total_avg_cost += avg;
+        total_max_cost += max_cost;
+        if (avg > hardest_avg) { hardest_avg = avg; hardest_tx_count = depgraph.TxCount(); hardest_idx = int(i); }
+    }
+    fprintf(stderr, "---\n");
+    fprintf(stderr, "Hardest single cluster: #%d, %d tx, avg cost %llu\n",
+            hardest_idx, hardest_tx_count, (unsigned long long)hardest_avg);
+    fprintf(stderr, "Sum across %zu distinct fixtures: avg %llu, sum-of-max %llu\n",
+            fixtures.size(), (unsigned long long)total_avg_cost, (unsigned long long)total_max_cost);
+    fprintf(stderr, "Per-cluster avg %llu = %.2f%% of acceptable_cost (75k); "
+            "%.2f%% of POST_CHANGE_COST (375k)\n",
+            (unsigned long long)(total_avg_cost / fixtures.size()),
+            100.0 * (total_avg_cost / fixtures.size()) / ACCEPTABLE_COST,
+            100.0 * (total_avg_cost / fixtures.size()) / POST_CHANGE_COST);
+
+    fprintf(stderr, "\n  N copies of hardest-cluster (avg=%llu): DoWork calls needed at 375k budget:\n",
+            (unsigned long long)hardest_avg);
+    fprintf(stderr, "  %5s %15s %12s\n", "N", "total_cost", "DoWork_calls");
+    for (int N : {1, 10, 25, 50, 100, 200, 500, 1000}) {
+        uint64_t total = uint64_t(N) * hardest_avg;
+        uint64_t calls = (total + POST_CHANGE_COST - 1) / POST_CHANGE_COST;
+        fprintf(stderr, "  %5d %15llu %12llu\n", N, (unsigned long long)total, (unsigned long long)calls);
+    }
+
+    // Same sweep using the avg-of-all-fixtures cost, simulating "100 differently-shaped
+    // complex clusters all touched at once" rather than 100 of the same.
+    uint64_t mix_avg = total_avg_cost / fixtures.size();
+    fprintf(stderr, "\n  N copies of avg-fixture (avg=%llu): DoWork calls needed:\n",
+            (unsigned long long)mix_avg);
+    fprintf(stderr, "  %5s %15s %12s\n", "N", "total_cost", "DoWork_calls");
+    for (int N : {1, 10, 25, 50, 100, 200, 500, 1000}) {
+        uint64_t total = uint64_t(N) * mix_avg;
+        uint64_t calls = (total + POST_CHANGE_COST - 1) / POST_CHANGE_COST;
+        fprintf(stderr, "  %5d %15llu %12llu\n", N, (unsigned long long)total, (unsigned long long)calls);
+    }
+    fprintf(stderr, "===\n");
+}
+
+static void LinearizeHardClusterAttackProjection(benchmark::Bench& bench)
+{
+    DumpHardClusterAttackProjection("CLUSTERS_HISTORICAL", CLUSTERS_HISTORICAL);
+    DumpHardClusterAttackProjection("CLUSTERS_SYNTHETIC", CLUSTERS_SYNTHETIC);
+    int dummy = 0;
+    bench.name("LinearizeHardClusterAttackProjection_marker")
+        .run([&]{ ankerl::nanobench::doNotOptimizeAway(dummy); });
+}
+
 static void LinearizeChainScratchByLen(benchmark::Bench& bench)
 {
     for (DepGraphIndex n = 2; n <= 64; ++n) BenchLinearizeChain(bench, n, /*topological=*/false);
@@ -305,3 +397,4 @@ BENCHMARK(LinearizeOptimallyPerCost);
 BENCHMARK(LinearizeChainScratchByLen);
 BENCHMARK(LinearizeChainTopoByLen);
 BENCHMARK(LinearizeChainPhaseBreakdown);
+BENCHMARK(LinearizeHardClusterAttackProjection);

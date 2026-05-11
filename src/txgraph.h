@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -105,7 +106,8 @@ public:
      *  Calling DoWork will perform some work now (controlled by max_cost) so that future operations
      *  are fast, if there is any. Returns whether all currently-available work is done. This can
      *  be invoked while oversized, but oversized graphs will be skipped by this call. */
-    virtual bool DoWork(uint64_t max_cost) noexcept = 0;
+    struct WorkStats; // bespoke debug only; defined further below.
+    virtual bool DoWork(uint64_t max_cost, WorkStats* stats = nullptr) noexcept = 0;
 
     /** Create a staging graph (which cannot exist already). This acts as if a full copy of
      *  the transaction graph is made, upon which further modifications are made. This copy can
@@ -237,6 +239,39 @@ public:
         ClusterQuality quality;
         /** Transactions in linearization order. */
         std::vector<ClusterDumpEntry> txs;
+    };
+
+    /** Counters captured around a DoWork() call. When a non-null pointer is supplied,
+     *  DoWork() fills the pre_* arrays with the cluster-set state snapshotted before any
+     *  work is performed, then updates the in-progress counters as it iterates, and on
+     *  bail records why and which cluster triggered it. */
+    struct WorkStats {
+        /** Number of buckets in pre_* arrays, indexed by ClusterQuality. */
+        static constexpr size_t kBuckets = size_t(ClusterQuality::OPTIMAL) + 1;
+        /** Pre-DoWork cluster counts per quality (summed across all levels). */
+        std::array<uint32_t, kBuckets> pre_cluster_count{};
+        /** Pre-DoWork total tx counts per quality. */
+        std::array<uint64_t, kBuckets> pre_tx_count{};
+        /** Pre-DoWork largest cluster (by tx count) per quality. */
+        std::array<uint32_t, kBuckets> pre_max_cluster_tx{};
+
+        /** Total linearization cost spent across all Relinearize() calls. */
+        uint64_t cost_consumed{0};
+        /** Number of Cluster::Relinearize() invocations DoWork() made. */
+        uint32_t relinearize_calls{0};
+        /** Clusters that ended up in OPTIMAL during this DoWork() call. */
+        uint32_t clusters_promoted_to_optimal{0};
+        /** Clusters that ended up in ACCEPTABLE (but not OPTIMAL) during this DoWork() call. */
+        uint32_t clusters_promoted_to_acceptable{0};
+
+        /** Why DoWork() returned false (only meaningful if it did). */
+        enum class BailReason : uint8_t { NONE, BUDGET_EXHAUSTED, NO_PROGRESS };
+        BailReason bail_reason{BailReason::NONE};
+        /** Identifying info for the cluster that caused a NO_PROGRESS bail. */
+        uint32_t bail_cluster_tx_count{0};
+        uint64_t bail_cluster_sequence{0};
+        /** ClusterQuality int of the queue being processed when bail happened, or -1. */
+        int bail_at_quality{-1};
     };
 
     /** Snapshot every cluster at the requested level. If only_non_optimal is true, clusters

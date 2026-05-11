@@ -809,7 +809,7 @@ public:
     void AddDependency(const Ref& parent, const Ref& child) noexcept final;
     void SetTransactionFee(const Ref&, int64_t fee) noexcept final;
 
-    bool DoWork(uint64_t max_cost) noexcept final;
+    bool DoWork(uint64_t max_cost, WorkStats* stats = nullptr) noexcept final;
 
     void StartStaging() noexcept final;
     void CommitStaging() noexcept final;
@@ -3118,8 +3118,27 @@ void TxGraphImpl::SanityCheck() const
     assert(actual_chunkindex == expected_chunkindex);
 }
 
-bool TxGraphImpl::DoWork(uint64_t max_cost) noexcept
+bool TxGraphImpl::DoWork(uint64_t max_cost, WorkStats* stats) noexcept
 {
+    // Bespoke debug: when caller supplied a stats sink, snapshot the cluster set before any
+    // work happens, then accumulate per-Relinearize progress and record bail info below.
+    if (stats != nullptr) {
+        // QualityLevel and ClusterQuality share the same first-7 ordering (see txgraph.h).
+        for (int level = 0; level <= GetTopLevel(); ++level) {
+            const auto& cs = GetClusterSet(level);
+            for (int q = 0; q < int(QualityLevel::NONE); ++q) {
+                if (q >= int(WorkStats::kBuckets)) continue; // defensive; matches ClusterQuality.
+                for (const auto& cluster_uptr : cs.m_clusters[q]) {
+                    if (!cluster_uptr) continue;
+                    auto n = uint32_t(cluster_uptr->GetTxCount());
+                    stats->pre_cluster_count[q] += 1;
+                    stats->pre_tx_count[q] += n;
+                    if (n > stats->pre_max_cluster_tx[q]) stats->pre_max_cluster_tx[q] = n;
+                }
+            }
+        }
+    }
+
     uint64_t cost_done{0};
     // First linearize everything in NEEDS_RELINEARIZE to an acceptable level. If more budget
     // remains after that, try to make everything optimal.
@@ -3134,7 +3153,14 @@ bool TxGraphImpl::DoWork(uint64_t max_cost) noexcept
             if (clusterset.m_oversized == true) continue;
             auto& queue = clusterset.m_clusters[int(quality)];
             while (!queue.empty()) {
-                if (cost_done >= max_cost) return false;
+                if (cost_done >= max_cost) {
+                    if (stats != nullptr) {
+                        stats->cost_consumed = cost_done;
+                        stats->bail_reason = WorkStats::BailReason::BUDGET_EXHAUSTED;
+                        stats->bail_at_quality = int(quality);
+                    }
+                    return false;
+                }
                 // Randomize the order in which we process, so that if the first cluster somehow
                 // needs more work than what max_cost allows, we don't keep spending it on the same
                 // one.
@@ -3147,20 +3173,45 @@ bool TxGraphImpl::DoWork(uint64_t max_cost) noexcept
                     // remaining budget on trying to make them OPTIMAL.
                     cost_now = std::min(cost_now, m_acceptable_cost);
                 }
-                auto [cost, improved] = queue[pos].get()->Relinearize(*this, level, cost_now);
+                // Capture identity of the cluster about to be relinearized so it remains
+                // attributable even after Relinearize() moves it between quality buckets.
+                Cluster* picked = queue[pos].get();
+                uint64_t picked_sequence = picked->m_sequence;
+                uint32_t picked_tx_count = uint32_t(picked->GetTxCount());
+                auto [cost, improved] = picked->Relinearize(*this, level, cost_now);
                 cost_done += cost;
+                if (stats != nullptr) {
+                    stats->relinearize_calls += 1;
+                    if (improved) {
+                        if (picked->m_quality == QualityLevel::OPTIMAL) {
+                            stats->clusters_promoted_to_optimal += 1;
+                        } else if (picked->m_quality == QualityLevel::ACCEPTABLE) {
+                            stats->clusters_promoted_to_acceptable += 1;
+                        }
+                    }
+                }
                 // If no improvement was made to the Cluster, it means we've essentially run out of
                 // budget. Even though it may be the case that cost_done < max_cost still, the
                 // linearizer decided there wasn't enough budget left to attempt anything with.
                 // To avoid an infinite loop that keeps trying clusters with minuscule budgets,
                 // stop here too.
-                if (!improved) return false;
+                if (!improved) {
+                    if (stats != nullptr) {
+                        stats->cost_consumed = cost_done;
+                        stats->bail_reason = WorkStats::BailReason::NO_PROGRESS;
+                        stats->bail_at_quality = int(quality);
+                        stats->bail_cluster_sequence = picked_sequence;
+                        stats->bail_cluster_tx_count = picked_tx_count;
+                    }
+                    return false;
+                }
             }
         }
     }
     // All possible work has been performed, so we can return true. Note that this does *not* mean
     // that all clusters are optimally linearized now. It may be that there is nothing to do left
     // because all non-optimal clusters are in oversized and/or observer-bearing levels.
+    if (stats != nullptr) stats->cost_consumed = cost_done;
     return true;
 }
 

@@ -94,6 +94,83 @@ const char* QualityName(TxGraph::ClusterQuality q)
     return "UNKNOWN";
 }
 
+const char* QualityNameFromInt(int q)
+{
+    if (q < 0 || q > int(TxGraph::ClusterQuality::OPTIMAL)) return "UNKNOWN";
+    return QualityName(static_cast<TxGraph::ClusterQuality>(q));
+}
+
+const char* BailReasonName(TxGraph::WorkStats::BailReason r)
+{
+    using B = TxGraph::WorkStats::BailReason;
+    switch (r) {
+    case B::NONE:              return "none";
+    case B::BUDGET_EXHAUSTED:  return "budget_exhausted";
+    case B::NO_PROGRESS:       return "no_progress";
+    }
+    return "unknown";
+}
+
+/** Format a one-line summary of a WorkStats for the human-readable log. */
+std::string FormatWorkStatsLog(const TxGraph::WorkStats& s)
+{
+    std::ostringstream os;
+    os << "cost=" << s.cost_consumed
+       << " relinearize_calls=" << s.relinearize_calls
+       << " promoted_opt=" << s.clusters_promoted_to_optimal
+       << " promoted_acc=" << s.clusters_promoted_to_acceptable
+       << " pre=[";
+    bool first = true;
+    for (int q = 0; q < int(TxGraph::WorkStats::kBuckets); ++q) {
+        if (s.pre_cluster_count[q] == 0) continue;
+        if (!first) os << ", ";
+        first = false;
+        os << QualityNameFromInt(q) << "(" << s.pre_cluster_count[q]
+           << " clusters, " << s.pre_tx_count[q] << " txs, max=" << s.pre_max_cluster_tx[q] << ")";
+    }
+    os << "] bail=" << BailReasonName(s.bail_reason);
+    if (s.bail_at_quality >= 0) {
+        os << " bail_quality=" << QualityNameFromInt(s.bail_at_quality);
+    }
+    if (s.bail_reason == TxGraph::WorkStats::BailReason::NO_PROGRESS) {
+        os << " bail_cluster=seq" << s.bail_cluster_sequence
+           << "/" << s.bail_cluster_tx_count << "txs";
+    }
+    return os.str();
+}
+
+/** Write a WorkStats sub-object to a JSON dump stream. Includes the leading comma. */
+void WriteWorkStatsJson(std::ostream& out, const TxGraph::WorkStats& s)
+{
+    out << ",\n  \"work_stats\": {\n";
+    out << "    \"cost_consumed\": " << s.cost_consumed << ",\n";
+    out << "    \"relinearize_calls\": " << s.relinearize_calls << ",\n";
+    out << "    \"clusters_promoted_to_optimal\": " << s.clusters_promoted_to_optimal << ",\n";
+    out << "    \"clusters_promoted_to_acceptable\": " << s.clusters_promoted_to_acceptable << ",\n";
+    out << "    \"bail_reason\": " << JsonString(BailReasonName(s.bail_reason)) << ",\n";
+    out << "    \"bail_at_quality\": ";
+    if (s.bail_at_quality >= 0) {
+        out << JsonString(QualityNameFromInt(s.bail_at_quality));
+    } else {
+        out << "null";
+    }
+    out << ",\n";
+    out << "    \"bail_cluster_sequence\": " << s.bail_cluster_sequence << ",\n";
+    out << "    \"bail_cluster_tx_count\": " << s.bail_cluster_tx_count << ",\n";
+    out << "    \"pre_state\": [\n";
+    bool first = true;
+    for (int q = 0; q < int(TxGraph::WorkStats::kBuckets); ++q) {
+        if (s.pre_cluster_count[q] == 0) continue;
+        if (!first) out << ",\n";
+        first = false;
+        out << "      {\"quality\": " << JsonString(QualityNameFromInt(q))
+            << ", \"cluster_count\": " << s.pre_cluster_count[q]
+            << ", \"total_tx\": " << s.pre_tx_count[q]
+            << ", \"max_tx\": " << s.pre_max_cluster_tx[q] << "}";
+    }
+    out << "\n    ]\n  }";
+}
+
 std::string TxToHex(const CTransaction& tx)
 {
     DataStream ss;
@@ -114,7 +191,8 @@ void WriteNonOptimalDump(
     std::string_view trigger,
     std::string_view extra_context_json_body, // JSON object body (no surrounding {}); may be empty
     const DumpConfig& cfg,
-    TxGraph& txgraph) noexcept
+    TxGraph& txgraph,
+    const TxGraph::WorkStats* work_stats = nullptr) noexcept
 {
     if (dir.empty()) return;
     std::vector<TxGraph::ClusterDump> clusters;
@@ -161,6 +239,9 @@ void WriteNonOptimalDump(
             << "}";
         if (!extra_context_json_body.empty()) {
             out << ",\n  " << extra_context_json_body;
+        }
+        if (work_stats != nullptr) {
+            WriteWorkStatsJson(out, *work_stats);
         }
         out << ",\n  \"non_optimal_clusters\": [\n";
         for (size_t ci = 0; ci < clusters.size(); ++ci) {
@@ -412,8 +493,9 @@ void CTxMemPool::Apply(ChangeSet* changeset)
 
         addNewTransaction(it);
     }
-    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
-        LogInfo("Mempool in non-optimal ordering after addition(s).");
+    TxGraph::WorkStats work_stats;
+    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST, &work_stats)) {
+        LogInfo("Mempool in non-optimal ordering after addition(s): %s", FormatWorkStatsLog(work_stats));
         if (!m_opts.nonoptimal_dump_dir.empty()) {
             const DumpConfig dump_cfg{
                 ACCEPTABLE_COST,
@@ -434,7 +516,7 @@ void CTxMemPool::Apply(ChangeSet* changeset)
                 ctx << JsonString(dump_removed_txids[i]);
             }
             ctx << "]}";
-            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "apply", ctx.str(), dump_cfg, *m_txgraph);
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "apply", ctx.str(), dump_cfg, *m_txgraph, &work_stats);
         }
     }
 }
@@ -593,8 +675,9 @@ void CTxMemPool::removeForReorg(CChain& chain, std::function<bool(txiter)> check
     for (indexed_transaction_set::const_iterator it = mapTx.begin(); it != mapTx.end(); it++) {
         assert(TestLockPointValidity(chain, it->GetLockPoints()));
     }
-    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
-        LogInfo("Mempool in non-optimal ordering after reorg.");
+    TxGraph::WorkStats work_stats;
+    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST, &work_stats)) {
+        LogInfo("Mempool in non-optimal ordering after reorg: %s", FormatWorkStatsLog(work_stats));
         if (!m_opts.nonoptimal_dump_dir.empty()) {
             const DumpConfig dump_cfg{
                 ACCEPTABLE_COST,
@@ -604,7 +687,7 @@ void CTxMemPool::removeForReorg(CChain& chain, std::function<bool(txiter)> check
                 ::nBytesPerSigOp,
             };
             // No specific context payload for reorg beyond the trigger label.
-            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "reorg", {}, dump_cfg, *m_txgraph);
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "reorg", {}, dump_cfg, *m_txgraph, &work_stats);
         }
     }
 }
@@ -649,8 +732,9 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
     }
     lastRollingFeeUpdate = GetTime();
     blockSinceLastRollingFeeBump = true;
-    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST)) {
-        LogInfo("Mempool in non-optimal ordering after block.");
+    TxGraph::WorkStats work_stats;
+    if (!m_txgraph->DoWork(/*max_cost=*/POST_CHANGE_COST, &work_stats)) {
+        LogInfo("Mempool in non-optimal ordering after block: %s", FormatWorkStatsLog(work_stats));
         if (!m_opts.nonoptimal_dump_dir.empty()) {
             const DumpConfig dump_cfg{
                 ACCEPTABLE_COST,
@@ -662,7 +746,7 @@ void CTxMemPool::removeForBlock(const std::vector<CTransactionRef>& vtx, unsigne
             std::ostringstream ctx;
             ctx << "\"context\": {\"block_height\": " << nBlockHeight
                 << ", \"block_tx_count\": " << vtx.size() << "}";
-            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "block", ctx.str(), dump_cfg, *m_txgraph);
+            WriteNonOptimalDump(m_opts.nonoptimal_dump_dir, "block", ctx.str(), dump_cfg, *m_txgraph, &work_stats);
         }
     }
 }

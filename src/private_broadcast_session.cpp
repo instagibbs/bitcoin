@@ -59,17 +59,22 @@ void PrivateBroadcastSession::OnGetData(Sink& sink, const std::vector<CInv>& inv
         return;
     }
 
+    // Re-serving on a repeated GETDATA matches what normal tx relay does and
+    // leaks nothing the original INV did not: the peer is asking for a tx we
+    // already told them we have. State stays AwaitingGetData; the eventual
+    // PONG (whose nonce was queued by the first served GETDATA) drives the
+    // transition to Done.
     sink.SendTx(*m_picked_tx);
     sink.QueuePing();
-    m_state = State::AwaitingPong;
 }
 
 void PrivateBroadcastSession::OnPong(Sink& sink)
 {
-    if (m_state != State::AwaitingPong) {
-        // Defensive: ignore unexpected PONGs. The legacy code only acted on
-        // PONGs whose nonce/ping_time validation passed; we are called after
-        // that validation, so this branch should not normally fire.
+    if (m_state != State::AwaitingGetData) {
+        // Defensive: ignore PONGs in any other state. The caller only invokes
+        // OnPong after ProcessPong's nonce/ping_time validation has passed, so
+        // this is only reachable if a PONG arrives before we ever served a TX
+        // (no PING was queued, so the nonce check should already have failed).
         return;
     }
     m_store.NodeConfirmedReception(m_nodeid);

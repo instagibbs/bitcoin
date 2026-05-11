@@ -23,9 +23,9 @@ class CInv;
  *   AwaitingVerack  -- conn opened, our VERSION sent, peer's VERSION received,
  *                      we sent VERACK; now waiting for peer's VERACK back.
  *   AwaitingGetData -- picked a tx from the shared PrivateBroadcast queue and
- *                      sent its INV; now waiting for GETDATA.
- *   AwaitingPong    -- sent TX, queued a PING; now waiting for the matching
- *                      PONG which confirms reception.
+ *                      sent its INV. Serves GETDATA (re-serves on repeats; a
+ *                      peer asking again leaks nothing the INV did not), and
+ *                      transitions to Done on the corresponding PONG.
  *   Done            -- terminal state; either confirmed reception or the
  *                      session was aborted via Disconnect.
  *
@@ -40,7 +40,6 @@ public:
     enum class State {
         AwaitingVerack,
         AwaitingGetData,
-        AwaitingPong,
         Done,
     };
 

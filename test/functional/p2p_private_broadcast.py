@@ -21,6 +21,7 @@ from test_framework.messages import (
     CInv,
     MSG_WTX,
     malleate_tx_to_invalid_witness,
+    msg_getdata,
     msg_inv,
     msg_tx,
 )
@@ -48,6 +49,32 @@ from test_framework.wallet import (
 )
 
 NUM_PRIVATE_BROADCAST_PER_TX = 3
+
+
+class DoubleGetdataPeer(P2PInterface):
+    """Private-broadcast destination that asks for the INVed tx twice and
+    suppresses PONG so the node does not disconnect after the first PING.
+
+    Used to verify that a private-broadcast outbound conn will re-serve the
+    same tx if asked again, matching normal tx relay behavior.
+    """
+    def __init__(self):
+        super().__init__()
+        self.suppress_pong = True
+
+    def on_inv(self, message):
+        # Mirror the default on_inv handler, but send GETDATA twice.
+        want = msg_getdata()
+        for i in message.inv:
+            if i.type != 0:
+                want.inv.append(i)
+        if len(want.inv):
+            self.send_without_ping(want)
+            self.send_without_ping(want)
+
+    def on_ping(self, message):
+        if not self.suppress_pong:
+            super().on_ping(message)
 
 # Fill addrman with these addresses. Must have enough Tor addresses, so that even
 # if all 10 default connections are opened to a Tor address (!?) there must be more
@@ -166,6 +193,12 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.num_nodes = 2
 
     def setup_nodes(self):
+        # If non-None, the next non-redirected private-broadcast destination will
+        # use this P2PInterface instance instead of a freshly-constructed default.
+        # Reset to None after use. Lets individual sub-tests inject custom
+        # message handlers (e.g. to send GETDATA twice instead of once).
+        self._next_priv_broadcast_peer = None
+
         # Start a SOCKS5 proxy server.
         socks5_server_config = Socks5Configuration()
         # self.nodes[0] listens on p2p_port(0),
@@ -229,6 +262,10 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
                     if conn_type == "outbound-full-relay" and not any(dest["conn_type"] == "outbound-full-relay" for dest in self.destinations):
                         listener = P2PDataStore()
                         target_name = "Python P2PDataStore"
+                    elif conn_type == "private-broadcast" and self._next_priv_broadcast_peer is not None:
+                        listener = self._next_priv_broadcast_peer
+                        self._next_priv_broadcast_peer = None
+                        target_name = f"Python {type(listener).__name__} (override)"
                     else:
                         listener = P2PInterface()
                         target_name = "Python P2PInterface"
@@ -474,6 +511,32 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             tx_originator.mockscheduler(delta)
         self.check_broadcasts("Rebroadcast", txs[1], 1, skip_destinations)
         tx_originator.setmocktime(0) # Let the clock tick again (it will go backwards due to this).
+
+        self.log.info("Verifying that a private-broadcast conn re-serves the same tx on repeated GETDATA")
+        # Inject a custom peer so the next private-broadcast destination asks
+        # for the INVed tx twice. Re-serving on a repeated GETDATA matches what
+        # normal tx relay does and leaks nothing the original INV did not.
+        reserve_tx = wallet.create_self_transfer()
+        custom_peer = DoubleGetdataPeer()
+        self._next_priv_broadcast_peer = custom_peer
+        tx_originator.sendrawtransaction(hexstring=reserve_tx["hex"], maxfeerate=0.1)
+        # The destinations factory runs on the SOCKS5 thread; it assigns the
+        # override into a destination entry and calls peer_connect_helper on it
+        # (which is what sets timeout_factor). Wait until that has happened so
+        # `custom_peer.wait_until` works.
+        self.wait_until(lambda: any(d["node"] is custom_peer for d in self.destinations))
+        # The node should send the TX twice on this conn (once per GETDATA).
+        # Don't gate on `check_connected` because the node will eventually
+        # disconnect us via the 3-min lifetime cap; we just need the two TXs.
+        custom_peer.wait_until(lambda: custom_peer.message_count["tx"] >= 2,
+                               check_connected=False, timeout=30)
+        assert_equal(custom_peer.message_count["version"], 1)
+        assert_equal(custom_peer.message_count["verack"], 1)
+        assert_equal(custom_peer.message_count["inv"], 1)
+        assert_equal(custom_peer.message_count["tx"], 2)
+        # Clean up: stop the queue trying to reach NUM_PRIVATE_BROADCAST_PER_TX
+        # confirmations for this tx so subsequent sections aren't perturbed.
+        tx_originator.abortprivatebroadcast(reserve_tx["txid"])
 
         self.log.info("Sending a pair of transactions with the same txid but different valid wtxids via RPC")
         parent = wallet.create_self_transfer()["tx"]

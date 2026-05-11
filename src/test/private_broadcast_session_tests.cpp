@@ -113,7 +113,36 @@ BOOST_AUTO_TEST_CASE(getdata_with_matching_inv_sends_tx_and_pings)
     BOOST_CHECK(*sink.sent_tx_hash == tx->GetHash().ToUint256());
     BOOST_CHECK_EQUAL(sink.pings_queued, 1);
     BOOST_CHECK(!sink.disconnect_reason.has_value());
-    BOOST_CHECK(session.state() == State::AwaitingPong);
+    // State stays AwaitingGetData so we can re-serve on repeated GETDATA.
+    BOOST_CHECK(session.state() == State::AwaitingGetData);
+}
+
+BOOST_AUTO_TEST_CASE(getdata_repeated_with_matching_inv_re_serves)
+{
+    // Re-serving the same tx to the same peer matches normal tx relay and
+    // leaks nothing the original INV did not.
+    PrivateBroadcast pb;
+    const auto tx{MakeDummyTx(20)};
+    BOOST_CHECK(pb.Add(tx));
+
+    PrivateBroadcastSession session{/*nodeid=*/7, MakeAddr(1111), pb};
+    RecordingSink sink;
+    session.OnVerack(sink);
+
+    std::vector<CInv> inv{CInv{MSG_TX, tx->GetHash().ToUint256()}};
+    session.OnGetData(sink, inv);
+    BOOST_REQUIRE(sink.sent_tx_hash.has_value());
+    BOOST_CHECK_EQUAL(sink.pings_queued, 1);
+
+    // Reset captured tx hash so the second send is observable.
+    sink.sent_tx_hash.reset();
+    session.OnGetData(sink, inv);
+
+    BOOST_REQUIRE(sink.sent_tx_hash.has_value());
+    BOOST_CHECK(*sink.sent_tx_hash == tx->GetHash().ToUint256());
+    BOOST_CHECK_EQUAL(sink.pings_queued, 2);
+    BOOST_CHECK(!sink.disconnect_reason.has_value());
+    BOOST_CHECK(session.state() == State::AwaitingGetData);
 }
 
 BOOST_AUTO_TEST_CASE(getdata_with_wrong_hash_disconnects)
@@ -186,7 +215,7 @@ BOOST_AUTO_TEST_CASE(pong_confirms_and_disconnects)
     RecordingSink sink;
     session.OnVerack(sink);
     session.OnGetData(sink, {CInv{MSG_TX, tx->GetHash().ToUint256()}});
-    BOOST_REQUIRE(session.state() == State::AwaitingPong);
+    BOOST_REQUIRE(session.state() == State::AwaitingGetData);
 
     BOOST_CHECK(!pb.DidNodeConfirmReception(nodeid));
     session.OnPong(sink);

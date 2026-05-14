@@ -74,6 +74,10 @@ class TxRelayRateLimitTest(BitcoinTestFramework):
                 tx = wallet.send_self_transfer(from_node=node)
                 all_wtxids.append(tx['wtxid'])
 
+        # Let the message-processing thread tick so any pending drains run
+        # before we inspect state.
+        peer.sync_with_ping()
+
         # Verify the backlog formed: exactly the excess beyond bucket capacity
         info = node.getnetworkinfo()
         backlog = info['inv_buckets']['inbound']['backlog']

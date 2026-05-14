@@ -494,6 +494,15 @@ struct CNodeState {
     int64_t m_last_block_announcement{0};
 };
 
+/** Global delay queue used to rate-limit outgoing tx inv announcements.
+ *
+ * Composes two TokenBuckets (count and bytes) with a wtxid backlog. Every
+ * tx broadcast funnels through here: on arrival the wtxid is appended to
+ * `backlog`, and `CatchupRelayTransactions` later drains the backlog into
+ * per-peer queues in mining-score order. There is no immediate-relay
+ * fast path -- under low load the drain runs eagerly because the trigger
+ * heuristic in CatchupRelayTransactions fires whenever the bucket has
+ * enough tokens to serve the entire (small) backlog. */
 struct InvToSendBucket {
     std::vector<Wtxid> backlog;
     util::TokenBucket<NodeClock> size_bucket;
@@ -514,11 +523,6 @@ struct InvToSendBucket {
     {
     }
 
-    bool immediate_relay() const
-    {
-        return backlog.empty() && count_bucket.value() >= 1 && size_bucket.value() >= 0;
-    }
-
     size_t avail() const
     {
         if (backlog.empty() || size_bucket.value() < 0 || count_bucket.value() < 0) {
@@ -532,12 +536,6 @@ struct InvToSendBucket {
     {
         size_bucket.increment(now);
         count_bucket.increment(now);
-    }
-
-    bool decrement(double size)
-    {
-        bool x = size_bucket.decrement(size, /*floor=*/-50e3);
-        return count_bucket.decrement(1) && x;
     }
 
     PeerManagerInfo::InvBucketInfo info() const
@@ -591,7 +589,7 @@ public:
     std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     std::vector<CTransactionRef> AbortPrivateBroadcast(const uint256& id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void SendPings() override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
-    void InitiateTxBroadcastToAll(const CTransactionRef& tx) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
+    void InitiateTxBroadcastToAll(const CTransactionRef& tx) override EXCLUSIVE_LOCKS_REQUIRED(!m_inv_to_send_mutex);
     void InitiateTxBroadcastPrivate(const CTransactionRef& tx) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void SetBestBlock(int height, std::chrono::seconds time) override
     {
@@ -2356,10 +2354,19 @@ void PeerManagerImpl::CatchupRelayTransactions(NodeClock::time_point now)
     size_t in_avail = m_inbound_inv_bucket.avail();
     size_t out_avail = m_outbound_inv_bucket.avail();
 
+    // Drain a direction when we either (a) have enough tokens to clear its
+    // entire backlog or (b) have accumulated enough for a full batch. (a)
+    // keeps low-load propagation latency near-zero -- a single queued tx
+    // ships as soon as the bucket has one token. (b) amortizes the
+    // SortMiningScoreWithTopology O(backlog) pass under sustained load.
     const size_t inventory_broadcast_target{m_opts.tx_send_rate * static_cast<size_t>(count_seconds(INBOUND_INVENTORY_BROADCAST_INTERVAL))};
-    if (in_avail < inventory_broadcast_target && out_avail < inventory_broadcast_target) return;
-    if (in_avail < inventory_broadcast_target) in_avail = 0;
-    if (out_avail < inventory_broadcast_target / 2) out_avail = 0;
+    const size_t in_threshold{std::min(inventory_broadcast_target, m_inbound_inv_bucket.backlog.size())};
+    const size_t out_threshold{std::min(inventory_broadcast_target / 2, m_outbound_inv_bucket.backlog.size())};
+    const bool drain_inbound{in_threshold > 0 && in_avail >= in_threshold};
+    const bool drain_outbound{out_threshold > 0 && out_avail >= out_threshold};
+    if (!drain_inbound && !drain_outbound) return;
+    if (!drain_inbound) in_avail = 0;
+    if (!drain_outbound) out_avail = 0;
 
     {
         LOCK(m_mempool.cs);
@@ -2399,51 +2406,10 @@ void PeerManagerImpl::CatchupRelayTransactions(NodeClock::time_point now)
 
 void PeerManagerImpl::InitiateTxBroadcastToAll(const CTransactionRef& tx)
 {
-    const Txid& txid{tx->GetHash()};
     const Wtxid& wtxid{tx->GetWitnessHash()};
-
-    bool immediate_inbound = false;
-    bool immediate_outbound = false;
-    {
-        LOCK(m_inv_to_send_mutex);
-        auto now = NodeClock::now();
-        m_inbound_inv_bucket.increment(now);
-        m_outbound_inv_bucket.increment(now);
-        immediate_inbound = m_inbound_inv_bucket.immediate_relay();
-        immediate_outbound = m_outbound_inv_bucket.immediate_relay();
-        if (!immediate_inbound) m_inbound_inv_bucket.backlog.push_back(wtxid);
-        if (!immediate_outbound) m_outbound_inv_bucket.backlog.push_back(wtxid);
-        if (!immediate_inbound && !immediate_outbound) {
-            return;
-        }
-        auto size = tx->ComputeTotalSize();
-        if (immediate_inbound) m_inbound_inv_bucket.decrement(size);
-        if (immediate_outbound) m_outbound_inv_bucket.decrement(size);
-    }
-    LOCK(m_peer_mutex);
-    for(auto& it : m_peer_map) {
-        Peer& peer = *it.second;
-        if (peer.m_is_inbound) {
-            if (!immediate_inbound) continue;
-        } else {
-            if (!immediate_outbound) continue;
-        }
-        auto tx_relay = peer.GetTxRelay();
-        if (!tx_relay) continue;
-
-        LOCK(tx_relay->m_tx_inventory_mutex);
-        // Only queue transactions for announcement once the version handshake
-        // is completed. The time of arrival for these transactions is
-        // otherwise at risk of leaking to a spy, if the spy is able to
-        // distinguish transactions received during the handshake from the rest
-        // in the announcement.
-        if (tx_relay->m_next_inv_send_time == 0s) continue;
-
-        const uint256& hash{peer.m_wtxid_relay ? wtxid.ToUint256() : txid.ToUint256()};
-        if (!tx_relay->m_tx_inventory_known_filter.contains(hash)) {
-            tx_relay->m_tx_inventory_to_send.push_back(wtxid);
-        }
-    }
+    LOCK(m_inv_to_send_mutex);
+    m_inbound_inv_bucket.backlog.push_back(wtxid);
+    m_outbound_inv_bucket.backlog.push_back(wtxid);
 }
 
 void PeerManagerImpl::InitiateTxBroadcastPrivate(const CTransactionRef& tx)

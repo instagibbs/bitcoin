@@ -195,6 +195,14 @@ void WriteNonOptimalDump(
     const TxGraph::WorkStats* work_stats = nullptr) noexcept
 {
     if (dir.empty()) return;
+    // Force all clusters to at least ACCEPTABLE quality before dumping, so the dump reflects
+    // the cluster state we would actually mine from rather than the partially-relinearized
+    // state DoWork() bailed out on. GetWorstMainChunk() internally calls MakeAllAcceptable().
+    try {
+        (void)txgraph.GetWorstMainChunk();
+    } catch (...) {
+        return;
+    }
     std::vector<TxGraph::ClusterDump> clusters;
     try {
         clusters = txgraph.DumpClusters(TxGraph::Level::MAIN, /*only_non_optimal=*/true);

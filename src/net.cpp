@@ -378,8 +378,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                              const char* pszDest,
                              bool fCountFailure,
                              ConnectionType conn_type,
-                             bool use_v2transport,
-                             const std::optional<Proxy>& proxy_override)
+                             bool use_v2transport)
 {
     AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
@@ -446,9 +445,16 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
 
     for (auto& target_addr : connect_to) {
         if (target_addr.IsValid()) {
+            const bool is_privbroadcast{conn_type == ConnectionType::PRIVATE_BROADCAST};
             const std::optional<Proxy> use_proxy{
-                proxy_override.has_value() ? proxy_override : GetProxy(target_addr.GetNetwork()),
-            };
+                is_privbroadcast ? m_private_broadcast.ProxyForBroadcast(target_addr.GetNetwork())
+                                 : GetProxy(target_addr.GetNetwork())};
+            if (is_privbroadcast && !use_proxy.has_value()) {
+                LogDebug(BCLog::PRIVBROADCAST,
+                         "Refusing private broadcast to %s: no suitable proxy for this network",
+                         target_addr.ToStringAddrPort());
+                return nullptr;
+            }
             bool proxyConnectionFailed = false;
 
             if (target_addr.IsI2P() && use_proxy) {
@@ -3036,8 +3042,7 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
                                      CountingSemaphoreGrant<>&& grant_outbound,
                                      const char* pszDest,
                                      ConnectionType conn_type,
-                                     bool use_v2transport,
-                                     const std::optional<Proxy>& proxy_override)
+                                     bool use_v2transport)
 {
     AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
@@ -3061,7 +3066,7 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
         return false;
     }
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override);
+    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport);
 
     if (!pnode)
         return false;
@@ -3089,23 +3094,11 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
 std::optional<Network> CConnman::PrivateBroadcast::PickNetwork(std::optional<Proxy>& proxy) const
 {
     prevector<4, Network> nets;
-    std::optional<Proxy> clearnet_proxy;
     proxy.reset();
-    if (g_reachable_nets.Contains(NET_ONION)) {
-        nets.push_back(NET_ONION);
-
-        clearnet_proxy = ProxyForIPv4or6();
-        if (clearnet_proxy.has_value()) {
-            if (g_reachable_nets.Contains(NET_IPV4)) {
-                nets.push_back(NET_IPV4);
-            }
-            if (g_reachable_nets.Contains(NET_IPV6)) {
-                nets.push_back(NET_IPV6);
-            }
+    for (const Network candidate : {NET_ONION, NET_IPV4, NET_IPV6, NET_I2P}) {
+        if (g_reachable_nets.Contains(candidate) && ProxyForBroadcast(candidate).has_value()) {
+            nets.push_back(candidate);
         }
-    }
-    if (g_reachable_nets.Contains(NET_I2P)) {
-        nets.push_back(NET_I2P);
     }
 
     if (nets.empty()) {
@@ -3113,8 +3106,9 @@ std::optional<Network> CConnman::PrivateBroadcast::PickNetwork(std::optional<Pro
     }
 
     const Network net{nets[FastRandomContext{}.randrange(nets.size())]};
+    // Only set return value for logging reasons when using Tor proxy
     if (net == NET_IPV4 || net == NET_IPV6) {
-        proxy = clearnet_proxy;
+        proxy = ProxyForBroadcast(net);
     }
     return net;
 }
@@ -3145,14 +3139,22 @@ void CConnman::PrivateBroadcast::NumToOpenWait() const
     m_num_to_open.wait(0);
 }
 
-std::optional<Proxy> CConnman::PrivateBroadcast::ProxyForIPv4or6() const
+std::optional<Proxy> CConnman::PrivateBroadcast::ProxyForBroadcast(Network net) const
 {
-    if (m_outbound_tor_ok_at_least_once.load()) {
-        if (const auto tor_proxy = GetProxy(NET_ONION)) {
-            return tor_proxy;
-        }
+    switch (net) {
+    case NET_ONION:
+    case NET_I2P:
+        return GetProxy(net);
+    case NET_IPV4:
+    case NET_IPV6:
+        return m_outbound_tor_ok_at_least_once.load() ? GetProxy(NET_ONION) : std::nullopt;
+    case NET_UNROUTABLE:
+    case NET_INTERNAL:
+    case NET_CJDNS:
+    case NET_MAX:
+        return std::nullopt;
     }
-    return std::nullopt;
+    return std::nullopt; // unreachable; fail closed for any future Network value
 }
 
 Mutex NetEventsInterface::g_msgproc_mutex;
@@ -3296,8 +3298,7 @@ void CConnman::ThreadPrivateBroadcast()
                                   std::move(conn_max_grant),
                                   /*pszDest=*/nullptr,
                                   ConnectionType::PRIVATE_BROADCAST,
-                                  use_v2transport,
-                                  proxy)) {
+                                  use_v2transport)) {
             const size_t remaining{m_private_broadcast.NumToOpenSub(1)};
             LogDebug(BCLog::PRIVBROADCAST, "Socket connected to %s; remaining connections to open: %d", target_str, remaining);
         } else {

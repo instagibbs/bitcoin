@@ -1176,7 +1176,6 @@ public:
      * @param[in] pszDest Address to resolve and connect to.
      * @param[in] conn_type Type of the connection to open, must not be `ConnectionType::INBOUND`.
      * @param[in] use_v2transport Use P2P encryption, (aka V2 transport, BIP324).
-     * @param[in] proxy_override Optional proxy to use and override normal proxy selection.
      * @retval true The connection was opened successfully.
      * @retval false The connection attempt failed.
      */
@@ -1185,8 +1184,7 @@ public:
                                CountingSemaphoreGrant<>&& grant_outbound,
                                const char* pszDest,
                                ConnectionType conn_type,
-                               bool use_v2transport,
-                               const std::optional<Proxy>& proxy_override = std::nullopt)
+                               bool use_v2transport)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     /// Group of private broadcast related members.
@@ -1241,14 +1239,14 @@ public:
         /// Wait for the number of needed connections to become greater than 0.
         void NumToOpenWait() const;
 
-    protected:
         /**
-         * Check if private broadcast can be done to IPv4 or IPv6 peers and if so via which proxy.
-         * If private broadcast connections should not be opened to IPv4 or IPv6, then this will
-         * return an empty optional.
+         * Single source of truth for "what proxy should a PRIVATE_BROADCAST
+         * connection to this network use." Every consumer of private-broadcast
+         * routing policy must call through here.
          */
-        std::optional<Proxy> ProxyForIPv4or6() const;
+        std::optional<Proxy> ProxyForBroadcast(Network net) const;
 
+    protected:
         /// Number of `ConnectionType::PRIVATE_BROADCAST` connections to open.
         std::atomic_size_t m_num_to_open{0};
 
@@ -1531,16 +1529,17 @@ private:
      * @param[in] pszDest Address to resolve and connect to.
      * @param[in] fCountFailure Increment the number of connection attempts to this address in Addrman.
      * @param[in] conn_type Type of the connection to open, must not be `ConnectionType::INBOUND`.
+     *                       Drives proxy selection: PRIVATE_BROADCAST to a clearnet IPv4/IPv6
+     *                       destination is forced through the Tor proxy (or refused if Tor is
+     *                       unavailable); all other cases fall back to `GetProxy(network)`.
      * @param[in] use_v2transport Use P2P encryption, (aka V2 transport, BIP324).
-     * @param[in] proxy_override Optional proxy to use and override normal proxy selection.
      * @return Newly created CNode object or nullptr if the connection failed.
      */
     CNode* ConnectNode(CAddress addrConnect,
                        const char* pszDest,
                        bool fCountFailure,
                        ConnectionType conn_type,
-                       bool use_v2transport,
-                       const std::optional<Proxy>& proxy_override)
+                       bool use_v2transport)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optional<CNetAddr> addr, const std::vector<NetWhitelistPermissions>& ranges) const;

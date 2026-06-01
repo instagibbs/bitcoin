@@ -4,7 +4,9 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """
 Ensure that when a v2 private broadcast connection to a clearnet (IPv4 or IPv6)
-address fails, the v1 retry is also made through the Tor proxy.
+address fails, the v1 retry is also made through the Tor proxy and never leaks
+the originator's IP by connecting directly or via the default (non-override)
+proxy.
 
 The test does:
 * Add a bunch of IPv4 and IPv6 addresses to the node's addrman (they will be
@@ -20,6 +22,15 @@ The test does:
   (the listener disconnects right after the transport version is determined).
 * For each clearnet network, expect, via the Tor proxy, both an initial v2
   connection and a subsequent v1 connection, i.e. the v2->v1 downgrade retry.
+* Assert that nothing ever reaches the default (-proxy) SOCKS5 server after
+  setup. The override (Tor) proxy must be used for every private broadcast
+  connection, including the v1 retries; a connection via the default proxy
+  would be an IP leak.
+
+Two distinct SOCKS5 servers are used on purpose: the override (-onion) proxy and
+the default (-proxy) proxy. Private broadcast routes clearnet through the
+override proxy, so observing a connection at the default proxy after setup
+unambiguously means the override was dropped (the bug being guarded against).
 """
 
 import threading
@@ -42,6 +53,9 @@ from test_framework.socks5 import (
 )
 from test_framework.test_framework import (
     BitcoinTestFramework,
+)
+from test_framework.util import (
+    assert_equal,
 )
 from test_framework.wallet import (
     MiniWallet,
@@ -81,6 +95,13 @@ class P2PDetermineV2or1AndClose(P2PConnection):
 
 class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
     def set_test_params(self):
+        # We rely on -maxconnections=0 (set in extra_args) to suppress automatic
+        # outbound connections, so that after setup the only connections to the
+        # proxies are private broadcast ones (and their v1 retries). This is what
+        # makes "nothing reaches the default proxy" a meaningful leak check;
+        # regular outbound connections would otherwise use the default proxy
+        # (GetProxy() for IPv4/IPv6) too. -connect=0 (disable_autoconnect) cannot
+        # be used here because it is incompatible with -privatebroadcast.
         self.disable_autoconnect = False
         self.num_nodes = 1
 
@@ -90,6 +111,8 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
         self.state_lock = threading.Lock()
         # Per clearnet network: the transport versions (1 or 2) seen on connections via the Tor proxy.
         self.clearnet_via_tor_versions = {net: [] for net in CLEARNET_NETWORKS}
+        # Destinations seen at the default (-proxy) proxy after setup. Must stay empty.
+        self.leaked_via_default_proxy = []
 
         def destinations_factory_all_proxy(requested_to_addr, requested_to_port):
             """
@@ -160,6 +183,10 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
                 f"-onion={self.tor_proxy.conf.addr[0]}:{self.tor_proxy.conf.addr[1]}",
                 "-test=addrman",
                 "-v2transport=0",
+                # Suppress automatic outbound connections (and feelers) so that the only
+                # traffic reaching the proxies after setup is private broadcast. Private
+                # broadcast has its own connection limit and is unaffected by this.
+                "-maxconnections=0",
             ],
         ]
 
@@ -167,6 +194,10 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
 
     def setup_network(self):
         self.setup_nodes()
+
+    def assert_no_leak(self):
+        with self.state_lock:
+            assert_equal(self.leaked_via_default_proxy, [])
 
     def run_test(self):
         node0 = self.nodes[0]
@@ -190,10 +221,17 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
             for net in CLEARNET_NETWORKS
             for a in node0.getnodeaddresses(count=0, network=net)))
 
-        # The destinations behind the -proxy= don't actually support v2. When bitcoind runs with -v2transport=1
-        # and tries v2 on them they would print benign "magic byte mismatch" warnings.
-        # Disable those since none of them are needed anymore.
-        self.all_proxy.conf.destinations_factory = None
+        # From now on, no connection should reach the default (-proxy) proxy: private broadcast
+        # must route clearnet through the override (Tor) proxy. Replace its factory with a leak
+        # detector that records (and refuses) any connection it receives.
+        def destinations_factory_leak_detector(requested_to_addr, requested_to_port):
+            requested_to = format_addr_port(requested_to_addr, requested_to_port)
+            with self.state_lock:
+                self.leaked_via_default_proxy.append(requested_to)
+            self.log.error(f"IP leak: the default proxy received a connection to {requested_to}; "
+                           "private broadcast must always use the override (Tor) proxy")
+            return None  # Refuse: close the connection.
+        self.all_proxy.conf.destinations_factory = destinations_factory_leak_detector
 
         self.restart_node(0, extra_args=self.extra_args[0] + ["-v2transport=1"])
 
@@ -208,18 +246,24 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
         tx = wallet.create_self_transfer()
         node0.sendrawtransaction(hexstring=tx["hex"])
 
-        def versions_seen(net):
+        def version_seen_without_leak(net, version):
+            # Re-check for a leak on every poll so that a dropped override (the bug) fails fast
+            # and clearly, rather than only timing out: the buggy v1 retry would hit the default
+            # proxy, which never adds the awaited version here.
+            self.assert_no_leak()
             with self.state_lock:
-                return list(self.clearnet_via_tor_versions[net])
+                return version in self.clearnet_via_tor_versions[net]
 
         # For each clearnet network, expect (via the Tor proxy) both an initial v2 connection and
         # the subsequent v1 downgrade retry.
         for net in CLEARNET_NETWORKS:
             self.log.info(f"Tor proxy: waiting for a v2 {net} connection")
-            self.wait_until(lambda net=net: 2 in versions_seen(net))
+            self.wait_until(lambda net=net: version_seen_without_leak(net, 2))
             self.log.info(f"Tor proxy: got v2 {net}, waiting for the v1 {net} retry")
-            self.wait_until(lambda net=net: 1 in versions_seen(net))
+            self.wait_until(lambda net=net: version_seen_without_leak(net, 1))
             self.log.info(f"Tor proxy: got v2 and v1 for {net}")
+
+        self.assert_no_leak()
 
         self.stop_node(0)
         self.all_proxy.stop()

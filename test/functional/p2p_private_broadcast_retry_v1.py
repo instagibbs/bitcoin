@@ -3,22 +3,26 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """
-Ensure that when v2 private broadcast connection to IPv4 fails the v1 retry
-will also be made through the Tor proxy.
+Ensure that when a v2 private broadcast connection to a clearnet (IPv4 or IPv6)
+address fails, the v1 retry is also made through the Tor proxy.
 
 The test does:
-* Add a bunch of IPv4 addresses to the node's addrman (they will be added without P2P_V2 flag).
-* Get them to report P2P_V2 in their service flags and connect to each one, so that the flags
-  in addrman are updated to contain P2P_V2.
-* Get one successful connection to a Tor peer (.onion) so that bitcoind assumes the configured
-  Tor proxy works and is indeed a proxy to the Tor network. This will make it open private
-  broadcast connections also to IPv4 addresses via that proxy.
+* Add a bunch of IPv4 and IPv6 addresses to the node's addrman (they will be
+  added without the P2P_V2 flag).
+* Get them to report P2P_V2 in their service flags and connect to each one, so
+  that the flags in addrman are updated to contain P2P_V2.
+* Get one successful connection to a Tor peer (.onion) so that bitcoind assumes
+  the configured Tor proxy works and is indeed a proxy to the Tor network. This
+  will make it open private broadcast connections also to IPv4/IPv6 addresses
+  via that proxy.
 * Start some private broadcast connections.
-* Remember the destination IPv4 address of the first connection and get it to fail the v2
-  transport.
-* Wait for a subsequent connection also through the Tor proxy to the same IPv4 and expect
-  it to be v1, i.e. the v2->v1 downgrade retry.
+* Fail the v2 transport of every clearnet connection made via the Tor proxy
+  (the listener disconnects right after the transport version is determined).
+* For each clearnet network, expect, via the Tor proxy, both an initial v2
+  connection and a subsequent v1 connection, i.e. the v2->v1 downgrade retry.
 """
+
+import threading
 
 from test_framework.netutil import (
     format_addr_port
@@ -39,12 +43,23 @@ from test_framework.socks5 import (
 from test_framework.test_framework import (
     BitcoinTestFramework,
 )
-from test_framework.v2_p2p import (
-    EncryptedP2PState,
-)
 from test_framework.wallet import (
     MiniWallet,
 )
+
+# Clearnet networks that private broadcast can reach via the Tor proxy and which
+# we exercise the v2->v1 downgrade retry for.
+CLEARNET_NETWORKS = ["ipv4", "ipv6"]
+
+
+def network_of(addr):
+    """Classify a destination address (as a SOCKS5 DOMAINNAME string) by network."""
+    if addr.endswith(".onion"):
+        return "onion"
+    if ":" in addr:
+        return "ipv6"
+    return "ipv4"
+
 
 class P2PDetermineV2or1AndClose(P2PConnection):
     def __init__(self, on_v2or1_determined):
@@ -69,18 +84,19 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
         self.disable_autoconnect = False
         self.num_nodes = 1
 
-    def ipv4_via_tor_proxy_conn_versions_append(self, v2or1):
-        """
-        Add to the transport versions (v2 or v1) tried towards the first IPv4 which
-        nodes[0] tries to connect to via the Tor proxy.
-        """
-        self.ipv4_via_tor_proxy_conn_versions.append(v2or1)
-
     def setup_nodes(self):
+        # Synchronizes access to the bookkeeping populated from the SOCKS5 server
+        # threads (one thread per redirected connection).
+        self.state_lock = threading.Lock()
+        # Per clearnet network: the transport versions (1 or 2) seen on connections via the Tor proxy.
+        self.clearnet_via_tor_versions = {net: [] for net in CLEARNET_NETWORKS}
+
         def destinations_factory_all_proxy(requested_to_addr, requested_to_port):
             """
-            Instruct the SOCKS5 proxy to redirect all connections to newly created P2PInterface
-            objects that claim support for P2P_V2.
+            Redirect all connections to newly created P2PInterface listeners. These speak only
+            the v1 transport, but advertise the NODE_P2P_V2 service flag in their version message.
+            Connecting to them (over v1) is therefore enough to make the node record the addrman
+            entries as v2-capable, without these listeners having to implement the v2 transport.
             """
             listener = P2PInterface()
             listener.peer_connect_helper(dstaddr="0.0.0.0", dstport=0, net=self.chain, timeout_factor=self.options.timeout_factor)
@@ -99,30 +115,31 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
 
         self.all_proxy = start_socks5_server(destinations_factory_all_proxy)
 
-        self.ipv4_via_tor_proxy_addr_port = None # Remember the first IPv4 address connected to via the Tor proxy.
-        self.ipv4_via_tor_proxy_conn_versions = [] # Transport versions tried on that address.
+        def append_version(net, v2or1):
+            with self.state_lock:
+                self.clearnet_via_tor_versions[net].append(v2or1)
 
         def destinations_factory_tor_proxy(requested_to_addr, requested_to_port):
             """
-            Instruct the SOCKS5 proxy to redirect all connections to newly created P2PInterface,
-            except the first connection to an IPv4 address and all subsequent connections to that
-            address which are redirected to P2PDetermineV2or1AndClose.
+            Redirect every clearnet (IPv4/IPv6) connection to a P2PDetermineV2or1AndClose
+            listener, which records the transport version and immediately disconnects. Because
+            such a connection never completes a private broadcast, the node keeps opening new
+            connections (picking a random reachable network each time) until we have observed
+            the v2->v1 downgrade retry for every clearnet network, rather than stopping after a
+            few successful broadcasts. Onion connections are served by a normal P2PInterface so
+            that the manual connection used to mark the Tor proxy as working can complete.
             """
             requested_to = format_addr_port(requested_to_addr, requested_to_port)
+            net = network_of(requested_to_addr)
 
-            if not requested_to_addr.endswith(".onion") and self.ipv4_via_tor_proxy_addr_port is None: # First IPv4
-                self.ipv4_via_tor_proxy_addr_port = requested_to
-
-            if self.ipv4_via_tor_proxy_addr_port == requested_to:
-                # This is either the first (v2) or the second (the expected v1 retry) connection to requested_to.
-                listener = P2PDetermineV2or1AndClose(self.ipv4_via_tor_proxy_conn_versions_append)
+            if net in CLEARNET_NETWORKS:
+                # This is either an initial (v2) or a downgrade-retry (v1) connection.
+                listener = P2PDetermineV2or1AndClose(lambda v2or1, net=net: append_version(net, v2or1))
                 listener.peer_connect_helper(dstaddr="0.0.0.0", dstport=0, net=self.chain, timeout_factor=self.options.timeout_factor)
             else:
                 listener = P2PInterface()
                 listener.peer_connect_helper(dstaddr="0.0.0.0", dstport=0, net=self.chain, timeout_factor=self.options.timeout_factor)
                 listener.peer_connect_send_version(services=P2P_SERVICES | NODE_P2P_V2)
-                if not requested_to_addr.endswith(".onion"):
-                    listener.v2_state = EncryptedP2PState(initiating=False, net=self.chain)
 
             actual_to_addr, actual_to_port = start_p2p_listener(self.network_thread, listener)
 
@@ -154,15 +171,24 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
     def run_test(self):
         node0 = self.nodes[0]
 
-        self.log.info("Filling node0's addrman with addresses")
-        self.fill_node_addrman(node_index=0, address_types_to_add=[CAddress.NET_IPV4])
+        self.log.info("Filling node0's addrman with IPv4 and IPv6 addresses")
+        self.fill_node_addrman(node_index=0, address_types_to_add=[CAddress.NET_IPV4, CAddress.NET_IPV6])
 
-        self.log.info("Opening manual connections to all IPv4 addresses to add P2P_V2 flag to addrman entries")
-        for a in node0.getnodeaddresses(count=0, network="ipv4"):
-            node0.addnode(node=format_addr_port(a["address"], a["port"]), command="onetry", v2transport=False)
+        # Connect over the v1 transport (v2transport=False): the peers behind the default proxy
+        # only speak v1, but their version message advertises the NODE_P2P_V2 service flag. It is
+        # that advertised flag (independent of the transport actually used here) that addrman
+        # records, and that later makes private broadcast attempt v2 to these peers and then
+        # downgrade to v1 - the behaviour under test.
+        self.log.info("Opening manual connections to all clearnet addresses to add the P2P_V2 flag to addrman entries")
+        for net in CLEARNET_NETWORKS:
+            for a in node0.getnodeaddresses(count=0, network=net):
+                node0.addnode(node=format_addr_port(a["address"], a["port"]), command="onetry", v2transport=False)
 
-        self.log.info("Waiting for all IPv4 addresses to get P2P_V2 as a result of peers advertising support")
-        self.wait_until(lambda: all(a["services"] & NODE_P2P_V2 != 0 for a in node0.getnodeaddresses(count=0, network="ipv4")))
+        self.log.info("Waiting for all clearnet addresses to get P2P_V2 as a result of peers advertising support")
+        self.wait_until(lambda: all(
+            a["services"] & NODE_P2P_V2 != 0
+            for net in CLEARNET_NETWORKS
+            for a in node0.getnodeaddresses(count=0, network=net)))
 
         # The destinations behind the -proxy= don't actually support v2. When bitcoind runs with -v2transport=1
         # and tries v2 on them they would print benign "magic byte mismatch" warnings.
@@ -171,7 +197,7 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
 
         self.restart_node(0, extra_args=self.extra_args[0] + ["-v2transport=1"])
 
-        self.log.info("Opening a connection to a Tor addresses, so bitcoind considers -onion= is a real Tor proxy")
+        self.log.info("Opening a connection to a Tor address, so bitcoind considers -onion= a real Tor proxy")
         node0.addnode(node="testonlyad777777777777777777777777777777777777777775b6qd.onion:1234", command="onetry", v2transport=False)
 
         self.log.info("Waiting for at least one Tor connection")
@@ -182,13 +208,18 @@ class P2PPrivateBroadcastRetryV1(BitcoinTestFramework):
         tx = wallet.create_self_transfer()
         node0.sendrawtransaction(hexstring=tx["hex"])
 
-        self.log.info("Tor proxy: waiting for connection to an IPv4 address")
-        self.wait_until(lambda: self.ipv4_via_tor_proxy_addr_port is not None)
-        self.log.info(f"Tor proxy: got {self.ipv4_via_tor_proxy_addr_port}, waiting for v2")
-        self.wait_until(lambda: 2 in self.ipv4_via_tor_proxy_conn_versions)
-        self.log.info(f"Tor proxy: got {self.ipv4_via_tor_proxy_addr_port} v2, waiting for v1")
-        self.wait_until(lambda: 1 in self.ipv4_via_tor_proxy_conn_versions)
-        self.log.info(f"Tor proxy: got {self.ipv4_via_tor_proxy_addr_port} v2, v1")
+        def versions_seen(net):
+            with self.state_lock:
+                return list(self.clearnet_via_tor_versions[net])
+
+        # For each clearnet network, expect (via the Tor proxy) both an initial v2 connection and
+        # the subsequent v1 downgrade retry.
+        for net in CLEARNET_NETWORKS:
+            self.log.info(f"Tor proxy: waiting for a v2 {net} connection")
+            self.wait_until(lambda net=net: 2 in versions_seen(net))
+            self.log.info(f"Tor proxy: got v2 {net}, waiting for the v1 {net} retry")
+            self.wait_until(lambda net=net: 1 in versions_seen(net))
+            self.log.info(f"Tor proxy: got v2 and v1 for {net}")
 
         self.stop_node(0)
         self.all_proxy.stop()

@@ -2316,31 +2316,30 @@ std::vector<Wtxid> InvToSendBucket::TakeForProcessing(CTxMemPool& mempool)
     std::vector<Wtxid> best;
 
     if (n_to_take > 0 && !backlog.empty()) {
-        // sort an extra element (when possible) so we always include a duplicate of any of the
-        // best n_to_take elements if there is one
-        auto itervec = mempool.SortMiningScoreWithTopology(backlog, n_to_take + 1);
+        auto itervec = mempool.SortMiningScoreWithTopology(backlog, n_to_take);
         backlog.clear();
         if (n_to_take >= itervec.size()) {
-            backlog.swap(best); // maybe avoid reallocating
+            // We'll take everything, so backlog ends up empty: hand its now-cleared
+            // buffer to best to maybe avoid reallocating.
+            backlog.swap(best);
             best.reserve(itervec.size());
         } else {
             best.reserve(n_to_take);
         }
 
-        // process things at the end
-        size_t i = itervec.size();
-        while (i > 0 && n_to_take > 0) {
-            --i;
-            --n_to_take;
-            if (i > 0 && itervec[i] == itervec[i - 1]) continue; // skip duplicates
+        // Take the highest-priority entries until we hit the
+        // count limit or a bucket runs out of room.
+        size_t i = 0;
+        for (; i < itervec.size() && n_to_take > 0; ++i, --n_to_take) {
             best.push_back(itervec[i]->GetTx().GetWitnessHash());
             if (!decrement(itervec[i]->GetTx().ComputeTotalSize())) {
+                ++i; // we took this one; don't re-queue it
                 break; // one of the buckets is empty (should be size)
             }
         }
         // save the remaining section as-is (probably mostly unsorted)
-        for (size_t j = 0; j < i; ++j) {
-            backlog.push_back(itervec[j]->GetTx().GetWitnessHash());
+        for (; i < itervec.size(); ++i) {
+            backlog.push_back(itervec[i]->GetTx().GetWitnessHash());
         }
         if (backlog.empty()) {
             std::vector<Wtxid>{}.swap(backlog); // free memory associated with vec
@@ -6176,7 +6175,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 // Determine transactions to relay
                 if (fSendTrickle) {
                     // Topologically and fee-rate sort the inventory we send for privacy and priority reasons.
-                    // (sorted from lowest priority to highest, skipping low fee)
+                    // (announced highest priority first, skipping low fee)
                     const CFeeRate filterrate{tx_relay->m_fee_filter_received.load()};
                     auto inv_tx = [&]() EXCLUSIVE_LOCKS_REQUIRED(tx_relay->m_tx_inventory_mutex) {
                         std::vector<CTransactionRef> res;
@@ -6184,13 +6183,12 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         LOCK(m_mempool.cs);
                         auto itervec = m_mempool.SortMiningScoreWithTopology(vec, vec.size());
                         res.reserve(itervec.size());
-                        for (size_t i = 0; i < itervec.size(); ++i) {
-                            if (i > 0 && itervec[i] == itervec[i - 1]) continue; // skip duplicates
+                        for (const auto& it : itervec) {
                             // Peer told you to not send transactions at that feerate? Don't bother sending it.
-                            if (itervec[i]->GetFee() < filterrate.GetFee(itervec[i]->GetTxSize())) {
+                            if (it->GetFee() < filterrate.GetFee(it->GetTxSize())) {
                                 continue;
                             }
-                            res.push_back(itervec[i]->GetSharedTx());
+                            res.push_back(it->GetSharedTx());
                         }
                         // Ensure we'll respond to GETDATA requests for anything we're about to announce
                         tx_relay->m_last_inv_sequence = m_mempool.GetSequence();
@@ -6200,11 +6198,8 @@ bool PeerManagerImpl::SendMessages(CNode& node)
 
                     LOCK(tx_relay->m_bloom_filter_mutex);
                     vInv.reserve(std::min<size_t>(MAX_INV_SZ, vInv.size() + inv_tx.size()));
-                    while (!inv_tx.empty()) {
-                        // Fetch the top element
-                        CTransactionRef tx = std::move(inv_tx.back());
-                        inv_tx.pop_back();
-
+                    // inv_tx is ordered highest-priority first; announce in that order.
+                    for (const auto& tx : inv_tx) {
                         // `TxRelay::m_tx_inventory_known_filter` contains either txids or wtxids
                         // depending on whether our peer supports wtxid-relay. Therefore, first
                         // construct the inv and then use its hash for the filter check.

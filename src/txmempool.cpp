@@ -554,26 +554,34 @@ void CTxMemPool::check(const CCoinsViewCache& active_coins_tip, int64_t spendhei
 
 std::vector<CTxMemPool::txiter> CTxMemPool::SortMiningScoreWithTopology(std::span<const Wtxid> wtxids, size_t n_to_sort) const
 {
-    auto cmp = [&](const auto& a, const auto& b) EXCLUSIVE_LOCKS_REQUIRED(cs) noexcept { return m_txgraph->CompareMainOrder(*a, *b) < 0; };
-
+    // Resolve each wtxid to its mempool entry, skipping any that aren't found. The
+    // result may therefore be shorter than `wtxids`.
     std::vector<txiter> res;
-
-    n_to_sort = std::min(wtxids.size(), n_to_sort);
-    if (n_to_sort > 0) {
-        res.reserve(wtxids.size());
-        for (auto& wtxid : wtxids) {
-            if (auto i{GetIter(wtxid)}; i.has_value()) {
-                res.push_back(i.value());
-            }
-        }
-
-        if (n_to_sort >= res.size()) {
-            // use regular sort when taking everything
-            std::sort(res.rbegin(), res.rend(), cmp);
-        } else {
-            std::partial_sort(res.rbegin(), res.rbegin() + n_to_sort, res.rend(), cmp);
+    res.reserve(wtxids.size());
+    for (const auto& wtxid : wtxids) {
+        if (auto i{GetIter(wtxid)}; i.has_value()) {
+            res.push_back(i.value());
         }
     }
+
+    // CompareMainOrder(a, b) < 0 means `a` has higher mining priority than `b`
+    // (it comes earlier in the mining order).
+    auto higher_priority = [&](const auto& a, const auto& b) EXCLUSIVE_LOCKS_REQUIRED(cs) noexcept {
+        return m_txgraph->CompareMainOrder(*a, *b) < 0;
+    };
+
+    // Callers only need the best entries ordered, so fully sort just the `n_to_sort`
+    // highest-priority ones into the front; anything after them is left unordered.
+    n_to_sort = std::min(n_to_sort, res.size());
+    if (n_to_sort == res.size()) {
+        // Ordering everything, so a full sort is no more work.
+        std::sort(res.begin(), res.end(), higher_priority);
+    } else {
+        std::partial_sort(res.begin(), res.begin() + n_to_sort, res.end(), higher_priority);
+    }
+
+    const auto sorted_end{res.begin() + n_to_sort};
+    res.erase(std::unique(res.begin(), sorted_end), sorted_end);
     return res;
 }
 

@@ -335,10 +335,10 @@ public:
 
     /** Look up wtxids in the mempool and (partially) sort by mining score.
      *
-     * Wtxids not found in the mempool are silently dropped. The returned
+     * Wtxids not found in the mempool and duplicates are silently dropped. The returned
      * vector is arranged so that the best @p n_to_sort entries (by CompareMainOrder)
-     * appear at the end, in sorted order from lowest to highest priority.
-     * Entries before that suffix are in unspecified order.
+     * appear at the front, in sorted order from highest to lowest priority.
+     * Entries after that prefix are in unspecified order.
      *
      * Note that the returned `txiter` values may become invalidated once
      * mempool.cs is released.

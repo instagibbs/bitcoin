@@ -158,4 +158,58 @@ BOOST_AUTO_TEST_CASE(stale_unpicked_tx)
     BOOST_CHECK_EQUAL(stale_state[0], tx);
 }
 
+BOOST_AUTO_TEST_CASE(prune_on_disconnect)
+{
+    FakeNodeClock clock{};
+
+    PrivateBroadcast pb;
+    in_addr ipv4Addr;
+    ipv4Addr.s_addr = 0xa0b0c001;
+    const NodeId nodeA{1};
+    const NodeId nodeB{2};
+    const CService addrA{ipv4Addr, 1111};
+    const CService addrB{ipv4Addr, 2222};
+
+    const auto tx{MakeDummyTx(/*id=*/1, /*num_witness=*/0)};
+    BOOST_REQUIRE(pb.Add(tx));
+
+    // Send the transaction to two recipients; nodeA confirms reception.
+    BOOST_CHECK_EQUAL(pb.PickTxForSend(nodeA, addrA).value(), tx);
+    BOOST_CHECK_EQUAL(pb.PickTxForSend(nodeB, addrB).value(), tx);
+    pb.NodeConfirmedReception(nodeA);
+    BOOST_CHECK(pb.DidNodeConfirmReception(nodeA));
+
+    // Both recipients are reported while connected.
+    {
+        const auto infos{pb.GetBroadcastInfo()};
+        BOOST_REQUIRE_EQUAL(infos.size(), 1);
+        BOOST_CHECK_EQUAL(infos[0].peers.size(), 2);
+    }
+
+    // nodeA disconnects: its transient per-recipient record is pruned.
+    pb.NodeDisconnected(nodeA);
+
+    // Per-node lookups for nodeA no longer resolve, but nodeB's remain.
+    BOOST_CHECK(!pb.GetTxForNode(nodeA).has_value());
+    BOOST_CHECK(!pb.DidNodeConfirmReception(nodeA));
+    BOOST_CHECK_EQUAL(pb.GetTxForNode(nodeB).value(), tx);
+
+    // GetBroadcastInfo now reports only the still-connected recipient.
+    {
+        const auto infos{pb.GetBroadcastInfo()};
+        BOOST_REQUIRE_EQUAL(infos.size(), 1);
+        BOOST_CHECK_EQUAL(infos[0].peers.size(), 1);
+    }
+
+    // The cumulative confirmation from nodeA SURVIVED the prune: the transaction
+    // is treated as confirmed for staleness (the 1min post-confirm window, not
+    // the 5min initial one), so it is stale here only because num_confirmed > 0.
+    clock += 2min; // > STALE_DURATION (1min), < INITIAL_STALE_DURATION (5min)
+    BOOST_CHECK_EQUAL(pb.GetStale().size(), 1);
+
+    // ...and Remove() still reports nodeA's confirmation count.
+    BOOST_CHECK_EQUAL(pb.Remove(tx).value(), 1);
+    BOOST_CHECK(!pb.GetTxForNode(nodeB).has_value()); // index cleaned on Remove
+}
+
 BOOST_AUTO_TEST_SUITE_END()

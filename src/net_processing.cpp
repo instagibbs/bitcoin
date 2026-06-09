@@ -1743,11 +1743,15 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         LOCK(m_headers_presync_mutex);
         m_headers_presync_stats.erase(nodeid);
     }
-    if (node.IsPrivateBroadcastConn() &&
-        !m_tx_for_private_broadcast.DidNodeConfirmReception(nodeid) &&
-        m_tx_for_private_broadcast.HavePendingTransactions()) {
+    if (node.IsPrivateBroadcastConn()) {
+        if (!m_tx_for_private_broadcast.DidNodeConfirmReception(nodeid) &&
+            m_tx_for_private_broadcast.HavePendingTransactions()) {
 
-        m_connman.m_private_broadcast.NumToOpenAdd(1);
+            m_connman.m_private_broadcast.NumToOpenAdd(1);
+        }
+        // Forget this peer's transient send record now that it is gone. Must
+        // run after the DidNodeConfirmReception() check above, which reads it.
+        m_tx_for_private_broadcast.NodeDisconnected(nodeid);
     }
     LogDebug(BCLog::NET, "Cleared nodestate for peer=%d\n", nodeid);
 }

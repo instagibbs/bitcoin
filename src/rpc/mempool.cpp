@@ -157,7 +157,9 @@ static RPCMethod getprivatebroadcastinfo()
                                 {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
                                 {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
                                 {RPCResult::Type::NUM_TIME, "time_added", "The time this transaction was added to the private broadcast queue (seconds since epoch)"},
-                                {RPCResult::Type::ARR, "peers", "Per-peer send and acknowledgment information for this transaction",
+                                {RPCResult::Type::NUM, "num_broadcasts", "Total number of times this transaction was sent to a peer via private broadcast, including peers that have since disconnected"},
+                                {RPCResult::Type::NUM, "num_acks", "Total number of peers that acknowledged reception of this transaction, including peers that have since disconnected"},
+                                {RPCResult::Type::ARR, "peers", "Per-peer send and acknowledgment information for the recipients that are still connected",
                                     {
                                         {RPCResult::Type::OBJ, "", "",
                                             {
@@ -190,6 +192,8 @@ static RPCMethod getprivatebroadcastinfo()
                 o.pushKV("wtxid", tx_info.tx->GetWitnessHash().ToString());
                 o.pushKV("hex", EncodeHexTx(*tx_info.tx));
                 o.pushKV("time_added", TicksSinceEpoch<std::chrono::seconds>(tx_info.time_added));
+                o.pushKV("num_broadcasts", static_cast<uint64_t>(tx_info.num_broadcasts));
+                o.pushKV("num_acks", static_cast<uint64_t>(tx_info.num_acks));
                 UniValue peers(UniValue::VARR);
                 for (const auto& peer : tx_info.peers) {
                     UniValue p(UniValue::VOBJ);

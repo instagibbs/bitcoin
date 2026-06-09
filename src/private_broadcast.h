@@ -47,6 +47,16 @@ public:
     struct TxBroadcastInfo {
         CTransactionRef tx;
         NodeClock::time_point time_added;
+        //! Total number of times this transaction was picked for sending,
+        //! including to peers that have since disconnected. Cumulative over the
+        //! transaction's lifetime (not just the currently-connected `peers`).
+        size_t num_broadcasts;
+        //! Total number of recipients that acknowledged reception (by PONG),
+        //! including those that have since disconnected.
+        size_t num_acks;
+        //! Per-peer info for the recipients that are still connected. Records
+        //! for disconnected peers are pruned, so this is a subset of the
+        //! `num_broadcasts` send attempts.
         std::vector<PeerSendInfo> peers;
     };
 
@@ -106,6 +116,17 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**
+     * Forget the transient per-recipient send record for a disconnected peer.
+     * The transaction's cumulative sending stats (used for prioritization and
+     * staleness) are unaffected. Call this when a private-broadcast peer
+     * disconnects, so per-recipient state does not accumulate for the lifetime
+     * of a transaction.
+     * @param[in] nodeid The disconnected node.
+     */
+    void NodeDisconnected(const NodeId& nodeid)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
      * Check if there are transactions that need to be broadcast.
      */
     bool HavePendingTransactions()
@@ -124,21 +145,11 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
 private:
-    /// Status of a transaction sent to a given node.
-    struct SendStatus {
-        /// Node to which the transaction will be sent (or was sent).
-        const NodeId nodeid;
-        /// Address of the node.
-        const CService address;
-        /// When was the transaction picked for sending to the node.
-        const NodeClock::time_point picked;
-        /// When was the transaction reception confirmed by the node (by PONG).
-        std::optional<NodeClock::time_point> confirmed;
-
-        SendStatus(const NodeId& nodeid, const CService& address, const NodeClock::time_point& picked) : nodeid{nodeid}, address{address}, picked{picked} {}
-    };
-
-    /// Cumulative stats from all the send attempts for a transaction. Used to prioritize transactions.
+    /// Cumulative stats from all the send attempts for a transaction. Used to
+    /// prioritize transactions and to decide staleness. Maintained
+    /// incrementally (updated by PickTxForSend()/NodeConfirmedReception()) so
+    /// it persists for the transaction's whole lifetime, independent of which
+    /// recipients are still connected.
     struct Priority {
         size_t num_picked{0}; ///< Number of times the transaction was picked for sending.
         NodeClock::time_point last_picked{}; ///< The most recent time when the transaction was picked for sending.
@@ -155,10 +166,20 @@ private:
         }
     };
 
-    /// A pair of a transaction and a sent status for a given node. Convenience return type of GetSendStatusByNode().
-    struct TxAndSendStatusForNode {
-        const CTransactionRef& tx;
-        SendStatus& send_status;
+    /// Per-recipient send record for a transaction. Transient: an entry exists
+    /// only while the recipient peer is connected, and is pruned when it
+    /// disconnects (NodeDisconnected()). Keyed by NodeId in TxState::in_flight.
+    struct InFlight {
+        CService address; ///< Address of the recipient node.
+        NodeClock::time_point picked; ///< When the transaction was picked for sending to the node.
+        std::optional<NodeClock::time_point> confirmed; ///< When the node confirmed reception (by PONG), if it did.
+    };
+
+    /// A transaction's persistent priority together with the (mutable) send
+    /// record of one recipient. Convenience return type of GetInFlightByNode().
+    struct PriorityAndSend {
+        Priority& priority;
+        InFlight& send;
     };
 
     // No need for salted hasher because we are going to store just a bunch of locally originating transactions.
@@ -178,25 +199,28 @@ private:
     };
 
     /**
-     * Derive the sending priority of a transaction.
-     * @param[in] sent_to List of nodes that the transaction has been sent to.
+     * Find the priority and per-recipient send record for a given node.
+     * @return The transaction's Priority together with this node's send record,
+     * or nullopt if we are not currently tracking a send to the given node.
      */
-    static Priority DerivePriority(const std::vector<SendStatus>& sent_to);
-
-    /**
-     * Find which transaction we sent to a given node (marked by PickTxForSend()).
-     * @return That transaction together with the send status or nullopt if we did not
-     * send any transaction to the given node.
-     */
-    std::optional<TxAndSendStatusForNode> GetSendStatusByNode(const NodeId& nodeid)
+    std::optional<PriorityAndSend> GetInFlightByNode(const NodeId& nodeid)
         EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
-    struct TxSendStatus {
+
+    struct TxState {
         const NodeClock::time_point time_added{NodeClock::now()};
-        std::vector<SendStatus> send_statuses;
+        Priority priority;
+        /// Currently-connected recipients we have sent (or are sending) this
+        /// transaction to, keyed by NodeId. Pruned on disconnect.
+        std::unordered_map<NodeId, InFlight> in_flight;
     };
     mutable Mutex m_mutex;
-    std::unordered_map<CTransactionRef, TxSendStatus, CTransactionRefHash, CTransactionRefComp>
+    std::unordered_map<CTransactionRef, TxState, CTransactionRefHash, CTransactionRefComp>
         m_transactions GUARDED_BY(m_mutex);
+    /// Reverse index from a recipient NodeId to the transaction currently sent
+    /// to it. An entry exists iff that NodeId is present in the corresponding
+    /// transaction's TxState::in_flight. Kept in sync by PickTxForSend(),
+    /// NodeDisconnected() and Remove() to give O(1) per-node lookups.
+    std::unordered_map<NodeId, CTransactionRef> m_node_to_tx GUARDED_BY(m_mutex);
 };
 
 #endif // BITCOIN_PRIVATE_BROADCAST_H

@@ -213,9 +213,11 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_equal(len(pending), 1)
         assert_equal(pending[0]["hex"].lower(), tx["hex"].lower())
         peers = pending[0]["peers"]
-        assert len(peers) >= NUM_PRIVATE_BROADCAST_PER_TX
+        # num_broadcasts/num_acks are cumulative and survive peer disconnects,
+        # whereas `peers` only lists the recipients that are still connected.
+        assert_greater_than_or_equal(pending[0]["num_broadcasts"], NUM_PRIVATE_BROADCAST_PER_TX)
         assert all("address" in p and "sent" in p for p in peers)
-        assert_greater_than_or_equal(sum(1 for p in peers if "received" in p), broadcasts_to_expect)
+        assert_greater_than_or_equal(pending[0]["num_acks"], broadcasts_to_expect)
 
     def run_test(self):
         tx_originator = self.nodes[0]

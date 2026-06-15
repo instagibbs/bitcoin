@@ -100,6 +100,12 @@ void TxDownloadManagerImpl::BlockConnected(const std::shared_ptr<const CBlock>& 
     m_orphanage->EraseForBlock(*pblock);
 
     for (const auto& ptx : pblock->vtx) {
+        // A confirmed tx is a now-available parent: re-arm reconsideration of any orphan
+        // children, just as MempoolAcceptedTx() does when a parent enters the mempool.
+        // Otherwise an orphan whose missing ancestor was mined (rather than relayed into
+        // our mempool) is never reconsidered, and the mempool diverges.
+        m_orphanage->AddChildrenToWorkSet(*ptx, m_opts.m_rng);
+
         RecentConfirmedTransactionsFilter().insert(ptx->GetHash().ToUint256());
         if (ptx->HasWitness()) {
             RecentConfirmedTransactionsFilter().insert(ptx->GetWitnessHash().ToUint256());

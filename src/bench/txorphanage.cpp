@@ -267,7 +267,75 @@ static void OrphanageEraseForPeer(benchmark::Bench& bench)
     OrphanageEraseAll(bench, /*block_or_disconnect=*/false);
 }
 
+// Worst case for the work added to BlockConnected: AddChildrenToWorkSet is run for every confirmed
+// transaction, iterating its OUTPUTS (one m_outpoint_to_orphan_wtxids lookup each). This is the
+// counterpart to OrphanageEraseForBlock, which iterates block INPUTS. Because a block can hold far
+// more minimal outputs (~9 bytes each) than minimal inputs (~50 bytes each), the output side is the
+// larger-count side: this constructs the maximally adversarial output-heavy block against a full
+// orphanage where every orphan is a child of the block.
+static void OrphanageBlockConnectImpl(benchmark::Bench& bench, bool erase_first)
+{
+    FastRandomContext det_rand{true};
+    const auto orphanage{node::MakeTxOrphanage(/*max_global_latency_score=*/node::DEFAULT_MAX_ORPHANAGE_LATENCY_SCORE, /*reserved_peer_usage=*/node::DEFAULT_RESERVED_ORPHAN_WEIGHT_PER_PEER)};
+
+    // A single block transaction with as many minimal (empty-script) outputs as fit in a block.
+    static constexpr int64_t APPROX_WEIGHT_PER_OUTPUT{36}; // 9 serialized bytes * 4
+    static constexpr unsigned int NUM_BLOCK_OUTPUTS{(MAX_BLOCK_WEIGHT - 4000) / APPROX_WEIGHT_PER_OUTPUT};
+    CMutableTransaction mtx;
+    mtx.vin.emplace_back(Txid::FromUint256(det_rand.rand256()), 0);
+    mtx.vout.assign(NUM_BLOCK_OUTPUTS, CTxOut(CAmount{0}, CScript{}));
+    const auto block_tx{MakeTransactionRef(mtx)};
+    assert(GetTransactionWeight(*block_tx) <= static_cast<int64_t>(MAX_BLOCK_WEIGHT));
+    CBlock block;
+    block.vtx.push_back(block_tx);
+    const Txid block_txid{block_tx->GetHash()};
+
+    // Fill the orphanage to capacity with children of this block tx: 3000 orphans of 9 inputs each
+    // (latency score 1 -> total == MaxGlobalLatencyScore), each spending distinct block outputs so
+    // that every one is found and marked reconsiderable.
+    static constexpr unsigned int INPUTS_PER_TX{9};
+    static constexpr unsigned int NUM_PEERS{125};
+    static constexpr unsigned int NUM_TXNS_PER_PEER{node::DEFAULT_MAX_ORPHANAGE_LATENCY_SCORE / NUM_PEERS};
+    static_assert(NUM_PEERS * NUM_TXNS_PER_PEER * INPUTS_PER_TX <= NUM_BLOCK_OUTPUTS);
+
+    unsigned int next_output{0};
+    for (NodeId peer{0}; peer < static_cast<NodeId>(NUM_PEERS); ++peer) {
+        for (unsigned int txnum{0}; txnum < NUM_TXNS_PER_PEER; ++txnum) {
+            CMutableTransaction otx;
+            for (unsigned int k{0}; k < INPUTS_PER_TX; ++k) {
+                otx.vin.emplace_back(COutPoint(block_txid, next_output++));
+            }
+            otx.vout.resize(1);
+            assert(orphanage->AddTx(MakeTransactionRef(otx), peer));
+        }
+    }
+
+    // If these fail, the orphanage would have been trimmed already and the benchmark is not realistic.
+    assert(orphanage->CountAnnouncements() == NUM_PEERS * NUM_TXNS_PER_PEER);
+    assert(orphanage->TotalLatencyScore() <= orphanage->MaxGlobalLatencyScore());
+    assert(orphanage->TotalOrphanUsage() <= orphanage->MaxGlobalUsage());
+
+    bench.epochs(1).epochIterations(1).run([&]() NO_THREAD_SAFETY_ANALYSIS {
+        // erase_first measures the full BlockConnected orphanage sequence (EraseForBlock then the new
+        // AddChildrenToWorkSet pass); otherwise just the added pass. On this output-heavy block the
+        // children do not conflict, so EraseForBlock only scans the (single) input and erases nothing.
+        if (erase_first) orphanage->EraseForBlock(block);
+        // The work added to BlockConnected: re-arm orphan children of every confirmed transaction.
+        for (const auto& ptx : block.vtx) {
+            orphanage->AddChildrenToWorkSet(*ptx, det_rand);
+        }
+        // Every orphan should now be reconsiderable.
+        assert(orphanage->HaveTxToReconsider(0));
+    });
+}
+// Just the added pass.
+static void OrphanageAddChildrenForBlock(benchmark::Bench& bench) { OrphanageBlockConnectImpl(bench, /*erase_first=*/false); }
+// The full new BlockConnected orphanage sequence (EraseForBlock + the added pass) on one worst-case block.
+static void OrphanageBlockConnect(benchmark::Bench& bench) { OrphanageBlockConnectImpl(bench, /*erase_first=*/true); }
+
 BENCHMARK(OrphanageSinglePeerEviction);
 BENCHMARK(OrphanageMultiPeerEviction);
 BENCHMARK(OrphanageEraseForBlock);
 BENCHMARK(OrphanageEraseForPeer);
+BENCHMARK(OrphanageAddChildrenForBlock);
+BENCHMARK(OrphanageBlockConnect);

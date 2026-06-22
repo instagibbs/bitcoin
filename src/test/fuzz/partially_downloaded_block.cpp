@@ -89,6 +89,19 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     auto init_status{pdb.InitData(cmpctblock, extra_txn)};
 
+    // Optionally run the lazy orphan pass with a fuzzer-chosen subset of the
+    // block's transactions as "orphans". Only valid after a successful InitData.
+    if (init_status == READ_STATUS_OK && fuzzed_data_provider.ConsumeBool()) {
+        std::vector<CTransactionRef> orphan_txn;
+        for (size_t i = 1; i < block->vtx.size(); ++i) {
+            if (fuzzed_data_provider.ConsumeBool()) {
+                orphan_txn.push_back(block->vtx[i]);
+                available.insert(i);
+            }
+        }
+        pdb.TryFillFromExtra(cmpctblock, orphan_txn);
+    }
+
     std::vector<CTransactionRef> missing;
     // Whether we skipped a transaction that should be included in `missing`.
     // FillBlock should never return READ_STATUS_OK if that is the case.

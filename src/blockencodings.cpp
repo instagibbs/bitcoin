@@ -187,6 +187,19 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     return READ_STATUS_OK;
 }
 
+ReadStatus PartiallyDownloadedBlock::TryFillFromExtra(const CBlockHeaderAndShortTxIDs& cmpctblock,
+                                                      std::span<const CTransactionRef> extra)
+{
+    if (m_state != State::INITIALIZED) return READ_STATUS_INVALID;
+
+    for (const auto& tx : extra) {
+        // Stop as soon as every short-ID slot is resolved.
+        if (mempool_count == m_shorttxids.size()) break;
+        MatchExtraTransaction(cmpctblock, tx, orphan_count);
+    }
+    return READ_STATUS_OK;
+}
+
 bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
 {
     if (m_state != State::INITIALIZED) return false;
@@ -235,7 +248,7 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
         const uint256 hash{block.GetHash()};
         uint32_t tx_missing_size{0};
         for (const auto& tx : vtx_missing) tx_missing_size += tx->ComputeTotalSize();
-        LogDebug(BCLog::CMPCTBLOCK, "Successfully reconstructed block %s with %u txn prefilled, %u txn from mempool (incl at least %u from extra pool) and %u txn (%u bytes) requested\n", hash.ToString(), prefilled_count, mempool_count, extra_count, vtx_missing.size(), tx_missing_size);
+        LogDebug(BCLog::CMPCTBLOCK, "Successfully reconstructed block %s with %u txn prefilled, %u txn from mempool (incl at least %u from extra pool and %u from orphanage) and %u txn (%u bytes) requested\n", hash.ToString(), prefilled_count, mempool_count, extra_count, orphan_count, vtx_missing.size(), tx_missing_size);
         if (vtx_missing.size() < 5) {
             for (const auto& tx : vtx_missing) {
                 LogDebug(BCLog::CMPCTBLOCK, "Reconstructed block %s required tx %s\n", hash.ToString(), tx->GetHash().ToString());

@@ -424,4 +424,96 @@ BOOST_AUTO_TEST_CASE(TransactionsRequestDeserializationOverflowTest) {
     }
 }
 
+BOOST_AUTO_TEST_CASE(OrphanFillTest)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    auto rand_ctx(FastRandomContext(uint256{42}));
+    CBlock block(BuildBlockTestCase(rand_ctx));
+
+    LOCK2(cs_main, pool.cs);
+
+    CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64()};
+    DataStream stream{};
+    stream << shortIDs;
+    CBlockHeaderAndShortTxIDs shortIDs2;
+    stream >> shortIDs2;
+
+    // Empty mempool and empty extra_txn: only the prefilled coinbase is available.
+    PartiallyDownloadedBlock pdb(&pool);
+    BOOST_CHECK(pdb.InitData(shortIDs2, empty_extra_txn) == READ_STATUS_OK);
+    BOOST_CHECK( pdb.IsTxAvailable(0));
+    BOOST_CHECK(!pdb.IsTxAvailable(1));
+    BOOST_CHECK(!pdb.IsTxAvailable(2));
+
+    // Seed the still-missing slots from the "orphanage".
+    std::vector<CTransactionRef> orphans{block.vtx[1], block.vtx[2]};
+    BOOST_CHECK(pdb.TryFillFromExtra(shortIDs2, orphans) == READ_STATUS_OK);
+    BOOST_CHECK(pdb.IsTxAvailable(1));
+    BOOST_CHECK(pdb.IsTxAvailable(2));
+
+    CBlock block2;
+    BOOST_CHECK(pdb.FillBlock(block2, {}, /*segwit_active=*/true) == READ_STATUS_OK);
+    BOOST_CHECK_EQUAL(block.GetHash().ToString(), block2.GetHash().ToString());
+}
+
+BOOST_AUTO_TEST_CASE(TryFillFromExtraStateGuards)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    auto rand_ctx(FastRandomContext(uint256{42}));
+    CBlock block(BuildBlockTestCase(rand_ctx));
+
+    LOCK2(cs_main, pool.cs);
+
+    CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64()};
+    DataStream stream{};
+    stream << shortIDs;
+    CBlockHeaderAndShortTxIDs shortIDs2;
+    stream >> shortIDs2;
+
+    std::vector<CTransactionRef> orphans{block.vtx[1], block.vtx[2]};
+
+    PartiallyDownloadedBlock pdb(&pool);
+    // EMPTY: rejected before InitData.
+    BOOST_CHECK(pdb.TryFillFromExtra(shortIDs2, orphans) == READ_STATUS_INVALID);
+
+    BOOST_CHECK(pdb.InitData(shortIDs2, empty_extra_txn) == READ_STATUS_OK);
+    BOOST_CHECK(pdb.TryFillFromExtra(shortIDs2, orphans) == READ_STATUS_OK);
+
+    CBlock out;
+    BOOST_CHECK(pdb.FillBlock(out, {}, /*segwit_active=*/true) == READ_STATUS_OK);
+
+    // FILLED: rejected after FillBlock; re-init also rejected.
+    BOOST_CHECK(pdb.TryFillFromExtra(shortIDs2, orphans) == READ_STATUS_INVALID);
+    BOOST_CHECK(pdb.InitData(shortIDs2, empty_extra_txn) == READ_STATUS_INVALID);
+}
+
+BOOST_AUTO_TEST_CASE(DuplicateOrphanNoop)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    auto rand_ctx(FastRandomContext(uint256{42}));
+    CBlock block(BuildBlockTestCase(rand_ctx));
+
+    LOCK2(cs_main, pool.cs);
+
+    CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64()};
+    DataStream stream{};
+    stream << shortIDs;
+    CBlockHeaderAndShortTxIDs shortIDs2;
+    stream >> shortIDs2;
+
+    PartiallyDownloadedBlock pdb(&pool);
+    BOOST_CHECK(pdb.InitData(shortIDs2, empty_extra_txn) == READ_STATUS_OK);
+
+    // Filling the same orphan twice must not blacklist the slot (same wtxid).
+    std::vector<CTransactionRef> orphans{block.vtx[1], block.vtx[2]};
+    BOOST_CHECK(pdb.TryFillFromExtra(shortIDs2, orphans) == READ_STATUS_OK);
+    BOOST_CHECK(pdb.TryFillFromExtra(shortIDs2, orphans) == READ_STATUS_OK);
+    BOOST_CHECK(pdb.IsTxAvailable(1));
+    BOOST_CHECK(pdb.IsTxAvailable(2));
+
+    CBlock block2;
+    BOOST_CHECK(pdb.FillBlock(block2, {}, /*segwit_active=*/true) == READ_STATUS_OK);
+    BOOST_CHECK_EQUAL(block.GetHash().ToString(), block2.GetHash().ToString());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

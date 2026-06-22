@@ -509,8 +509,16 @@ class CompactBlocksTest(BitcoinTestFramework):
 
     # Verify that a tx held only as an orphan is used to reconstruct a compact
     # block, avoiding a getblocktxn round trip.
-    def test_compactblock_orphan_seeding(self, test_node):
+    def test_compactblock_orphan_seeding(self):
+        # The vExtraTxnForCompact ring also holds recently-received orphans, so for a
+        # recent orphan InitData would fill the slot from the ring and the orphanage
+        # path would never run. Disable the ring (-blockreconstructionextratxn=0) so
+        # the orphanage is the only possible source, isolating the feature under test.
+        # This restarts the node, so it must run last (drops all p2p connections).
         node = self.nodes[0]
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-blockreconstructionextratxn=0", "-debug=cmpctblock"])
+        peer = node.add_p2p_connection(TestP2PConn())
+        self.request_cb_announcements(peer)
 
         def make_comp_block(utxo):
             # block.vtx[1] = parent P (spends utxo), block.vtx[2] = child C (spends P)
@@ -520,35 +528,40 @@ class CompactBlocksTest(BitcoinTestFramework):
             return block, comp_block
 
         # Control: parent is prefilled, child is short-id only and unknown to the
-        # node -> node must request the child via getblocktxn (index 2).
+        # node. With the ring disabled and the child not in the orphanage, the node
+        # must request the child via getblocktxn (index 2). This also confirms the
+        # ring is genuinely off (otherwise the child would never be requested).
         utxo = self.utxos.pop(0)
         block, comp_block = make_comp_block(utxo)
-        test_node.clear_getblocktxn()
-        test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
+        peer.clear_getblocktxn()
+        peer.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
         with p2p_lock:
-            assert "getblocktxn" in test_node.last_message
-            absolute_indexes = test_node.last_message["getblocktxn"].block_txn_request.to_absolute()
+            assert "getblocktxn" in peer.last_message
+            absolute_indexes = peer.last_message["getblocktxn"].block_txn_request.to_absolute()
         assert_equal(absolute_indexes, [2])
-        # Complete the block so it doesn't remain in-flight and interfere with
-        # mapBlocksInFlight checks in subsequent tests.
+        # Complete the block so it doesn't remain in-flight.
         msg_bt = msg_blocktxn()
         msg_bt.block_transactions = BlockTransactions(block.hash_int, [block.vtx[2]])
-        test_node.send_and_ping(msg_bt)
+        peer.send_and_ping(msg_bt)
         assert_equal(node.getbestblockhash(), block.hash_hex)
         self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
 
         # Orphan-seeded: deliver the child first as an orphan (its parent P is
-        # unknown to the node), then the same-shaped compact block. The node
-        # should reconstruct the child from its orphanage and NOT send getblocktxn.
+        # unknown to the node), then the same-shaped compact block. With the ring
+        # disabled, reconstruction can only complete by seeding the child from the
+        # orphanage -> no getblocktxn round trip. Assert the orphanage path actually
+        # fired via the debug log, so this is a genuine regression guard rather than
+        # a vacuous pass.
         utxo = self.utxos.pop(0)
         block, comp_block = make_comp_block(utxo)
         child = block.vtx[2]
-        test_node.send_and_ping(msg_tx(child))  # becomes an orphan (parent missing)
-        test_node.clear_getblocktxn()
-        test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
+        peer.send_and_ping(msg_tx(child))  # becomes an orphan (parent missing)
+        peer.clear_getblocktxn()
+        with node.assert_debug_log(["getblocktxn round trip avoided"]):
+            peer.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
         with p2p_lock:
-            assert "getblocktxn" not in test_node.last_message
-        # Block was fully reconstructed from orphanage; record the new UTXO tip.
+            assert "getblocktxn" not in peer.last_message
+        # Block was fully reconstructed from the orphanage; record the new UTXO tip.
         assert_equal(node.getbestblockhash(), block.hash_hex)
         self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
 
@@ -1023,9 +1036,6 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.log.info("Testing getblocktxn requests (segwit node)...")
         self.test_getblocktxn_requests(self.segwit_node)
 
-        self.log.info("Testing orphanage-seeded compact block reconstruction (segwit node)...")
-        self.test_compactblock_orphan_seeding(self.segwit_node)
-
         self.log.info("Testing getblocktxn handler (segwit node should return witnesses)...")
         self.test_getblocktxn_handler(self.segwit_node)
 
@@ -1070,6 +1080,11 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         self.log.info("Testing high-bandwidth mode states via getpeerinfo...")
         self.test_highbandwidth_mode_states_via_getpeerinfo()
+
+        # Runs last: restarts node0 with the extra-txn ring disabled to isolate the
+        # orphanage reconstruction path (drops all p2p connections).
+        self.log.info("Testing orphanage-seeded compact block reconstruction...")
+        self.test_compactblock_orphan_seeding()
 
 
 if __name__ == '__main__':

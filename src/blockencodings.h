@@ -178,6 +178,9 @@ public:
                                 std::span<const CTransactionRef> extra);
 
     bool IsTxAvailable(size_t index) const;
+    // Serialized size (with witness) of the transaction available at index, or 0 if
+    // the slot is not currently available. Only meaningful in the INITIALIZED state.
+    size_t GetTxSize(size_t index) const;
     // segwit_active enforces witness mutation checks just before reporting a healthy status
     ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active);
 };

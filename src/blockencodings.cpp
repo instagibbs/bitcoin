@@ -208,6 +208,14 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
+size_t PartiallyDownloadedBlock::GetTxSize(size_t index) const
+{
+    if (m_state != State::INITIALIZED) return 0;
+
+    assert(index < txn_available.size());
+    return txn_available[index] ? txn_available[index]->ComputeTotalSize() : 0;
+}
+
 ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active)
 {
     if (m_state != State::INITIALIZED) return READ_STATUS_INVALID;

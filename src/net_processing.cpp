@@ -1883,11 +1883,11 @@ void PeerManagerImpl::MaybeFillCompactBlockFromOrphanage(const CBlockHeaderAndSh
     // Only pay for an orphanage scan when reconstruction is otherwise
     // incomplete: in the common case the mempool fills the block and we do
     // nothing here, avoiding any per-orphan work on the hot path.
-    size_t missing_before{0};
+    std::vector<size_t> missing;
     for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
-        if (!partialBlock.IsTxAvailable(i)) missing_before++;
+        if (!partialBlock.IsTxAvailable(i)) missing.push_back(i);
     }
-    if (missing_before == 0) return;
+    if (missing.empty()) return;
 
     const auto time_start{SteadyClock::now()};
 
@@ -1901,21 +1901,32 @@ void PeerManagerImpl::MaybeFillCompactBlockFromOrphanage(const CBlockHeaderAndSh
     }
     partialBlock.TryFillFromExtra(cmpctblock, orphans);
 
-    size_t missing_after{0};
-    for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
-        if (!partialBlock.IsTxAvailable(i)) missing_after++;
+    // Account for what the orphanage supplied beyond the mempool and the
+    // vExtraTxnForCompact ring (which InitData already consulted): the count and
+    // serialized bytes that would otherwise come back in the getblocktxn response.
+    // Even when the round trip is not fully avoided, removing bytes can drop the
+    // response under a TCP congestion window and save additional round trips.
+    size_t filled{0};
+    size_t filled_bytes{0};
+    for (size_t i : missing) {
+        if (partialBlock.IsTxAvailable(i)) {
+            filled++;
+            filled_bytes += partialBlock.GetTxSize(i);
+        }
     }
     const auto elapsed_us{Ticks<std::chrono::microseconds>(SteadyClock::now() - time_start)};
+    const size_t still_missing{missing.size() - filled};
 
     LogDebug(BCLog::CMPCTBLOCK,
-             "Orphanage seeding for block %s: scanned %u orphans, filled %u/%u missing slots in %dus (%u still missing%s)\n",
+             "Orphanage seeding for block %s: scanned %u orphans, filled %u/%u missing slots (%u bytes) in %dus (%u still missing%s)\n",
              cmpctblock.header.GetHash().ToString(),
              orphans.size(),
-             missing_before - missing_after,
-             missing_before,
+             filled,
+             missing.size(),
+             filled_bytes,
              elapsed_us,
-             missing_after,
-             missing_after == 0 ? "; getblocktxn round trip avoided" : "");
+             still_missing,
+             still_missing == 0 ? "; getblocktxn round trip avoided" : "");
 }
 
 PeerManagerInfo PeerManagerImpl::GetInfo() const

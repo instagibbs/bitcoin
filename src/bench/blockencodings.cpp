@@ -134,6 +134,53 @@ static void BlockEncodingLargeExtra(benchmark::Bench& bench)
     BlockEncodingBench(bench, 50000, 5000);
 }
 
+// Measure only the second (orphan) pass: a PartiallyDownloadedBlock with many
+// missing slots, scanning a large orphan set. This is the marginal cost added
+// to the getblocktxn decision when the mempool did not reconstruct the block.
+static void BlockEncodingOrphanFill(benchmark::Bench& bench, size_t n_orphans)
+{
+    const auto testing_setup = MakeNoLogFileContext<const ChainTestingSetup>(ChainType::MAIN);
+    CTxMemPool& pool = *Assert(testing_setup->m_node.mempool);
+    InsecureRandomContext rng(11);
+
+    LOCK2(cs_main, pool.cs);
+
+    std::array<std::byte, 200> sigspam;
+    sigspam.fill(std::byte(42));
+
+    std::vector<CTransactionRef> orphans;
+    orphans.reserve(n_orphans);
+    for (size_t i = 0; i < n_orphans; ++i) {
+        CMutableTransaction tx;
+        tx.vin.resize(1);
+        tx.vin[0].scriptSig = CScript() << sigspam;
+        tx.vin[0].scriptWitness.stack.push_back({1});
+        tx.vout.resize(1);
+        tx.vout[0].scriptPubKey = CScript() << OP_1 << OP_EQUAL;
+        tx.vout[0].nValue = i;
+        orphans.push_back(MakeTransactionRef(tx));
+    }
+
+    // 3000 random short IDs that none of the orphans match: worst case, the
+    // scan never early-exits (mirrors BlockEncodingLargeExtra).
+    BenchCBHAST cmpctblock{rng, 3000};
+
+    bench.run([&] {
+        PartiallyDownloadedBlock pdb{&pool};
+        auto res = pdb.InitData(cmpctblock, {});
+        assert(res == READ_STATUS_OK);
+        // Empty mempool/extra: every short-ID slot is missing entering the pass.
+        res = pdb.TryFillFromExtra(cmpctblock, orphans);
+        assert(res == READ_STATUS_OK);
+    });
+}
+
+static void BlockEncodingOrphanFill3000(benchmark::Bench& bench)
+{
+    BlockEncodingOrphanFill(bench, 3000);
+}
+
 BENCHMARK(BlockEncodingNoExtra);
 BENCHMARK(BlockEncodingStdExtra);
 BENCHMARK(BlockEncodingLargeExtra);
+BENCHMARK(BlockEncodingOrphanFill3000);

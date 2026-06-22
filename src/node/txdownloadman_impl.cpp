@@ -87,6 +87,10 @@ std::vector<TxOrphanage::OrphanInfo> TxDownloadManager::GetOrphanTransactions() 
 {
     return m_impl->GetOrphanTransactions();
 }
+std::vector<CTransactionRef> TxDownloadManager::GetOrphanTransactionsForReconstruction() const
+{
+    return m_impl->GetOrphanTransactionsForReconstruction();
+}
 
 // TxDownloadManagerImpl
 void TxDownloadManagerImpl::ActiveTipChange()
@@ -579,5 +583,9 @@ void TxDownloadManagerImpl::CheckIsEmpty()
 std::vector<TxOrphanage::OrphanInfo> TxDownloadManagerImpl::GetOrphanTransactions() const
 {
     return m_orphanage->GetOrphanTransactions();
+}
+std::vector<CTransactionRef> TxDownloadManagerImpl::GetOrphanTransactionsForReconstruction() const
+{
+    return m_orphanage->GetOrphanTransactionsForReconstruction();
 }
 } // namespace node

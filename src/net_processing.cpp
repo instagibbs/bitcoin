@@ -1883,23 +1883,39 @@ void PeerManagerImpl::MaybeFillCompactBlockFromOrphanage(const CBlockHeaderAndSh
     // Only pay for an orphanage scan when reconstruction is otherwise
     // incomplete: in the common case the mempool fills the block and we do
     // nothing here, avoiding any per-orphan work on the hot path.
-    bool any_missing{false};
+    size_t missing_before{0};
     for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
-        if (!partialBlock.IsTxAvailable(i)) {
-            any_missing = true;
-            break;
-        }
+        if (!partialBlock.IsTxAvailable(i)) missing_before++;
     }
-    if (!any_missing) return;
+    if (missing_before == 0) return;
 
+    const auto time_start{SteadyClock::now()};
+
+    // Snapshot the orphanage transactions under the lock, then scan without holding
+    // it (TryFillFromExtra takes no locks). GetOrphanTransactionsForReconstruction()
+    // returns bare tx refs, avoiding the per-orphan announcer-set copy.
     std::vector<CTransactionRef> orphans;
     {
         LOCK(m_tx_download_mutex);
-        auto infos{m_txdownloadman.GetOrphanTransactions()};
-        orphans.reserve(infos.size());
-        for (auto& info : infos) orphans.push_back(std::move(info.tx));
+        orphans = m_txdownloadman.GetOrphanTransactionsForReconstruction();
     }
     partialBlock.TryFillFromExtra(cmpctblock, orphans);
+
+    size_t missing_after{0};
+    for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+        if (!partialBlock.IsTxAvailable(i)) missing_after++;
+    }
+    const auto elapsed_us{Ticks<std::chrono::microseconds>(SteadyClock::now() - time_start)};
+
+    LogDebug(BCLog::CMPCTBLOCK,
+             "Orphanage seeding for block %s: scanned %u orphans, filled %u/%u missing slots in %dus (%u still missing%s)\n",
+             cmpctblock.header.GetHash().ToString(),
+             orphans.size(),
+             missing_before - missing_after,
+             missing_before,
+             elapsed_us,
+             missing_after,
+             missing_after == 0 ? "; getblocktxn round trip avoided" : "");
 }
 
 PeerManagerInfo PeerManagerImpl::GetInfo() const

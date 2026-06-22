@@ -231,6 +231,7 @@ public:
     bool HaveTxToReconsider(NodeId peer) override;
     std::vector<CTransactionRef> GetChildrenFromSamePeer(const CTransactionRef& parent, NodeId nodeid) const override;
     std::vector<OrphanInfo> GetOrphanTransactions() const override;
+    std::vector<CTransactionRef> GetOrphanTransactionsForReconstruction() const override;
     TxOrphanage::Usage TotalOrphanUsage() const override;
     void SanityCheck() const override;
 };
@@ -690,6 +691,26 @@ std::vector<TxOrphanage::OrphanInfo> TxOrphanageImpl::GetOrphanTransactions() co
             this_orphan_announcers.clear();
         }
 
+        ++it;
+    }
+    Assume(m_unique_orphans == result.size());
+
+    return result;
+}
+
+std::vector<CTransactionRef> TxOrphanageImpl::GetOrphanTransactionsForReconstruction() const
+{
+    std::vector<CTransactionRef> result;
+    result.reserve(m_unique_orphans);
+
+    auto& index_by_wtxid = m_orphans.get<ByWtxid>();
+    auto it = index_by_wtxid.begin();
+    while (it != index_by_wtxid.end()) {
+        // Entries are sorted by wtxid; consecutive entries with the same wtxid are
+        // duplicate announcements of the same orphan, so emit one ref per unique wtxid.
+        if (std::next(it) == index_by_wtxid.end() || std::next(it)->m_tx->GetWitnessHash() != it->m_tx->GetWitnessHash()) {
+            result.push_back(it->m_tx);
+        }
         ++it;
     }
     Assume(m_unique_orphans == result.size());

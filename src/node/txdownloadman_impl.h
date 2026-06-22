@@ -189,6 +189,7 @@ public:
     void CheckIsEmpty(NodeId nodeid);
 
     std::vector<TxOrphanage::OrphanInfo> GetOrphanTransactions() const;
+    std::vector<CTransactionRef> GetOrphanTransactionsForReconstruction() const;
 
 protected:
     /** Helper for getting deduplicated vector of Txids in vin. */

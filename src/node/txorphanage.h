@@ -101,6 +101,12 @@ public:
     /** Get all orphan transactions */
     virtual std::vector<OrphanInfo> GetOrphanTransactions() const = 0;
 
+    /** Like GetOrphanTransactions(), but returns only the transactions (deduplicated
+     * by wtxid) without announcer information. Cheaper than GetOrphanTransactions()
+     * because it avoids building a std::set<NodeId> per orphan; used to seed compact
+     * block reconstruction, which only needs the transactions. */
+    virtual std::vector<CTransactionRef> GetOrphanTransactionsForReconstruction() const = 0;
+
     /** Get the total usage (weight) of all orphans. If an orphan has multiple announcers, its usage is
      * only counted once within this total. */
     virtual Usage TotalOrphanUsage() const = 0;

@@ -171,6 +171,9 @@ public:
 
     /** Wrapper for TxOrphanage::GetOrphanTransactions */
     std::vector<TxOrphanage::OrphanInfo> GetOrphanTransactions() const;
+
+    /** Wrapper for TxOrphanage::GetOrphanTransactionsForReconstruction */
+    std::vector<CTransactionRef> GetOrphanTransactionsForReconstruction() const;
 };
 } // namespace node
 #endif // BITCOIN_NODE_TXDOWNLOADMAN_H

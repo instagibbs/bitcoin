@@ -181,7 +181,52 @@ static void BlockEncodingOrphanFill3000(benchmark::Bench& bench)
     BlockEncodingOrphanFill(bench, 3000);
 }
 
+// Isolate the marginal cost the feature actually adds: the orphan scan alone
+// (TryFillFromExtra), excluding InitData which runs regardless. InitData once,
+// then repeatedly scan n_orphans non-matching orphans -- nothing fills, so there
+// is no early-exit and every call performs the full worst-case scan.
+static void BlockEncodingOrphanScan(benchmark::Bench& bench, size_t n_orphans)
+{
+    const auto testing_setup = MakeNoLogFileContext<const ChainTestingSetup>(ChainType::MAIN);
+    CTxMemPool& pool = *Assert(testing_setup->m_node.mempool);
+    InsecureRandomContext rng(11);
+
+    LOCK2(cs_main, pool.cs);
+
+    std::array<std::byte, 200> sigspam;
+    sigspam.fill(std::byte(42));
+
+    std::vector<CTransactionRef> orphans;
+    orphans.reserve(n_orphans);
+    for (size_t i = 0; i < n_orphans; ++i) {
+        CMutableTransaction tx;
+        tx.vin.resize(1);
+        tx.vin[0].scriptSig = CScript() << sigspam;
+        tx.vin[0].scriptWitness.stack.push_back({1});
+        tx.vout.resize(1);
+        tx.vout[0].scriptPubKey = CScript() << OP_1 << OP_EQUAL;
+        tx.vout[0].nValue = i;
+        orphans.push_back(MakeTransactionRef(tx));
+    }
+
+    BenchCBHAST cmpctblock{rng, 3000};
+    PartiallyDownloadedBlock pdb{&pool};
+    auto res = pdb.InitData(cmpctblock, {});
+    assert(res == READ_STATUS_OK);
+
+    bench.run([&] {
+        auto r = pdb.TryFillFromExtra(cmpctblock, orphans);
+        assert(r == READ_STATUS_OK);
+    });
+}
+
+static void BlockEncodingOrphanScan3000(benchmark::Bench& bench)
+{
+    BlockEncodingOrphanScan(bench, 3000);
+}
+
 BENCHMARK(BlockEncodingNoExtra);
 BENCHMARK(BlockEncodingStdExtra);
 BENCHMARK(BlockEncodingLargeExtra);
 BENCHMARK(BlockEncodingOrphanFill3000);
+BENCHMARK(BlockEncodingOrphanScan3000);

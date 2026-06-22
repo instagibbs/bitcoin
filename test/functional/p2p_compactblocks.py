@@ -507,6 +507,52 @@ class CompactBlocksTest(BitcoinTestFramework):
             # Shouldn't have gotten a request for any transaction
             assert "getblocktxn" not in test_node.last_message
 
+    # Verify that a tx held only as an orphan is used to reconstruct a compact
+    # block, avoiding a getblocktxn round trip.
+    def test_compactblock_orphan_seeding(self, test_node):
+        node = self.nodes[0]
+
+        def make_comp_block(utxo, prefill_parent):
+            # block.vtx[1] = parent P (spends utxo), block.vtx[2] = child C (spends P)
+            block = self.build_block_with_transactions(node, utxo, 2)
+            comp_block = HeaderAndShortIDs()
+            prefill = [0, 1] if prefill_parent else [0]
+            comp_block.initialize_from_block(block, prefill_list=prefill, use_witness=True)
+            return block, comp_block
+
+        # Control: parent is prefilled, child is short-id only and unknown to the
+        # node -> node must request the child via getblocktxn (index 2).
+        utxo = self.utxos.pop(0)
+        block, comp_block = make_comp_block(utxo, prefill_parent=True)
+        test_node.clear_getblocktxn()
+        test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
+        with p2p_lock:
+            assert "getblocktxn" in test_node.last_message
+            absolute_indexes = test_node.last_message["getblocktxn"].block_txn_request.to_absolute()
+        assert_equal(absolute_indexes, [2])
+        # Complete the block so it doesn't remain in-flight and interfere with
+        # mapBlocksInFlight checks in subsequent tests.
+        msg_bt = msg_blocktxn()
+        msg_bt.block_transactions = BlockTransactions(block.hash_int, [block.vtx[2]])
+        test_node.send_and_ping(msg_bt)
+        assert_equal(node.getbestblockhash(), block.hash_hex)
+        self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
+
+        # Orphan-seeded: deliver the child first as an orphan (its parent P is
+        # unknown to the node), then the same-shaped compact block. The node
+        # should reconstruct the child from its orphanage and NOT send getblocktxn.
+        utxo = self.utxos.pop(0)
+        block, comp_block = make_comp_block(utxo, prefill_parent=True)
+        child = block.vtx[2]
+        test_node.send_and_ping(msg_tx(child))  # becomes an orphan (parent missing)
+        test_node.clear_getblocktxn()
+        test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
+        with p2p_lock:
+            assert "getblocktxn" not in test_node.last_message
+        # Block was fully reconstructed from orphanage; record the new UTXO tip.
+        assert_equal(node.getbestblockhash(), block.hash_hex)
+        self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
+
     # Incorrectly responding to a getblocktxn shouldn't cause the block to be
     # permanently failed.
     def test_incorrect_blocktxn_response(self, test_node):
@@ -977,6 +1023,9 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         self.log.info("Testing getblocktxn requests (segwit node)...")
         self.test_getblocktxn_requests(self.segwit_node)
+
+        self.log.info("Testing orphanage-seeded compact block reconstruction (segwit node)...")
+        self.test_compactblock_orphan_seeding(self.segwit_node)
 
         self.log.info("Testing getblocktxn handler (segwit node should return witnesses)...")
         self.test_getblocktxn_handler(self.segwit_node)

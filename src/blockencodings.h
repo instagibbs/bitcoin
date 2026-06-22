@@ -9,6 +9,8 @@
 #include <primitives/block.h>
 
 #include <functional>
+#include <span>
+#include <unordered_map>
 
 class CTxMemPool;
 class BlockValidationState;
@@ -133,8 +135,29 @@ public:
 class PartiallyDownloadedBlock {
 protected:
     std::vector<CTransactionRef> txn_available;
-    size_t prefilled_count = 0, mempool_count = 0, extra_count = 0;
+    size_t prefilled_count = 0, mempool_count = 0, extra_count = 0, orphan_count = 0;
     const CTxMemPool* pool;
+
+    // Lifecycle of a PartiallyDownloadedBlock. Retained match state
+    // (m_shorttxids/m_have_txn) is only valid in the INITIALIZED state, which is
+    // why a second matching pass (TryFillFromExtra) is gated on it.
+    enum class State { EMPTY, INITIALIZED, FILLED };
+    State m_state{State::EMPTY};
+
+    // Retained from InitData so a follow-up matching pass can resolve
+    // still-missing slots. m_have_txn is NOT equivalent to (txn_available[i] !=
+    // nullptr): a short-ID collision blacklists a slot by resetting
+    // txn_available[i] while leaving m_have_txn[i] == true ("force a request,
+    // do not guess"). The second pass must consult m_have_txn for correctness.
+    std::unordered_map<uint64_t, uint16_t> m_shorttxids;
+    std::vector<bool> m_have_txn;
+
+    // Match a single candidate transaction against the still-missing short-ID
+    // slots, filling or blacklisting as appropriate. attribution_count is the
+    // per-source stat counter to bump on a fill (extra_count or orphan_count).
+    void MatchExtraTransaction(const CBlockHeaderAndShortTxIDs& cmpctblock,
+                               const CTransactionRef& tx, size_t& attribution_count);
+
 public:
     CBlockHeader header;
 
@@ -146,6 +169,14 @@ public:
 
     // extra_txn is a list of extra transactions to look at, in <witness hash, reference> form
     ReadStatus InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<std::pair<Wtxid, CTransactionRef>>& extra_txn);
+
+    // Lazy second pass: try to fill still-missing slots from additional candidate
+    // transactions (e.g. the orphanage). Must be called after a successful
+    // InitData and before FillBlock, with the SAME cmpctblock. Repeatable and
+    // idempotent for already-seen transactions.
+    ReadStatus TryFillFromExtra(const CBlockHeaderAndShortTxIDs& cmpctblock,
+                                std::span<const CTransactionRef> extra);
+
     bool IsTxAvailable(size_t index) const;
     // segwit_active enforces witness mutation checks just before reporting a healthy status
     ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active);

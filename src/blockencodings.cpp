@@ -49,6 +49,35 @@ uint64_t CBlockHeaderAndShortTxIDs::GetShortID(const Wtxid& wtxid) const
     return (*Assert(m_hasher))(wtxid.ToUint256()) & 0xffffffffffffL;
 }
 
+void PartiallyDownloadedBlock::MatchExtraTransaction(const CBlockHeaderAndShortTxIDs& cmpctblock,
+                                                     const CTransactionRef& tx, size_t& attribution_count)
+{
+    if (!tx) return;
+    uint64_t shortid = cmpctblock.GetShortID(tx->GetWitnessHash());
+    auto idit = m_shorttxids.find(shortid);
+    if (idit == m_shorttxids.end()) return;
+
+    if (!m_have_txn[idit->second]) {
+        txn_available[idit->second] = tx;
+        m_have_txn[idit->second] = true;
+        mempool_count++;
+        attribution_count++;
+    } else {
+        // If a *different* tx already occupies this slot, we cannot disambiguate
+        // the short-ID match: blacklist the slot and force a request. Compare
+        // witness hashes first so a duplicate (same wtxid, e.g. an orphan also
+        // present in vExtraTxnForCompact) does not trigger a spurious reset.
+        if (txn_available[idit->second] &&
+                txn_available[idit->second]->GetWitnessHash() != tx->GetWitnessHash()) {
+            txn_available[idit->second].reset();
+            mempool_count--;
+            // Guard against size_t underflow when the reset slot was attributed
+            // to a different counter (cross-pass) or to mempool (no extra fill).
+            if (attribution_count > 0) attribution_count--;
+        }
+    }
+}
+
 /* Reconstructing a compact block is in the hot-path for block relay,
  * so we want to do it as quickly as possible. Because this often
  * involves iterating over the entire mempool, we put all the data we
@@ -64,7 +93,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > MAX_BLOCK_WEIGHT / MIN_SERIALIZABLE_TRANSACTION_WEIGHT)
         return READ_STATUS_INVALID;
 
-    if (!header.IsNull() || !txn_available.empty()) return READ_STATUS_INVALID;
+    if (m_state != State::EMPTY || !header.IsNull() || !txn_available.empty()) return READ_STATUS_INVALID;
 
     header = cmpctblock.header;
     txn_available.resize(cmpctblock.BlockTxCount());
@@ -91,7 +120,8 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     // Because well-formed cmpctblock messages will have a (relatively) uniform distribution
     // of short IDs, any highly-uneven distribution of elements can be safely treated as a
     // READ_STATUS_FAILED.
-    std::unordered_map<uint64_t, uint16_t> shorttxids(cmpctblock.shorttxids.size());
+    m_shorttxids = std::unordered_map<uint64_t, uint16_t>(cmpctblock.shorttxids.size());
+    auto& shorttxids = m_shorttxids;
     uint16_t index_offset = 0;
     for (size_t i = 0; i < cmpctblock.shorttxids.size(); i++) {
         while (txn_available[i + index_offset])
@@ -113,7 +143,8 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     if (shorttxids.size() != cmpctblock.shorttxids.size())
         return READ_STATUS_FAILED; // Short ID collision
 
-    std::vector<bool> have_txn(txn_available.size());
+    m_have_txn.assign(txn_available.size(), false);
+    auto& have_txn = m_have_txn;
     {
     LOCK(pool->cs);
     for (const auto& [wtxid, txit] : pool->txns_randomized) {
@@ -143,44 +174,22 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     }
 
     for (size_t i = 0; i < extra_txn.size(); i++) {
-        uint64_t shortid = cmpctblock.GetShortID(extra_txn[i].first);
-        std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
-        if (idit != shorttxids.end()) {
-            if (!have_txn[idit->second]) {
-                txn_available[idit->second] = extra_txn[i].second;
-                have_txn[idit->second]  = true;
-                mempool_count++;
-                extra_count++;
-            } else {
-                // If we find two mempool/extra txn that match the short id, just
-                // request it.
-                // This should be rare enough that the extra bandwidth doesn't matter,
-                // but eating a round-trip due to FillBlock failure would be annoying
-                // Note that we don't want duplication between extra_txn and mempool to
-                // trigger this case, so we compare witness hashes first
-                if (txn_available[idit->second] &&
-                        txn_available[idit->second]->GetWitnessHash() != extra_txn[i].second->GetWitnessHash()) {
-                    txn_available[idit->second].reset();
-                    mempool_count--;
-                    extra_count--;
-                }
-            }
-        }
+        MatchExtraTransaction(cmpctblock, extra_txn[i].second, extra_count);
         // Though ideally we'd continue scanning for the two-txn-match-shortid case,
-        // the performance win of an early exit here is too good to pass up and worth
-        // the extra risk.
+        // the performance win of an early exit here is too good to pass up.
         if (mempool_count == shorttxids.size())
             break;
     }
 
     LogDebug(BCLog::CMPCTBLOCK, "Initialized PartiallyDownloadedBlock for block %s using a cmpctblock of %u bytes\n", cmpctblock.header.GetHash().ToString(), GetSerializeSize(cmpctblock));
 
+    m_state = State::INITIALIZED;
     return READ_STATUS_OK;
 }
 
 bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
 {
-    if (header.IsNull()) return false;
+    if (m_state != State::INITIALIZED) return false;
 
     assert(index < txn_available.size());
     return txn_available[index] != nullptr;
@@ -188,7 +197,7 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
 
 ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing, bool segwit_active)
 {
-    if (header.IsNull()) return READ_STATUS_INVALID;
+    if (m_state != State::INITIALIZED) return READ_STATUS_INVALID;
 
     block = header;
     block.vtx.resize(txn_available.size());
@@ -205,9 +214,12 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
         }
     }
 
-    // Make sure we can't call FillBlock again.
+    // Make sure we can't call FillBlock or a second pass again.
+    m_state = State::FILLED;
     header.SetNull();
     txn_available.clear();
+    m_shorttxids.clear();
+    m_have_txn.clear();
 
     if (vtx_missing.size() != tx_missing_offset) {
         return READ_STATUS_INVALID;

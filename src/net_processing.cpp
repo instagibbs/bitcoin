@@ -718,6 +718,13 @@ private:
 
     void SendBlockTransactions(CNode& pfrom, Peer& peer, const CBlock& block, const BlockTransactionsRequest& req);
 
+    /** If the partially-downloaded block is not yet fully reconstructed, try to
+     *  fill remaining slots from orphanage transactions. Only fetches orphans
+     *  when at least one slot is missing, to keep the happy path zero-cost. */
+    void MaybeFillCompactBlockFromOrphanage(const CBlockHeaderAndShortTxIDs& cmpctblock,
+                                            PartiallyDownloadedBlock& partialBlock)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
+
     /** Send a message to a peer */
     void PushMessage(CNode& node, CSerializedNetMsg&& msg) const { m_connman.PushMessage(&node, std::move(msg)); }
     template <typename... Args>
@@ -1868,6 +1875,31 @@ std::vector<node::TxOrphanage::OrphanInfo> PeerManagerImpl::GetOrphanTransaction
 {
     LOCK(m_tx_download_mutex);
     return m_txdownloadman.GetOrphanTransactions();
+}
+
+void PeerManagerImpl::MaybeFillCompactBlockFromOrphanage(const CBlockHeaderAndShortTxIDs& cmpctblock,
+                                                         PartiallyDownloadedBlock& partialBlock)
+{
+    // Only pay for an orphanage scan when reconstruction is otherwise
+    // incomplete: in the common case the mempool fills the block and we do
+    // nothing here, avoiding any per-orphan work on the hot path.
+    bool any_missing{false};
+    for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+        if (!partialBlock.IsTxAvailable(i)) {
+            any_missing = true;
+            break;
+        }
+    }
+    if (!any_missing) return;
+
+    std::vector<CTransactionRef> orphans;
+    {
+        LOCK(m_tx_download_mutex);
+        auto infos{m_txdownloadman.GetOrphanTransactions()};
+        orphans.reserve(infos.size());
+        for (auto& info : infos) orphans.push_back(std::move(info.tx));
+    }
+    partialBlock.TryFillFromExtra(cmpctblock, orphans);
 }
 
 PeerManagerInfo PeerManagerImpl::GetInfo() const
@@ -4681,6 +4713,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                     return;
                 }
 
+                // Lazily seed reconstruction from the orphanage before deciding
+                // whether to request transactions.
+                MaybeFillCompactBlockFromOrphanage(cmpctblock, partialBlock);
+
                 BlockTransactionsRequest req;
                 for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
                     if (!partialBlock.IsTxAvailable(i))
@@ -4719,6 +4755,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                     // TODO: don't ignore failures
                     return;
                 }
+                MaybeFillCompactBlockFromOrphanage(cmpctblock, tempBlock);
                 std::vector<CTransactionRef> dummy;
                 const CBlockIndex* prev_block{Assume(m_chainman.m_blockman.LookupBlockIndex(cmpctblock.header.hashPrevBlock))};
                 status = tempBlock.FillBlock(*pblock, dummy,

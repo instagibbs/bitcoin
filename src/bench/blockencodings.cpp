@@ -134,9 +134,10 @@ static void BlockEncodingLargeExtra(benchmark::Bench& bench)
     BlockEncodingBench(bench, 50000, 5000);
 }
 
-// Measure only the second (orphan) pass: a PartiallyDownloadedBlock with many
-// missing slots, scanning a large orphan set. This is the marginal cost added
-// to the getblocktxn decision when the mempool did not reconstruct the block.
+// Measure InitData + the orphan second pass (worst case: no matches) for a
+// PartiallyDownloadedBlock with many missing slots scanning a large orphan set.
+// Represents the marginal decision-latency cost when the mempool did not
+// reconstruct the block.
 static void BlockEncodingOrphanFill(benchmark::Bench& bench, size_t n_orphans)
 {
     const auto testing_setup = MakeNoLogFileContext<const ChainTestingSetup>(ChainType::MAIN);

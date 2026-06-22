@@ -512,18 +512,17 @@ class CompactBlocksTest(BitcoinTestFramework):
     def test_compactblock_orphan_seeding(self, test_node):
         node = self.nodes[0]
 
-        def make_comp_block(utxo, prefill_parent):
+        def make_comp_block(utxo):
             # block.vtx[1] = parent P (spends utxo), block.vtx[2] = child C (spends P)
             block = self.build_block_with_transactions(node, utxo, 2)
             comp_block = HeaderAndShortIDs()
-            prefill = [0, 1] if prefill_parent else [0]
-            comp_block.initialize_from_block(block, prefill_list=prefill, use_witness=True)
+            comp_block.initialize_from_block(block, prefill_list=[0, 1], use_witness=True)
             return block, comp_block
 
         # Control: parent is prefilled, child is short-id only and unknown to the
         # node -> node must request the child via getblocktxn (index 2).
         utxo = self.utxos.pop(0)
-        block, comp_block = make_comp_block(utxo, prefill_parent=True)
+        block, comp_block = make_comp_block(utxo)
         test_node.clear_getblocktxn()
         test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
         with p2p_lock:
@@ -542,7 +541,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         # unknown to the node), then the same-shaped compact block. The node
         # should reconstruct the child from its orphanage and NOT send getblocktxn.
         utxo = self.utxos.pop(0)
-        block, comp_block = make_comp_block(utxo, prefill_parent=True)
+        block, comp_block = make_comp_block(utxo)
         child = block.vtx[2]
         test_node.send_and_ping(msg_tx(child))  # becomes an orphan (parent missing)
         test_node.clear_getblocktxn()

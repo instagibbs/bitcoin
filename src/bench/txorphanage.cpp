@@ -267,7 +267,35 @@ static void OrphanageEraseForPeer(benchmark::Bench& bench)
     OrphanageEraseAll(bench, /*block_or_disconnect=*/false);
 }
 
+// Measure the producer cost of snapshotting the orphanage for compact block
+// reconstruction seeding: GetOrphanTransactionsForReconstruction() over a full
+// orphanage. This is the per-incomplete-reconstruction cost paid under
+// m_tx_download_mutex, on top of the orphan scan itself.
+static void OrphanageGetTransactionsForReconstruction(benchmark::Bench& bench)
+{
+    FastRandomContext det_rand{true};
+    const auto orphanage{node::MakeTxOrphanage(/*max_global_latency_score=*/node::DEFAULT_MAX_ORPHANAGE_LATENCY_SCORE, /*reserved_peer_usage=*/node::DEFAULT_RESERVED_ORPHAN_WEIGHT_PER_PEER)};
+
+    // Fill the orphanage to its announcement cap with unique tiny transactions,
+    // spread across enough peers to stay under the global usage limit (so nothing
+    // is trimmed during population).
+    static constexpr unsigned int NUM_PEERS{4};
+    const unsigned int txns_per_peer{node::DEFAULT_MAX_ORPHANAGE_LATENCY_SCORE / NUM_PEERS};
+    for (NodeId peer{0}; peer < static_cast<NodeId>(NUM_PEERS); ++peer) {
+        for (unsigned int i{0}; i < txns_per_peer; ++i) {
+            orphanage->AddTx(MakeTransactionBulkedTo(1, TINY_TX_WEIGHT, det_rand), peer);
+        }
+    }
+    const auto count{orphanage->CountUniqueOrphans()};
+
+    bench.run([&]() NO_THREAD_SAFETY_ANALYSIS {
+        auto txns{orphanage->GetOrphanTransactionsForReconstruction()};
+        assert(txns.size() == count);
+    });
+}
+
 BENCHMARK(OrphanageSinglePeerEviction);
 BENCHMARK(OrphanageMultiPeerEviction);
 BENCHMARK(OrphanageEraseForBlock);
 BENCHMARK(OrphanageEraseForPeer);
+BENCHMARK(OrphanageGetTransactionsForReconstruction);

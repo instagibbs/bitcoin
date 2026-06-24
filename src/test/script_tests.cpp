@@ -6,6 +6,7 @@
 #include <compressor.h>
 #include <core_io.h>
 #include <key.h>
+#include <policy/policy.h>
 #include <rpc/util.h>
 #include <script/interpreter.h>
 #include <script/script.h>
@@ -21,6 +22,7 @@
 #include <test/util/common.h>
 #include <test/util/json.h>
 #include <test/util/random.h>
+#include <test/util/script.h>
 #include <test/util/setup_common.h>
 #include <test/util/transaction_utils.h>
 #include <univalue.h>
@@ -93,7 +95,8 @@ static ScriptErrorDesc script_errors[]={
     {SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY, "TAPSCRIPT_EMPTY_PUBKEY"},
     {SCRIPT_ERR_OP_CODESEPARATOR, "OP_CODESEPARATOR"},
     {SCRIPT_ERR_SIG_FINDANDDELETE, "SIG_FINDANDDELETE"},
-    {SCRIPT_ERR_SCRIPTNUM, "SCRIPTNUM"}
+    {SCRIPT_ERR_SCRIPTNUM, "SCRIPTNUM"},
+    {SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH, "DISCOURAGE_TEMPLATEHASH"},
 };
 
 static std::string FormatScriptFlags(script_verify_flags flags)
@@ -1729,6 +1732,368 @@ BOOST_AUTO_TEST_CASE(formatscriptflags)
     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int(1u<<27)), "TAPROOT,0x08000000");
     BOOST_CHECK_EQUAL(FormatScriptFlags(SCRIPT_VERIFY_TAPROOT | script_verify_flags::from_int((1u<<28) | (1ull<<58))), "TAPROOT,0x400000010000000");
     BOOST_CHECK_EQUAL(FormatScriptFlags(script_verify_flags::from_int(1u<<26)), "0x04000000");
+}
+
+/** A test vector for OP_TEMPLATEHASH. */
+struct TemplateHashTestCase
+{
+    //! The transaction being validated.
+    const CTransaction spending_tx;
+    //! The outputs spent by the transaction being validated.
+    const std::vector<CTxOut> spent_outputs;
+    //! The index of the transaction input being validated.
+    const uint32_t input_index;
+    //! Whether script validation is expected to succeed.
+    const bool valid;
+    //! Description of the test vector.
+    const std::string comment;
+
+    explicit TemplateHashTestCase(std::vector<CTxOut> spent_txos, CTransaction tx, uint32_t idx, bool val, std::string com):
+        spending_tx{std::move(tx)}, spent_outputs{std::move(spent_txos)}, input_index{idx}, valid{val}, comment{std::move(com)} {}
+
+    UniValue GetJson() const
+    {
+        UniValue json{UniValue::VOBJ}, spent_txos{UniValue::VARR};
+        for (const auto& txo: spent_outputs) {
+            DataStream ssTxo;
+            ssTxo << txo;
+            spent_txos.push_back(HexStr(ssTxo));
+        }
+        json.pushKV("spent_outputs", std::move(spent_txos));
+        json.pushKV("spending_tx", EncodeHexTx(spending_tx));
+        json.pushKV("input_index", input_index);
+        json.pushKV("valid", valid);
+        json.pushKV("comment", comment);
+        return json;
+    }
+};
+
+/** Shorthand for making a copy of a vector. **/
+template<typename T>
+static std::vector<T> Clone(std::vector<T>& vec)
+{
+    return std::vector<T>{vec};
+}
+
+/** Run script validation for provided tx and input index. Check it succeeds/fails according to provided validity status. **/
+static void CheckTemplateMatch(const CMutableTransaction& tx, std::vector<CTxOut> spent_outputs, unsigned in_index,
+                               bool is_valid, std::vector<TemplateHashTestCase>& cases, std::string comment)
+{
+    Assert(tx.vin.size() == spent_outputs.size() && in_index < tx.vin.size());
+    constexpr CAmount dummy_am{0}; // We never check signatures.
+    constexpr auto dummy_mdb{MissingDataBehavior::ASSERT_FAIL};
+    const auto spent_spk{spent_outputs[in_index].scriptPubKey};
+
+    // Record for test vector generation.
+    cases.emplace_back(spent_outputs, CTransaction{tx}, in_index, is_valid, comment);
+
+    // Perform script validation with the provided inputs.
+    PrecomputedTransactionData precomp;
+    precomp.Init(tx, std::move(spent_outputs));
+    const auto checker{GenericTransactionSignatureChecker(&tx, in_index, dummy_am, precomp, dummy_mdb)};
+    ScriptError err;
+    assert(SCRIPT_VERIFY_TEMPLATEHASH & MANDATORY_SCRIPT_VERIFY_FLAGS);
+    bool res{VerifyScript(tx.vin[in_index].scriptSig, spent_spk, &tx.vin[in_index].scriptWitness, MANDATORY_SCRIPT_VERIFY_FLAGS, checker, &err)};
+
+    // Check script validation result, if not valid make sure the failure is the one expected for `<hash> OP_TEMPLATEHASH OP_EQUAL`.
+    BOOST_CHECK_MESSAGE(res == is_valid, std::string{"Script validation unexpectedly "} + (res ? "succeeded" : "failed") + ": " + comment);
+    if (!is_valid) {
+        BOOST_CHECK_MESSAGE(err == ScriptError::SCRIPT_ERR_EVAL_FALSE, std::string{"Unexpected error for '"} + comment + "': " + ScriptErrorString(err));
+    }
+}
+
+/** Sanity check next-transaction commitments using OP_TEMPLATEHASH. */
+BOOST_AUTO_TEST_CASE(templatehash)
+{
+    // Record the various cases exercised in this test to optionally generate vectors at the end.
+    std::vector<TemplateHashTestCase> test_cases;
+
+    // The transaction whose template hash is to be checked.
+    CMutableTransaction tx;
+    tx.vin = {
+        CTxIn{*Txid::FromHex("0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"), 21},
+        CTxIn{*Txid::FromHex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"), 12}
+    };
+    tx.vout.emplace_back(424242, ToScript("001482074bdf6ce32b071dd120a17cf99cbc01ad3080"_hex));
+
+    // Construct the script to be spent, checking the (valid) hash of this transaction.
+    const uint256 vanilla_hash{GetTemplateHash(tx, 0)};
+    const auto leaf_script{CScript() << vanilla_hash << OP_TEMPLATEHASH << OP_EQUAL};
+    TaprootBuilder builder;
+    builder.Add(0, leaf_script, TAPROOT_LEAF_TAPSCRIPT);
+    builder.Finalize(XOnlyPubKey::NUMS_H);
+    const CScript spent_spk{GetScriptForDestination(builder.GetOutput())};
+
+    // Outputs spent by the transaction whose template hash is to be checked.
+    CTxOut dummy_txo{1'085'986, ToScript("76a914079ded3e3befdab0757fe0e8842aeffc0ff2160288ac"_hex)};
+    std::vector<CTxOut> spent_outputs{{CTxOut{424243, spent_spk}, dummy_txo}};
+
+    // Construct the witness data for the transaction.
+    const auto spend_data{builder.GetSpendData()};
+    const auto control_blocks{spend_data.scripts.begin()->second};
+    const auto& cb{*control_blocks.begin()};
+    tx.vin[0].scriptWitness.stack.emplace_back(leaf_script.begin(), leaf_script.end());
+    tx.vin[0].scriptWitness.stack.emplace_back(cb.begin(), cb.end());
+
+    // Script validation must pass when we use the right hash for the right input.
+    {
+        CheckTemplateMatch(tx, Clone(spent_outputs), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches. Input index matches."});
+    }
+
+    // Script validation must pass when we use the right hash for the wrong input.
+    {
+        // Swap the two inputs and corresponding spent utxos.
+        CMutableTransaction tx2{tx};
+        std::swap(tx2.vin[0], tx2.vin[1]);
+        auto spent_outputs2{spent_outputs};
+        std::swap(spent_outputs2[0], spent_outputs2[1]);
+
+        CheckTemplateMatch(tx2, std::move(spent_outputs2), 1, /*is_valid=*/false, test_cases, std::string{"Template hash matches. Input index mismatches."});
+    }
+
+    // Script validation must pass when committing to and spending a non-zero input index.
+    {
+        CMutableTransaction tx2{tx};
+        auto spent_outputs2{spent_outputs};
+
+        // Commit the template hash for input index 1 in an output placed at index 1.
+        const uint256 hash_in1{GetTemplateHash(tx2, 1)};
+        const auto leaf_script1{CScript() << hash_in1 << OP_TEMPLATEHASH << OP_EQUAL};
+        TaprootBuilder builder1;
+        builder1.Add(0, leaf_script1, TAPROOT_LEAF_TAPSCRIPT);
+        builder1.Finalize(XOnlyPubKey::NUMS_H);
+        spent_outputs2[1].scriptPubKey = GetScriptForDestination(builder1.GetOutput());
+
+        const auto spend_data1{builder1.GetSpendData()};
+        const auto& cb1{*spend_data1.scripts.begin()->second.begin()};
+        tx2.vin[1].scriptWitness.stack.clear();
+        tx2.vin[1].scriptWitness.stack.emplace_back(leaf_script1.begin(), leaf_script1.end());
+        tx2.vin[1].scriptWitness.stack.emplace_back(cb1.begin(), cb1.end());
+
+        CheckTemplateMatch(tx2, std::move(spent_outputs2), 1, /*is_valid=*/true, test_cases, std::string{"Template hash matches at a non-zero input index."});
+    }
+
+    // Script validation must fail if any committed field is malleated in the transaction.
+    // Version:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.version = 42;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: incorrect transaction version."});
+    }
+    // Locktime:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.nLockTime = 42;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: incorrect transaction locktime."});
+    }
+    // Output value:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vout[0].nValue++;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: incorrect output value."});
+    }
+    // Output script:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vout[0].scriptPubKey = ToScript("001482074bdf6ce32b071dd120a17cf99cbc01ad3081"_hex);
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: incorrect output script."});
+    }
+    // This input's sequence:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[0].nSequence = 42;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: incorrect sequence in spending input."});
+    }
+    // Another input's sequence:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[1].nSequence = 42;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: incorrect sequence in another input."});
+    }
+    // This input's annex:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[0].scriptWitness.stack.push_back({ANNEX_TAG, 0});
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: spending input contains annex but none was committed."});
+    }
+
+    // Script validation must succeed if a non-committed transaction field is malleated.
+    // Another input's annex:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[1].scriptWitness.stack.push_back({ANNEX_TAG, 'd', 'u', 'm', 'm', 'y'});
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated annex for another input."});
+    }
+    // Another input's scriptsig:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[1].scriptSig.resize(1);
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated scriptSig for another input."});
+    }
+    // This input's prevout:
+    COutPoint dummy_op{*Txid::FromHex("27c4d937dca276fb2b61e579902e8a876fd5b5abc17590410ced02d5a9f8e483"), 42};
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[0].prevout = dummy_op;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated prevout for spending input."});
+    }
+    // Another input's prevout:
+    {
+        CMutableTransaction tx2{tx};
+        tx2.vin[1].prevout = dummy_op;
+        CheckTemplateMatch(tx2, Clone(spent_outputs), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated prevout for another input."});
+    }
+    // Spent output's value:
+    {
+        std::vector<CTxOut> spent_outputs2(spent_outputs);
+        ++spent_outputs2[0].nValue;
+        CheckTemplateMatch(tx, std::move(spent_outputs2), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated value for corresponding spent output."});
+    }
+    // Other spent output's value:
+    {
+        std::vector<CTxOut> spent_outputs2(spent_outputs);
+        ++spent_outputs2[1].nValue;
+        CheckTemplateMatch(tx, std::move(spent_outputs2), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated value for other spent output."});
+    }
+    // Other spent output's scriptpubkey:
+    {
+        std::vector<CTxOut> spent_outputs2(spent_outputs);
+        spent_outputs2[1].scriptPubKey = ToScript("0014266a4832c001885db26e853ef1d1dde840f7dbaf"_hex);
+        CheckTemplateMatch(tx, std::move(spent_outputs2), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches with malleated scriptpubkey for other spent output."});
+    }
+
+    // Same transaction but different hash
+    {
+        CMutableTransaction tx2{tx};
+        auto spent_outputs2{spent_outputs};
+
+        // Re-build the scriptpubkey with a leaf script containing the check against a dummy hash instead.
+        std::vector<uint8_t> dummy_hash(32);
+        const auto leaf_script2{CScript() << dummy_hash << OP_TEMPLATEHASH << OP_EQUAL};
+        TaprootBuilder builder2;
+        builder2.Add(0, leaf_script2, TAPROOT_LEAF_TAPSCRIPT);
+        builder2.Finalize(XOnlyPubKey::NUMS_H);
+        spent_outputs2[0].scriptPubKey = GetScriptForDestination(builder2.GetOutput());
+
+        // Re-build the spending transaction's witness.
+        const auto spend_data{builder2.GetSpendData()};
+        const auto control_blocks{spend_data.scripts.begin()->second};
+        const auto& cb{*control_blocks.begin()};
+        tx2.vin[0].scriptWitness.stack.clear();
+        tx2.vin[0].scriptWitness.stack.emplace_back(leaf_script2.begin(), leaf_script2.end());
+        tx2.vin[0].scriptWitness.stack.emplace_back(cb.begin(), cb.end());
+
+        // Verification must fail, the hash does not correspond to this transaction.
+        CheckTemplateMatch(tx2, std::move(spent_outputs2), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: spending a script with a different committed hash."});
+    }
+
+    // We can also commit to a transaction which contains an annex.
+    {
+        CMutableTransaction tx2{tx};
+        auto spent_outputs2{spent_outputs};
+
+        // Set an annex to the transaction.
+        std::vector<uint8_t> annex{ANNEX_TAG, 'd', 'a', 't', 'a'};
+        tx2.vin[0].scriptWitness.stack.push_back(annex);
+
+        // Sanity check this transaction isn't valid according to our previous commitment (but don't
+        // record it, as this error already was above).
+        std::vector<TemplateHashTestCase> dummy_cases;
+        CheckTemplateMatch(tx2, Clone(spent_outputs2), 0, /*is_valid=*/false, dummy_cases, std::string{});
+
+        // Re-build the scriptpubkey with a leaf script containing the template hash committing to the annex.
+        const uint256 hash_with_annex{GetTemplateHash(tx2, 0)};
+        const auto leaf_script2{CScript() << hash_with_annex << OP_TEMPLATEHASH << OP_EQUAL};
+        TaprootBuilder builder2;
+        builder2.Add(0, leaf_script2, TAPROOT_LEAF_TAPSCRIPT);
+        builder2.Finalize(XOnlyPubKey::NUMS_H);
+        spent_outputs2[0].scriptPubKey = GetScriptForDestination(builder2.GetOutput());
+
+        // Re-build the spending transaction's witness.
+        const auto spend_data{builder2.GetSpendData()};
+        const auto control_blocks{spend_data.scripts.begin()->second};
+        const auto& cb{*control_blocks.begin()};
+        tx2.vin[0].scriptWitness.stack.clear();
+        tx2.vin[0].scriptWitness.stack.emplace_back(leaf_script2.begin(), leaf_script2.end());
+        tx2.vin[0].scriptWitness.stack.emplace_back(cb.begin(), cb.end());
+        tx2.vin[0].scriptWitness.stack.emplace_back(annex.begin(), annex.end());
+
+        // Verification must pass if the commitment is for the transaction with this annex.
+        CheckTemplateMatch(tx2, Clone(spent_outputs2), 0, /*is_valid=*/true, test_cases, std::string{"Template hash matches in the presence of an annex."});
+
+        // But must fail for a transaction with another annex.
+        std::vector<uint8_t> other_annex{ANNEX_TAG, 'J', 'P', 'E', 'G'};
+        tx2.vin[0].scriptWitness.stack.back() = other_annex;
+        CheckTemplateMatch(tx2, std::move(spent_outputs2), 0, /*is_valid=*/false, test_cases, std::string{"Template hash mismatches: spending with a different annex than that committed."});
+    }
+
+    // Optionally dump test vectors as JSON. Uncomment UPDATE_JSON_TESTS at the top of this file to use.
+#ifdef UPDATE_JSON_TESTS
+    UniValue json_cases{UniValue::VARR};
+    for (const auto& test_case: test_cases) {
+        json_cases.push_back(test_case.GetJson());
+    }
+    const auto json_str{JSONPrettyPrint(json_cases)};
+    FILE* file = fsbridge::fopen("templatehash_tests.json.gen", "w");
+    fputs(json_str.c_str(), file);
+    fclose(file);
+#endif
+}
+
+/** OP_TEMPLATEHASH is only defined in Tapscript. In legacy and witness v0 scripts it must behave
+ *  like any other undefined opcode (SCRIPT_ERR_BAD_OPCODE), even when the consensus rule is active. */
+BOOST_AUTO_TEST_CASE(templatehash_outside_tapscript)
+{
+    const CScript script{CScript() << OP_TEMPLATEHASH};
+    for (const SigVersion sigversion : {SigVersion::BASE, SigVersion::WITNESS_V0}) {
+        std::vector<std::vector<unsigned char>> stack;
+        ScriptError err;
+        const bool res{EvalScript(stack, script, SCRIPT_VERIFY_TEMPLATEHASH, BaseSignatureChecker(), sigversion, &err)};
+        BOOST_CHECK(!res);
+        BOOST_CHECK_MESSAGE(err == ScriptError::SCRIPT_ERR_BAD_OPCODE, ScriptErrorString(err));
+    }
+}
+
+/** Exercise the three states of OP_TEMPLATEHASH in Tapscript: discouraged as a policy rule before
+ *  activation, an unconditional OP_SUCCESS at the consensus level before activation, and an
+ *  executed opcode once active. */
+BOOST_AUTO_TEST_CASE(templatehash_activation_states)
+{
+    // A Tapscript that is trivially satisfied once OP_TEMPLATEHASH executes.
+    const CScript leaf_script{CScript() << OP_TEMPLATEHASH << OP_DROP << OP_1};
+    TaprootBuilder builder;
+    builder.Add(0, leaf_script, TAPROOT_LEAF_TAPSCRIPT);
+    builder.Finalize(XOnlyPubKey::NUMS_H);
+    const CScript spent_spk{GetScriptForDestination(builder.GetOutput())};
+
+    CMutableTransaction tx;
+    tx.vin = {CTxIn{*Txid::FromHex("0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"), 21}};
+    tx.vout.emplace_back(424242, ToScript("001482074bdf6ce32b071dd120a17cf99cbc01ad3080"_hex));
+    const std::vector<CTxOut> spent_outputs{CTxOut{424243, spent_spk}};
+
+    const auto spend_data{builder.GetSpendData()};
+    const auto& cb{*spend_data.scripts.begin()->second.begin()};
+    tx.vin[0].scriptWitness.stack.emplace_back(leaf_script.begin(), leaf_script.end());
+    tx.vin[0].scriptWitness.stack.emplace_back(cb.begin(), cb.end());
+
+    PrecomputedTransactionData precomp;
+    precomp.Init(tx, std::vector<CTxOut>{spent_outputs});
+    const auto checker{GenericTransactionSignatureChecker(&tx, 0, CAmount{0}, precomp, MissingDataBehavior::ASSERT_FAIL)};
+    const auto verify{[&](script_verify_flags flags, ScriptError& err) {
+        return VerifyScript(tx.vin[0].scriptSig, spent_spk, &tx.vin[0].scriptWitness, flags, checker, &err);
+    }};
+    const script_verify_flags base{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT};
+    ScriptError err;
+
+    // Before activation, as a standardness rule: discouraged.
+    BOOST_CHECK(!verify(base | SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH, err));
+    BOOST_CHECK_MESSAGE(err == ScriptError::SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH, ScriptErrorString(err));
+
+    // Before activation, at the consensus level: still an OP_SUCCESS, so unconditionally valid.
+    BOOST_CHECK_MESSAGE(verify(base, err), ScriptErrorString(err));
+
+    // Once active: the opcode executes and the script is satisfied.
+    BOOST_CHECK_MESSAGE(verify(base | SCRIPT_VERIFY_TEMPLATEHASH, err), ScriptErrorString(err));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

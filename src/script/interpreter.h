@@ -146,6 +146,12 @@ enum class script_verify_flag_name : uint8_t {
     // Making unknown public key versions (in BIP 342 scripts) non-standard
     SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
 
+    // OP_TEMPLATEHASH validation (BIP 446)
+    SCRIPT_VERIFY_TEMPLATEHASH,
+
+    // Make OP_TEMPLATEHASH spend non-standard before activation.
+    SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH,
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -295,6 +301,11 @@ public:
          return false;
     }
 
+    virtual uint256 GetTemplateHash(ScriptExecutionData& execdata) const
+    {
+        return {};
+    }
+
     virtual ~BaseSignatureChecker() = default;
 };
 
@@ -332,6 +343,7 @@ public:
     bool CheckSchnorrSignature(std::span<const unsigned char> sig, std::span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror = nullptr) const override;
     bool CheckLockTime(const CScriptNum& nLockTime) const override;
     bool CheckSequence(const CScriptNum& nSequence) const override;
+    uint256 GetTemplateHash(ScriptExecutionData& execdata) const override;
 };
 
 using TransactionSignatureChecker = GenericTransactionSignatureChecker<CTransaction>;
@@ -362,6 +374,11 @@ public:
     bool CheckSequence(const CScriptNum& nSequence) const override
     {
         return m_checker.CheckSequence(nSequence);
+    }
+
+    uint256 GetTemplateHash(ScriptExecutionData& execdata) const override
+    {
+        return m_checker.GetTemplateHash(execdata);
     }
 };
 

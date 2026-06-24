@@ -2096,4 +2096,109 @@ BOOST_AUTO_TEST_CASE(templatehash_activation_states)
     BOOST_CHECK_MESSAGE(verify(base | SCRIPT_VERIFY_TEMPLATEHASH, err), ScriptErrorString(err));
 }
 
+/** Build a single-leaf Taproot output, spend it with `leaf` as the tapscript, and return the
+ *  resulting ScriptError (SCRIPT_ERR_OK iff the spend is valid) under the given verify flags. */
+static ScriptError EvalTapscriptLeaf(const CScript& leaf, script_verify_flags flags, const XOnlyPubKey& internal_key = XOnlyPubKey::NUMS_H)
+{
+    TaprootBuilder builder;
+    builder.Add(0, leaf, TAPROOT_LEAF_TAPSCRIPT);
+    builder.Finalize(internal_key);
+    const CScript spk{GetScriptForDestination(builder.GetOutput())};
+
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{*Txid::FromHex("0000000000000000000000000000000000000000000000000000000000000001"), 0});
+    tx.vout.emplace_back(1000, CScript() << OP_RETURN);
+    const std::vector<CTxOut> spent_outputs{CTxOut{1000, spk}};
+
+    const auto spend_data{builder.GetSpendData()};
+    const auto& cb{*spend_data.scripts.begin()->second.begin()};
+    tx.vin[0].scriptWitness.stack.emplace_back(leaf.begin(), leaf.end());
+    tx.vin[0].scriptWitness.stack.emplace_back(cb.begin(), cb.end());
+
+    PrecomputedTransactionData precomp;
+    precomp.Init(tx, std::vector<CTxOut>{spent_outputs});
+    const auto checker{GenericTransactionSignatureChecker(&tx, 0, CAmount{1000}, precomp, MissingDataBehavior::ASSERT_FAIL)};
+    ScriptError err{SCRIPT_ERR_OK};
+    VerifyScript(tx.vin[0].scriptSig, spk, &tx.vin[0].scriptWitness, flags, checker, &err);
+    return err;
+}
+
+/** Sanity-check OP_CHECKSIGFROMSTACK (BIP-348). */
+BOOST_AUTO_TEST_CASE(checksigfromstack)
+{
+    const auto check{[](ScriptError got, ScriptError want) { BOOST_CHECK_MESSAGE(got == want, ScriptErrorString(got)); }};
+    const script_verify_flags base{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT};
+    const script_verify_flags active{base | SCRIPT_VERIFY_TEMPLATEHASH};
+
+    // A key, a 32-byte message, and a valid BIP-340 signature over it.
+    const CKey key{GenerateRandomKey()};
+    const XOnlyPubKey xpk{key.GetPubKey()};
+    const std::vector<unsigned char> pubkey{xpk.begin(), xpk.end()};
+    const uint256 msg{uint256::ONE};
+    const std::vector<unsigned char> msg_vec{msg.begin(), msg.end()};
+    std::vector<unsigned char> sig(64);
+    BOOST_REQUIRE(key.SignSchnorr(msg, sig, /*merkle_root=*/nullptr, /*aux=*/uint256{}));
+
+    // Valid signature: CSFS pushes 1.
+    const CScript ok_leaf{CScript() << sig << msg_vec << pubkey << OP_CHECKSIGFROMSTACK};
+    check(EvalTapscriptLeaf(ok_leaf, active), SCRIPT_ERR_OK);
+    // Before activation it is still an OP_SUCCESS (valid), and discouraged as a policy rule.
+    check(EvalTapscriptLeaf(ok_leaf, base), SCRIPT_ERR_OK);
+    check(EvalTapscriptLeaf(ok_leaf, active | SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH), SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH);
+
+    // Tampered signature fails.
+    std::vector<unsigned char> bad_sig{sig};
+    bad_sig[10] ^= 0x01;
+    check(EvalTapscriptLeaf(CScript() << bad_sig << msg_vec << pubkey << OP_CHECKSIGFROMSTACK, active), SCRIPT_ERR_SCHNORR_SIG);
+
+    // Wrong (non-empty) signature size fails.
+    check(EvalTapscriptLeaf(CScript() << std::vector<unsigned char>(63, 0) << msg_vec << pubkey << OP_CHECKSIGFROMSTACK, active), SCRIPT_ERR_SCHNORR_SIG_SIZE);
+
+    // Zero-length public key fails.
+    check(EvalTapscriptLeaf(CScript() << sig << msg_vec << std::vector<unsigned char>{} << OP_CHECKSIGFROMSTACK, active), SCRIPT_ERR_TAPSCRIPT_EMPTY_PUBKEY);
+
+    // An unknown (non-32-byte) public key type succeeds without verification...
+    const std::vector<unsigned char> unknown_pk(33, 0x02);
+    check(EvalTapscriptLeaf(CScript() << sig << msg_vec << unknown_pk << OP_CHECKSIGFROMSTACK, active), SCRIPT_ERR_OK);
+    // ...but is discouraged when DISCOURAGE_UPGRADABLE_PUBKEYTYPE is set.
+    check(EvalTapscriptLeaf(CScript() << sig << msg_vec << unknown_pk << OP_CHECKSIGFROMSTACK, active | SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_PUBKEYTYPE), SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE);
+
+    // An empty signature pushes an empty vector (false) and continues: <empty> <msg> <pk> CSFS OP_NOT -> 1.
+    check(EvalTapscriptLeaf(CScript() << std::vector<unsigned char>{} << msg_vec << pubkey << OP_CHECKSIGFROMSTACK << OP_NOT, active), SCRIPT_ERR_OK);
+
+    // Outside Tapscript it is an unknown opcode.
+    std::vector<std::vector<unsigned char>> stack;
+    ScriptError err;
+    BOOST_CHECK(!EvalScript(stack, CScript() << OP_CHECKSIGFROMSTACK, active, BaseSignatureChecker(), SigVersion::BASE, &err));
+    BOOST_CHECK_MESSAGE(err == SCRIPT_ERR_BAD_OPCODE, ScriptErrorString(err));
+}
+
+/** Sanity-check OP_INTERNALKEY (BIP-349). */
+BOOST_AUTO_TEST_CASE(internalkey)
+{
+    const auto check{[](ScriptError got, ScriptError want) { BOOST_CHECK_MESSAGE(got == want, ScriptErrorString(got)); }};
+    const script_verify_flags base{SCRIPT_VERIFY_P2SH | SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_TAPROOT};
+    const script_verify_flags active{base | SCRIPT_VERIFY_TEMPLATEHASH};
+
+    // Use a real internal key so OP_INTERNALKEY has a non-trivial value to push.
+    const XOnlyPubKey internal_key{GenerateRandomKey().GetPubKey()};
+    const std::vector<unsigned char> ik_bytes{internal_key.begin(), internal_key.end()};
+
+    // OP_INTERNALKEY pushes the Taproot internal key.
+    const CScript ok_leaf{CScript() << OP_INTERNALKEY << ik_bytes << OP_EQUAL};
+    check(EvalTapscriptLeaf(ok_leaf, active, internal_key), SCRIPT_ERR_OK);
+    // Before activation it is still an OP_SUCCESS (valid), and discouraged as a policy rule.
+    check(EvalTapscriptLeaf(ok_leaf, base, internal_key), SCRIPT_ERR_OK);
+    check(EvalTapscriptLeaf(ok_leaf, active | SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH, internal_key), SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH);
+
+    // Comparing against the wrong key fails.
+    check(EvalTapscriptLeaf(CScript() << OP_INTERNALKEY << std::vector<unsigned char>(32, 0) << OP_EQUAL, active, internal_key), SCRIPT_ERR_EVAL_FALSE);
+
+    // Outside Tapscript it is an unknown opcode.
+    std::vector<std::vector<unsigned char>> stack;
+    ScriptError err;
+    BOOST_CHECK(!EvalScript(stack, CScript() << OP_INTERNALKEY, active, BaseSignatureChecker(), SigVersion::WITNESS_V0, &err));
+    BOOST_CHECK_MESSAGE(err == SCRIPT_ERR_BAD_OPCODE, ScriptErrorString(err));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

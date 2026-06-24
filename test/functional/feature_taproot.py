@@ -53,10 +53,12 @@ from test_framework.script import (
     OP_16,
     OP_2DROP,
     OP_2DUP,
+    OP_3DUP,
     OP_CHECKMULTISIG,
     OP_CHECKMULTISIGVERIFY,
     OP_CHECKSIG,
     OP_CHECKSIGADD,
+    OP_CHECKSIGFROMSTACK,
     OP_CHECKSIGVERIFY,
     OP_CODESEPARATOR,
     OP_DROP,
@@ -66,6 +68,7 @@ from test_framework.script import (
     OP_EQUAL,
     OP_EQUALVERIFY,
     OP_IF,
+    OP_INTERNALKEY,
     OP_NOP,
     OP_NOT,
     OP_NOTIF,
@@ -1121,6 +1124,22 @@ def spenders_taproot_active(template_active):
         # n OP_CHECKSIGADDs and 1 OP_CHECKSIG, but also an OP_CHECKSIGADD with an empty signature.
         lambda n, pk: (CScript([OP_DROP, OP_0, OP_10, pk, OP_CHECKSIGADD, OP_10, OP_EQUALVERIFY, pk] + [OP_2DUP, OP_16, OP_SWAP, OP_CHECKSIGADD, b'\x11', OP_EQUALVERIFY] * n + [OP_CHECKSIG]), n + 1),
     ]
+    # OP_CHECKSIGFROMSTACK (BIP-348) verifications count against the tapscript validation-weight
+    # budget, so exercise them in the sigops-ratio test to confirm they cannot be used as a cheap
+    # "sighash bomb". The signature/message are embedded in the leaf (CSFS does not introspect), and
+    # these are only added once active: pre-activation the opcode is an OP_SUCCESS and the ratio
+    # prediction would not hold.
+    if template_active:
+        CSFS_MSG = b'\x00\x00'
+        CSFS_SIG = sign_schnorr(secs[1], CSFS_MSG)
+        SIGOPS_RATIO_SCRIPTS += [
+            # n OP_CHECKSIGFROMSTACKs, each validating the embedded signature (n sigops).
+            lambda n, pk: (CScript([OP_2DROP, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n),
+            # 1 OP_CHECKSIGVERIFY then n OP_CHECKSIGFROMSTACKs, all with non-empty signatures (n+1 sigops).
+            lambda n, pk: (CScript([OP_DROP, pk, OP_CHECKSIGVERIFY, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n + 1),
+            # 1 empty OP_CHECKSIG and 1 empty OP_CHECKSIGFROMSTACK (neither counts) then n more (n sigops).
+            lambda n, pk: (CScript([OP_2DROP, OP_0, pk, OP_CHECKSIG, OP_DROP, OP_0, CSFS_MSG, pk, OP_CHECKSIGFROMSTACK, OP_DROP, CSFS_SIG, CSFS_MSG, pk] + [OP_3DUP, OP_CHECKSIGFROMSTACK, OP_DROP] * n + [OP_2DROP]), n),
+        ]
     for annex in [None, bytes([ANNEX_TAG]) + random.randbytes(random.randrange(1000))]:
         for hashtype in [SIGHASH_DEFAULT, SIGHASH_ALL]:
             for pubkey in [pubs[1], random.randbytes(random.choice([x for x in range(2, 81) if x != 32]))]:
@@ -1251,7 +1270,7 @@ def spenders_taproot_active(template_active):
                     add_spender(spenders, "legacy/pk-wrongkey", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, script=key_to_p2pk_script(pubkey1), **SINGLE_SIG, key=eckey1, failure={"key": eckey2}, sigops_weight=4-3*witv0, **ERR_EVAL_FALSE)
                     add_spender(spenders, "legacy/pkh-sighashflip", hashtype=hashtype, p2sh=p2sh, witv0=witv0, standard=standard, pkh=pubkey1, key=eckey1, **SIGHASH_BITFLIP, sigops_weight=4-3*witv0, **ERR_EVAL_FALSE)
 
-    # Verify that OP_CHECKSIGADD, OP_TEMPLATEHASH weren't accidentally added to pre-taproot validation logic.
+    # Verify that OP_CHECKSIGADD, OP_TEMPLATEHASH, OP_CHECKSIGFROMSTACK and OP_INTERNALKEY weren't accidentally added to pre-taproot validation logic.
     for p2sh in [False, True]:
         for witv0 in [False, True]:
             for hashtype in VALID_SIGHASHES_ECDSA + [random.randrange(0x04, 0x80), random.randrange(0x84, 0x100)]:
@@ -1260,6 +1279,8 @@ def spenders_taproot_active(template_active):
 
             # Should still fail if not in executed branch
             add_spender(spenders, "compat/noth", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, OP_TEMPLATEHASH, OP_ENDIF, OP_1]), inputs=[b''], failure={"inputs": [b'\x01']}, **ERR_BAD_OPCODE)
+            add_spender(spenders, "compat/nocsfs", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, OP_CHECKSIGFROMSTACK, OP_ENDIF, OP_1]), inputs=[b''], failure={"inputs": [b'\x01']}, **ERR_BAD_OPCODE)
+            add_spender(spenders, "compat/noik", p2sh=p2sh, witv0=witv0, standard=p2sh or witv0, script=CScript([OP_IF, OP_INTERNALKEY, OP_ENDIF, OP_1]), inputs=[b''], failure={"inputs": [b'\x01']}, **ERR_BAD_OPCODE)
 
     # == sighash caching tests ==
 
@@ -1401,6 +1422,100 @@ def generate_template_spenders_nonstandard():
     # This will fail after activation
     add_spender(spenders, "discouraged_template/emptystack", tap=tap, leaf="emptystack", standard=False)
 
+    return spenders
+
+
+def generate_csfs_spenders_consensus():
+    """Spenders exercising OP_CHECKSIGFROMSTACK (BIP-348) once active."""
+    secs = [generate_privkey() for _ in range(2)]
+    pubs = [compute_xonly_pubkey(sec)[0] for sec in secs]
+
+    # The message and pubkey are embedded in the leaf; the signature comes from the witness.
+    CSFS_MSG = random.randbytes(random.randrange(0, 520))
+    # A message with one byte removed (if non-empty) and one with bytes appended both fail to verify.
+    TRUNC_CSFS_MSG = None
+    if len(CSFS_MSG) > 0:
+        prune_index = random.randrange(len(CSFS_MSG))
+        TRUNC_CSFS_MSG = CSFS_MSG[:prune_index] + CSFS_MSG[prune_index + 1:]
+    extendable = 520 - len(CSFS_MSG)
+    EXTEND_CSFS_MSG = CSFS_MSG + random.randbytes(random.randrange(1, extendable + 1)) if extendable > 0 else None
+    OTHER_CSFS_MSG = CSFS_MSG
+    while OTHER_CSFS_MSG == CSFS_MSG:
+        OTHER_CSFS_MSG = random.randbytes(random.randrange(0, 520))
+    UNK_PUBKEY = random.randbytes(random.randrange(1, 520))
+    while len(UNK_PUBKEY) == 32:
+        UNK_PUBKEY = random.randbytes(random.randrange(1, 520))
+
+    scripts = [
+        ("simple_csfs", CScript([CSFS_MSG, pubs[0], OP_CHECKSIGFROMSTACK, OP_1, OP_EQUAL])),
+        ("simple_fail_csfs", CScript([CSFS_MSG, pubs[0], OP_CHECKSIGFROMSTACK, OP_0, OP_EQUAL])),
+        ("unk_pubkey_csfs", CScript([CSFS_MSG, UNK_PUBKEY, OP_CHECKSIGFROMSTACK])),
+        ("onearg_csfs", CScript([pubs[0], OP_CHECKSIGFROMSTACK])),
+        ("twoargs_csfs", CScript([CSFS_MSG, pubs[0], OP_CHECKSIGFROMSTACK])),
+        ("empty_pk_csfs", CScript([CSFS_MSG, OP_0, OP_CHECKSIGFROMSTACK, OP_0, OP_EQUAL])),
+    ]
+    tap = taproot_construct(pubs[0], scripts)
+    spenders = []
+
+    # "sighash" is the BIP-340 message verified against; getter("sign") signs it with `key`.
+    add_spender(spenders, "csfs/simple", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, failure={"sighash": OTHER_CSFS_MSG}, **ERR_SCHNORR_SIG)
+    if TRUNC_CSFS_MSG is not None:
+        add_spender(spenders, "csfs/trunc_msg", tap=tap, leaf="onearg_csfs", key=secs[0], inputs=[getter("sign"), CSFS_MSG], standard=len(CSFS_MSG) <= 80, sighash=CSFS_MSG, failure={"inputs": [getter("sign"), TRUNC_CSFS_MSG]}, **ERR_SCHNORR_SIG)
+    if EXTEND_CSFS_MSG is not None:
+        add_spender(spenders, "csfs/extend_msg", tap=tap, leaf="onearg_csfs", key=secs[0], inputs=[getter("sign"), CSFS_MSG], standard=len(CSFS_MSG) <= 80, sighash=CSFS_MSG, failure={"inputs": [getter("sign"), EXTEND_CSFS_MSG]}, **ERR_SCHNORR_SIG)
+    # Empty signature pushes an empty vector and continues, unless the pubkey is empty.
+    add_spender(spenders, "csfs/empty_sig", tap=tap, leaf="simple_fail_csfs", inputs=[b''], failure={"leaf": "empty_pk_csfs", "inputs": [OTHER_CSFS_MSG]}, **ERR_TAPSCRIPT_EMPTY_PUBKEY)
+    # An unknown (non-32-byte) pubkey is unconditionally valid given a (non-empty) signature.
+    add_spender(spenders, "csfs/unk_pubkey", tap=tap, leaf="unk_pubkey_csfs", standard=False, key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, failure={"inputs": []}, **ERR_INVALID_STACK_OPERATION)
+    # CSFS requires three stack elements.
+    add_spender(spenders, "csfs/onearg", tap=tap, leaf="onearg_csfs", key=secs[0], inputs=[getter("sign"), CSFS_MSG], standard=len(CSFS_MSG) <= 80, sighash=CSFS_MSG, failure={"inputs": []}, **ERR_INVALID_STACK_OPERATION)
+    add_spender(spenders, "csfs/twoarg", tap=tap, leaf="twoargs_csfs", key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, failure={"inputs": []}, **ERR_INVALID_STACK_OPERATION)
+    # A known-key signature that is neither empty nor 64 bytes must fail.
+    add_spender(spenders, "csfs/65_sig", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, failure={"leaf": "simple_fail_csfs", "inputs": [zero_appender(getter("sign"))]}, **ERR_SCHNORR_SIG_SIZE)
+    add_spender(spenders, "csfs/63_sig", tap=tap, leaf="simple_csfs", key=secs[0], inputs=[getter("sign")], sighash=CSFS_MSG, failure={"leaf": "simple_fail_csfs", "inputs": [byte_popper(getter("sign"))]}, **ERR_SCHNORR_SIG_SIZE)
+
+    return spenders
+
+
+def generate_internalkey_spenders_consensus():
+    """Spenders exercising OP_INTERNALKEY (BIP-349) once active."""
+    secs = [generate_privkey() for _ in range(2)]
+    pubs = [compute_xonly_pubkey(sec)[0] for sec in secs]
+    scripts = [("ik", CScript([OP_INTERNALKEY, OP_EQUAL]))]
+    tap = taproot_construct(pubs[0], scripts)
+    spenders = []
+    # OP_INTERNALKEY pushes the internal key (pubs[0]); the witness pushes the value to compare.
+    add_spender(spenders, "ik/success", tap=tap, leaf="ik", inputs=[pubs[0]], failure={"inputs": [pubs[1]]}, **ERR_EVAL_FALSE)
+    return spenders
+
+
+def generate_csfs_spenders_nonstandard():
+    """Spenders testing that pre-activation OP_CHECKSIGFROMSTACK usage is valid but discouraged."""
+    sec = generate_privkey()
+    pub, _ = compute_xonly_pubkey(sec)
+    scripts = [
+        ("stilltrue", CScript([b'', b'', b'', OP_CHECKSIGFROMSTACK])),
+        ("still_opsuccess", CScript([OP_RETURN, OP_CHECKSIGFROMSTACK])),
+    ]
+    tap = taproot_construct(pub, scripts)
+    spenders = []
+    add_spender(spenders, "discouraged_csfs/stilltrue", tap=tap, leaf="stilltrue", standard=False)
+    add_spender(spenders, "discouraged_csfs/still_opsuccess", tap=tap, leaf="still_opsuccess", standard=False)
+    return spenders
+
+
+def generate_internalkey_spenders_nonstandard():
+    """Spenders testing that pre-activation OP_INTERNALKEY usage is valid but discouraged."""
+    sec = generate_privkey()
+    pub, _ = compute_xonly_pubkey(sec)
+    scripts = [
+        ("stilltrue", CScript([OP_INTERNALKEY])),
+        ("still_opsuccess", CScript([OP_RETURN, OP_INTERNALKEY])),
+    ]
+    tap = taproot_construct(pub, scripts)
+    spenders = []
+    add_spender(spenders, "discouraged_ik/stilltrue", tap=tap, leaf="stilltrue", standard=False)
+    add_spender(spenders, "discouraged_ik/still_opsuccess", tap=tap, leaf="still_opsuccess", standard=False)
     return spenders
 
 
@@ -1997,6 +2112,8 @@ class TaprootTest(BitcoinTestFramework):
 
                 # Discouragement tests to ensure non-inclusion in mempool before activation
                 discouragement_spenders += generate_template_spenders_nonstandard()
+                discouragement_spenders += generate_csfs_spenders_nonstandard()
+                discouragement_spenders += generate_internalkey_spenders_nonstandard()
 
             else:
                 self.log.info("Activating TEMPLATEHASH softfork")
@@ -2008,6 +2125,8 @@ class TaprootTest(BitcoinTestFramework):
                 # Test coverage for committed hash in outputs is not included here but in
                 # feature_templatehash.py
                 consensus_spenders += generate_template_spenders_consensus()
+                consensus_spenders += generate_csfs_spenders_consensus()
+                consensus_spenders += generate_internalkey_spenders_consensus()
 
             # New sub-tests not checking standardness can be added to consensus_spenders
             # to allow for increased coverage across input types.

@@ -255,9 +255,10 @@ public:
 
     /** Verify a Schnorr signature against this public key.
      *
-     * sigbytes must be exactly 64 bytes.
+     * msg may be of any length: per BIP340 the message is not required to be a
+     * 32-byte hash. sigbytes must be exactly 64 bytes.
      */
-    bool VerifySchnorr(const uint256& msg, std::span<const unsigned char> sigbytes) const;
+    bool VerifySchnorr(std::span<const unsigned char> msg, std::span<const unsigned char> sigbytes) const;
 
     /** Compute the Taproot tweak as specified in BIP341, with *this as internal
      * key:

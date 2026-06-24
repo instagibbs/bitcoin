@@ -153,6 +153,9 @@ std::string GetOpName(opcodetype opcode)
     // Opcode added by BIP446 (Tapscript)
     case OP_TEMPLATEHASH           : return "OP_TEMPLATEHASH";
 
+    // Opcode added by BIP348 (Tapscript)
+    case OP_CHECKSIGFROMSTACK      : return "OP_CHECKSIGFROMSTACK";
+
     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
 
     } // no default case, so the compiler can warn about missing cases

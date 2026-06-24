@@ -213,6 +213,9 @@ enum opcodetype
     // Opcode added by BIP xx (Tapscript-only, formerly OP_SUCCESS206)
     OP_TEMPLATEHASH = 0xce,
 
+    // Opcode added by BIP348 (Tapscript-only, formerly OP_SUCCESS204)
+    OP_CHECKSIGFROMSTACK = 0xcc,
+
     OP_INVALIDOPCODE = 0xff,
 };
 

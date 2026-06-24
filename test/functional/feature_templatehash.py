@@ -73,7 +73,7 @@ class TemplateHashTest(BitcoinTestFramework):
         control_block = bytes([tap.leaves["basic"].version | tap.negflag]) + tap.internal_pubkey + tap.leaves["basic"].merklebranch
         tx.wit.vtxinwit[0].scriptWitness.stack = [tap.leaves["basic"].script, control_block]
 
-        assert_raises_rpc_error(-26, "mempool-script-verify-flag-failed (Templatehash is not active)", node.sendrawtransaction, tx.serialize().hex())
+        assert_raises_rpc_error(-26, "mempool-script-verify-flag-failed (BIP-448 opcode not active)", node.sendrawtransaction, tx.serialize().hex())
         peer.send_and_ping(msg_tx(tx))
         node.disconnect_p2ps()
         self.generate(self.wallet, 1)

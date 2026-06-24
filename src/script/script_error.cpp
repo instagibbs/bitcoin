@@ -80,7 +80,7 @@ std::string ScriptErrorString(const ScriptError serror)
         case SCRIPT_ERR_DISCOURAGE_UPGRADABLE_PUBKEYTYPE:
             return "Public key version reserved for soft-fork upgrades";
         case SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH:
-            return "Templatehash is not active";
+            return "BIP-448 opcode not active";
         case SCRIPT_ERR_PUBKEYTYPE:
             return "Public key is neither compressed or uncompressed";
         case SCRIPT_ERR_CLEANSTACK:

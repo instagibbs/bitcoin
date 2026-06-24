@@ -259,6 +259,9 @@ OP_CHECKSIGADD = CScriptOp(0xba)
 # BIP xx opcode (Tapscript-only, formerly OP_SUCCESS206)
 OP_TEMPLATEHASH = CScriptOp(0xce)
 
+# BIP348 opcode (Tapscript-only, formerly OP_SUCCESS204)
+OP_CHECKSIGFROMSTACK = CScriptOp(0xcc)
+
 OP_INVALIDOPCODE = CScriptOp(0xff)
 
 OPCODE_NAMES.update({
@@ -375,6 +378,7 @@ OPCODE_NAMES.update({
     OP_NOP10: 'OP_NOP10',
     OP_CHECKSIGADD: 'OP_CHECKSIGADD',
     OP_TEMPLATEHASH: 'OP_TEMPLATEHASH',
+    OP_CHECKSIGFROMSTACK: 'OP_CHECKSIGFROMSTACK',
     OP_INVALIDOPCODE: 'OP_INVALIDOPCODE',
 })
 
@@ -960,6 +964,6 @@ def taproot_construct(pubkey, scripts=None, treat_internal_as_infinity=False):
     return TaprootInfo(CScript([OP_1, tweaked]), pubkey, negated + 0, tweak, leaves, h, tweaked)
 
 def is_op_success(o, is_temphash_active):
-    if o == OP_TEMPLATEHASH:
+    if o == OP_TEMPLATEHASH or o == OP_CHECKSIGFROMSTACK:
         return not is_temphash_active
     return o == 0x50 or o == 0x62 or o == 0x89 or o == 0x8a or o == 0x8d or o == 0x8e or (o >= 0x7e and o <= 0x81) or (o >= 0x83 and o <= 0x86) or (o >= 0x95 and o <= 0x99) or (o >= 0xbb and o <= 0xfe)

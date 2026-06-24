@@ -1321,6 +1321,18 @@ bool EvalScript(std::vector<std::vector<unsigned char> >& stack, const CScript& 
                 }
                 break;
 
+                case OP_INTERNALKEY:
+                {
+                    // OP_INTERNALKEY is only available in Tapscript.
+                    if (sigversion == SigVersion::BASE || sigversion == SigVersion::WITNESS_V0) {
+                        return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
+                    }
+                    // The internal key is always set when executing Tapscript (see VerifyWitnessProgram).
+                    assert(execdata.m_internal_key);
+                    stack.emplace_back(execdata.m_internal_key->begin(), execdata.m_internal_key->end());
+                }
+                break;
+
                 default:
                     return set_error(serror, SCRIPT_ERR_BAD_OPCODE);
             }
@@ -1974,8 +1986,8 @@ static bool ExecuteWitnessScript(const std::span<const valtype>& stack_span, con
             // New opcodes will be listed here. May use a different sigversion to modify existing opcodes.
             if (IsOpSuccess(opcode)) {
                 // Do not return early success on the BIP-448 opcodes (OP_TEMPLATEHASH,
-                // OP_CHECKSIGFROMSTACK) once they are active. They are non-standard until then.
-                if (opcode == OP_TEMPLATEHASH || opcode == OP_CHECKSIGFROMSTACK) {
+                // OP_CHECKSIGFROMSTACK, OP_INTERNALKEY) once they are active. They are non-standard until then.
+                if (opcode == OP_TEMPLATEHASH || opcode == OP_CHECKSIGFROMSTACK || opcode == OP_INTERNALKEY) {
                     if (flags & SCRIPT_VERIFY_DISCOURAGE_TEMPLATEHASH) {
                         return set_error(serror, SCRIPT_ERR_DISCOURAGE_TEMPLATEHASH);
                     }
@@ -2119,6 +2131,8 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
                 exec_script = CScript(script.begin(), script.end());
                 execdata.m_validation_weight_left = ::GetSerializeSize(witness.stack) + VALIDATION_WEIGHT_OFFSET;
                 execdata.m_validation_weight_left_init = true;
+                // Expose the verified 32-byte internal key (control[1:33]) for OP_INTERNALKEY.
+                execdata.m_internal_key = uint256{std::span{control}.subspan(1, 32)};
                 return ExecuteWitnessScript(stack, exec_script, flags, SigVersion::TAPSCRIPT, checker, execdata, serror);
             }
             if (flags & SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {

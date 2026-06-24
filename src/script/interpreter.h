@@ -238,6 +238,9 @@ struct ScriptExecutionData
 
     //! The hash of the corresponding output
     std::optional<uint256> m_output_hash;
+
+    //! The 32-byte x-only Taproot internal key, set for Tapscript spends (for OP_INTERNALKEY).
+    std::optional<uint256> m_internal_key;
 };
 
 /** Signature hash sizes */

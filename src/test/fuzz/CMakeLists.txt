@@ -25,6 +25,7 @@ add_executable(fuzz
   buffered_file.cpp
   chain.cpp
   checkqueue.cpp
+  checksigfromstack.cpp
   cluster_linearize.cpp
   cmpctblock.cpp
   coins_view.cpp

@@ -12,6 +12,7 @@
 #include <validation.h>
 
 #include <memory>
+#include <optional>
 
 #include <boost/test/unit_test.hpp>
 
@@ -23,7 +24,7 @@ BOOST_FIXTURE_TEST_SUITE(anticycle_tests, TestChain100Setup)
 // whole {parent, child} 1P1C package (keyed by the parent's input).
 BOOST_AUTO_TEST_CASE(parks_1p1c_on_child_eviction)
 {
-    auto ac = std::make_shared<AntiCycle>(*m_node.mempool, /*max_park_weight=*/4'000'000);
+    auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000);
     m_node.validation_signals->RegisterSharedValidationInterface(ac);
 
     const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
@@ -50,6 +51,50 @@ BOOST_AUTO_TEST_CASE(parks_1p1c_on_child_eviction)
     const auto* pkg = ac->buffer().FindByInput(coin);
     BOOST_REQUIRE(pkg != nullptr);
     BOOST_CHECK_EQUAL(pkg->txns.size(), 2U);
+
+    m_node.validation_signals->UnregisterSharedValidationInterface(ac);
+}
+
+// The full cycle: a victim child is evicted, the attacker withdraws (freeing the contended
+// outpoint), and the coordinator reinstates the victim through normal validation.
+BOOST_AUTO_TEST_CASE(reinstates_victim_when_outpoint_frees)
+{
+    auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000);
+    m_node.validation_signals->RegisterSharedValidationInterface(ac);
+
+    const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
+    // Mature a second coinbase so the attacker has its own cycling input.
+    CreateAndProcessBlock({}, spk);
+    CreateAndProcessBlock({}, spk);
+
+    // Victim package {A, B}: parent A spends coinbase[0]; child B spends A's output.
+    const auto A = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[0], /*input_vout=*/0, /*input_height=*/0, coinbaseKey, spk, 49 * COIN, /*submit=*/true));
+    const auto B = MakeTransactionRef(CreateValidMempoolTransaction(
+        A, /*input_vout=*/0, /*input_height=*/0, coinbaseKey, spk, 48 * COIN, /*submit=*/true));
+    BOOST_REQUIRE(m_node.mempool->exists(B->GetHash()));
+
+    // Attacker B2 spends A's output + its own coin at a higher fee -> evicts child B (A survives).
+    const auto B2 = MakeTransactionRef(CreateValidTransaction(
+        {A, m_coinbase_txns[1]},
+        {COutPoint{A->GetHash(), 0}, COutPoint{m_coinbase_txns[1]->GetHash(), 0}},
+        /*input_height=*/0, {coinbaseKey, coinbaseKey}, {CTxOut{95 * COIN, spk}},
+        /*feerate=*/std::nullopt, /*fee_output=*/std::nullopt).first);
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(B2).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(!m_node.mempool->exists(B->GetHash())); // victim evicted
+
+    // Attacker B3 spends only its own coin (not A's output) at a higher fee -> replaces B2 and
+    // frees A's output -- the cycling withdrawal.
+    const auto B3 = MakeTransactionRef(CreateValidTransaction(
+        {m_coinbase_txns[1]}, {COutPoint{m_coinbase_txns[1]->GetHash(), 0}},
+        /*input_height=*/0, {coinbaseKey}, {CTxOut{45 * COIN, spk}},
+        /*feerate=*/std::nullopt, /*fee_output=*/std::nullopt).first);
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(B3).m_result_type == MempoolAcceptResult::ResultType::VALID);
+
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    // The coordinator reinstated the victim B once A's output became spendable again.
+    BOOST_CHECK(m_node.mempool->exists(B->GetHash()));
 
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }

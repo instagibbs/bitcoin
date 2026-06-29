@@ -12,25 +12,30 @@
 #include <cstdint>
 #include <vector>
 
+class ChainstateManager;
 class CTxMemPool;
-struct MempoolReplacementInfo;
 
 namespace node {
 
 /** Coordinator for the anti-cycling mitigation.
  *
  *  Subscribes to mempool/validation events, parks RBF-evicted near-top packages in a
- *  ParkBuffer, and (in later increments) reinstates them through normal validation when the
- *  contended outpoint frees. See docs/replacement-cycling-park-buffer-design.md.
+ *  ParkBuffer, and reinstates them through normal validation when their contended outpoint
+ *  frees. See docs/replacement-cycling-park-buffer-design.md.
  *
- *  This increment implements park-on-replacement only. */
+ *  This increment implements park-on-replacement and reinstate-on-free. The free/low->top
+ *  clear, the on-chain drain, and the next-block-line filter arrive in later increments. */
 class AntiCycle : public CValidationInterface
 {
 public:
-    AntiCycle(CTxMemPool& mempool, int64_t max_park_weight);
+    AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight);
 
     /** Park the 1P1C cluster of each transaction evicted by an RBF replacement. */
     void MempoolTransactionsReplaced(const MempoolReplacementInfo& info) override;
+
+    /** When a removal leaves a parked package's contended outpoint unspent, reinstate the
+     *  package through normal validation. */
+    void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) override;
 
     /** Inspection access to the park buffer (for tests). */
     const ParkBuffer& buffer() const { return m_buffer; }
@@ -40,6 +45,11 @@ private:
      *  unconfirmed mempool parent if it has exactly one (bounded to 1P1C). */
     std::vector<CTransactionRef> Build1P1C(const CTransactionRef& evicted) const;
 
+    /** Re-add the package members not already in the mempool, through normal validation.
+     *  Returns true if anything was accepted. */
+    bool Reinstate(const ParkBuffer::ParkedPackage& package);
+
+    ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     ParkBuffer m_buffer;
 };

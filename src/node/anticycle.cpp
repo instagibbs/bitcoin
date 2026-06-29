@@ -22,32 +22,42 @@ namespace node {
 AntiCycle::AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight)
     : m_chainman{chainman}, m_mempool{mempool}, m_buffer{max_park_weight} {}
 
-std::vector<CTransactionRef> AntiCycle::Build1P1C(const CTransactionRef& evicted) const
+std::vector<CTransactionRef> AntiCycle::BuildVictimCluster(const std::vector<ReplacedTransaction>& replaced) const
 {
-    std::vector<CTransactionRef> pkg{evicted};
-    std::set<Txid> parent_ids;
-    CTransactionRef parent;
-    for (const auto& in : evicted->vin) {
-        if (auto p = m_mempool.get(in.prevout.hash)) {
-            parent_ids.insert(p->GetHash());
-            parent = p;
+    std::vector<CTransactionRef> cluster;
+    std::set<Txid> ids;
+    const auto add = [&](const CTransactionRef& t) {
+        if (ids.insert(t->GetHash()).second) cluster.push_back(t);
+    };
+    for (const auto& rt : replaced) add(rt.tx);
+    // Pull in any surviving mempool parents of the evicted transactions (e.g. a CPFP parent that
+    // outlived its evicted child); a parent evicted alongside its child is already present.
+    for (const auto& rt : replaced) {
+        for (const auto& in : rt.tx->vin) {
+            if (auto p = m_mempool.get(in.prevout.hash)) add(p);
         }
     }
-    // Bounded to 1P1C: include the parent only if there is exactly one distinct mempool parent.
-    if (parent_ids.size() == 1) pkg.insert(pkg.begin(), parent);
-    return pkg;
+    if (cluster.size() > 2) return {}; // beyond 1P1C: not parked (PoC bound)
+    // Order parent-before-child so the cluster can be re-added as a package.
+    if (cluster.size() == 2 &&
+        std::any_of(cluster[0]->vin.begin(), cluster[0]->vin.end(),
+                    [&](const CTxIn& in) { return in.prevout.hash == cluster[1]->GetHash(); })) {
+        std::swap(cluster[0], cluster[1]);
+    }
+    return cluster;
 }
 
 void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
 {
-    for (const auto& rt : info.replaced) {
-        // TODO: filter to near-top -- rt.mining_feerate >= cached next-block line. For now park
-        // every replaced package; the line filter arrives with the BlockConnected handler.
-        std::vector<CTransactionRef> pkg = Build1P1C(rt.tx);
-        int64_t weight = 0;
-        for (const auto& t : pkg) weight += GetTransactionWeight(*t);
-        m_buffer.Park({.txns = std::move(pkg), .value = rt.mining_feerate.fee, .weight = weight});
-    }
+    // TODO: filter to near-top -- mining_feerate >= cached next-block line. For now park every
+    // replacement; the line filter arrives with the BlockConnected handler.
+    std::vector<CTransactionRef> cluster = BuildVictimCluster(info.replaced);
+    if (cluster.empty()) return;
+    int64_t weight = 0;
+    for (const auto& t : cluster) weight += GetTransactionWeight(*t);
+    CAmount value = 0;
+    for (const auto& rt : info.replaced) value += rt.mining_feerate.fee;
+    m_buffer.Park({.txns = std::move(cluster), .value = value, .weight = weight});
 }
 
 void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason, uint64_t)

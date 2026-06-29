@@ -108,6 +108,21 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         self.send([a2], FREE_FEE)
         self.wait_until(lambda: self.in_mempool(v1) and self.in_mempool(v2))
 
+    def test_package_evicted_together(self):
+        self.log.info("7) parent+child evicted by one replacement: reinstated together as a package")
+        self.fresh_slate()
+        o, atk = self.coin(), self.coin()
+        parent = self.send([o], VICTIM_FEE)
+        child = self.send([parent["new_utxos"][0]], VICTIM_FEE)   # spends the parent's output
+        assert self.in_mempool(parent) and self.in_mempool(child)
+        # A single replacement spends the parent's *input* -> evicts the parent and, as its
+        # descendant, the child too. The whole cluster must be parked as one package.
+        self.send([o, atk], GRAB_FEE)
+        assert not self.in_mempool(parent) and not self.in_mempool(child)
+        self.send([atk], FREE_FEE)               # frees the parent's input
+        # Both reinstated together (re-added as a package).
+        self.wait_until(lambda: self.in_mempool(parent) and self.in_mempool(child))
+
     def test_outpoint_spent_onchain_no_reinstate(self):
         self.log.info("5) attacker's replacement confirms: victim is gone for good, not reinstated")
         self.fresh_slate()
@@ -146,6 +161,7 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         self.test_1p1c_package_cycle()
         self.test_sustained_cycling()
         self.test_multiple_victims()
+        self.test_package_evicted_together()
         self.test_outpoint_spent_onchain_no_reinstate()
         self.test_honest_fee_bump_not_fought()
         self.log.info("All anti-cycling scenarios passed")

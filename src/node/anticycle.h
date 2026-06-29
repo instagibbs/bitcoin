@@ -17,6 +17,7 @@ class CBlock;
 class CBlockIndex;
 class ChainstateManager;
 class CTxMemPool;
+struct ReplacedTransaction;
 namespace kernel { struct ChainstateRole; }
 
 namespace node {
@@ -75,9 +76,9 @@ public:
     const ParkBuffer& buffer() const { return m_buffer; }
 
 private:
-    /** The package to park for an evicted transaction: the transaction itself, plus its single
-     *  unconfirmed mempool parent if it has exactly one (bounded to 1P1C). */
-    std::vector<CTransactionRef> Build1P1C(const CTransactionRef& evicted) const;
+    /** The cluster the replacement displaced: the evicted transactions plus any surviving mempool
+     *  parents, topologically ordered (parents first). Bounded to 1P1C -- returns empty if larger. */
+    std::vector<CTransactionRef> BuildVictimCluster(const std::vector<ReplacedTransaction>& replaced) const;
 
     /** Re-add the package members not already in the mempool, through normal validation.
      *  Returns true if anything was accepted. */

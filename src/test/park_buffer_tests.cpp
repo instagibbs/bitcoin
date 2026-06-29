@@ -94,7 +94,7 @@ BOOST_AUTO_TEST_CASE(rejects_footprint_conflicting_package)
     BOOST_CHECK(buffer.FindByInput(o1) != nullptr);
 }
 
-BOOST_AUTO_TEST_CASE(package_footprint_excludes_internal_outputs)
+BOOST_AUTO_TEST_CASE(package_footprint_includes_all_spent_outpoints)
 {
     FastRandomContext rng{/*fDeterministic=*/true};
     ParkBuffer buffer{/*max_weight=*/4'000'000};
@@ -109,9 +109,11 @@ BOOST_AUTO_TEST_CASE(package_footprint_excludes_internal_outputs)
                                   .weight = GetTransactionWeight(*parent) + GetTransactionWeight(*child)};
     BOOST_CHECK(buffer.Park(std::move(pkg)));
 
-    // Only the external input is indexed; the internal parent->child link is not.
+    // Both the external input and the internal parent->child link are indexed: the contended
+    // outpoint an attacker cycles can be the internal link (a CPFP anchor), so it must be
+    // findable to drive reinstatement.
     BOOST_CHECK(buffer.FindByInput(o_ext) != nullptr);
-    BOOST_CHECK(buffer.FindByInput(parent_out) == nullptr);
+    BOOST_CHECK(buffer.FindByInput(parent_out) != nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(evicts_lowest_value_over_cap)

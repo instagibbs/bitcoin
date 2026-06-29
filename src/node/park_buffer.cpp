@@ -6,28 +6,20 @@
 
 #include <algorithm>
 #include <cassert>
-#include <set>
 #include <utility>
 
 namespace node {
 
-// The external outpoints a package spends: the union of all inputs, minus outpoints
-// created within the package itself (internal parent->child links are not conflicts).
+// Every outpoint the package's transactions spend -- including outputs created and then
+// spent within the package (parent->child links). The contended outpoint an attacker cycles
+// may be such an internal link (e.g. a CPFP anchor spent by the child), and it must be
+// indexed so that (a) the package is reinstatable when it frees and (b) disjointness covers
+// the whole package.
 static std::vector<COutPoint> ComputeFootprint(const std::vector<CTransactionRef>& txns)
 {
-    // Outpoints created within the package; spends of these are internal links, not
-    // external inputs.
-    std::set<COutPoint> internal;
-    for (const auto& tx : txns) {
-        for (uint32_t i = 0; i < tx->vout.size(); ++i) {
-            internal.emplace(tx->GetHash(), i);
-        }
-    }
     std::vector<COutPoint> footprint;
     for (const auto& tx : txns) {
-        for (const auto& in : tx->vin) {
-            if (!internal.count(in.prevout)) footprint.push_back(in.prevout);
-        }
+        for (const auto& in : tx->vin) footprint.push_back(in.prevout);
     }
     return footprint;
 }

@@ -2,52 +2,154 @@
 # Copyright (c) 2026-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test that the -anticycle park buffer reinstates a replacement-cycled victim.
+"""Adversarial scenarios for the -anticycle park buffer.
 
-Runs one replacement cycle (see mempool_replacement_cycling.py for the bare attack) on a node
-started with -anticycle=1, and asserts the evicted victim is automatically reinstated once its
-input frees up -- the mitigation the bare reproduction shows is absent by default.
+The bare reproduction (mempool_replacement_cycling.py) shows that, by default, an attacker can
+RBF-evict a near-top victim and then withdraw, leaving the victim gone for free. These scenarios
+run on a node started with -anticycle=1 and exercise both the mitigation (victims get reinstated
+when their input frees up) and its restraint (it does not fight legitimate replacements, and it
+does not resurrect victims whose input was spent on-chain).
+
+Fee convention (sats per output; MiniWallet RBF-signals by default):
+    victim         5_000
+    attacker grab 30_000   (spends victim's input + the attacker's own coin)
+    attacker free 60_000   (spends only the attacker's coin, freeing the victim's input)
+so each replacement strictly raises both absolute fee and feerate.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.util import assert_equal
+
 from test_framework.wallet import MiniWallet
 
+VICTIM_FEE = 5_000
+GRAB_FEE = 30_000
+FREE_FEE = 60_000
 
-class AntiCycleTest(BitcoinTestFramework):
+
+class AntiCycleScenariosTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.uses_wallet = None
         self.extra_args = [["-anticycle=1"]]
 
-    def run_test(self):
+    # --- helpers -----------------------------------------------------------------------------
+
+    def send(self, utxos, fee_per_output):
+        """Build and broadcast a tx spending `utxos`, returning the tx dict."""
+        tx = self.wallet.create_self_transfer_multi(utxos_to_spend=utxos, fee_per_output=fee_per_output)
+        self.nodes[0].sendrawtransaction(tx["hex"])
+        return tx
+
+    def in_mempool(self, tx):
+        return tx["txid"] in self.nodes[0].getrawmempool()
+
+    def fresh_slate(self):
+        """Confirm everything in the mempool and the buffer's parked entries for a clean start."""
+        self.generate(self.wallet, 1)
+        assert_equal(self.nodes[0].getrawmempool(), [])
+
+    def coin(self):
+        return self.wallet.get_utxo(confirmed_only=True)
+
+    # --- scenarios ---------------------------------------------------------------------------
+
+    def test_single_tx_cycle(self):
+        self.log.info("1) single-tx cycle: victim is reinstated when its input frees")
+        self.fresh_slate()
+        o, atk = self.coin(), self.coin()
+        victim = self.send([o], VICTIM_FEE)
+        assert self.in_mempool(victim)
+        self.send([o, atk], GRAB_FEE)            # evict the victim
+        assert not self.in_mempool(victim)
+        self.send([atk], FREE_FEE)               # withdraw, freeing the victim's input
+        self.wait_until(lambda: self.in_mempool(victim))
+
+    def test_1p1c_package_cycle(self):
+        self.log.info("2) 1P1C cycle: the CPFP child is reinstated, the parent is untouched")
+        self.fresh_slate()
+        o, atk = self.coin(), self.coin()
+        parent = self.send([o], VICTIM_FEE)
+        child = self.send([parent["new_utxos"][0]], VICTIM_FEE)   # spends the parent's output
+        assert self.in_mempool(parent) and self.in_mempool(child)
+        # Attacker grabs the parent's output (the "anchor") -> evicts the child; parent survives.
+        self.send([parent["new_utxos"][0], atk], GRAB_FEE)
+        assert self.in_mempool(parent) and not self.in_mempool(child)
+        self.send([atk], FREE_FEE)               # frees the parent's output
+        self.wait_until(lambda: self.in_mempool(child))
+        assert self.in_mempool(parent)
+
+    def test_sustained_cycling(self):
+        self.log.info("3) sustained cycling: the victim survives every round; the attacker pays each time")
+        self.fresh_slate()
+        o = self.coin()
+        victim = self.send([o], VICTIM_FEE)
+        assert self.in_mempool(victim)
+        rounds = 3
+        for i in range(rounds):
+            atk = self.coin()                    # a fresh attacker coin per round
+            self.send([o, atk], GRAB_FEE)        # evict
+            assert not self.in_mempool(victim)
+            self.send([atk], FREE_FEE)           # withdraw
+            self.wait_until(lambda: self.in_mempool(victim))   # reinstated again
+        self.log.info(f"   victim survived {rounds} cycling rounds")
+
+    def test_multiple_victims(self):
+        self.log.info("4) multiple independent victims cycled at once: all reinstated")
+        self.fresh_slate()
+        o1, o2, a1, a2 = self.coin(), self.coin(), self.coin(), self.coin()
+        v1 = self.send([o1], VICTIM_FEE)
+        v2 = self.send([o2], VICTIM_FEE)
+        self.send([o1, a1], GRAB_FEE)
+        self.send([o2, a2], GRAB_FEE)
+        assert not self.in_mempool(v1) and not self.in_mempool(v2)
+        self.send([a1], FREE_FEE)
+        self.send([a2], FREE_FEE)
+        self.wait_until(lambda: self.in_mempool(v1) and self.in_mempool(v2))
+
+    def test_outpoint_spent_onchain_no_reinstate(self):
+        self.log.info("5) attacker's replacement confirms: victim is gone for good, not reinstated")
+        self.fresh_slate()
         node = self.nodes[0]
-        wallet = MiniWallet(node)
-        self.generate(wallet, 110)
-        mempool = lambda: node.getrawmempool()
+        o, atk = self.coin(), self.coin()
+        victim = self.send([o], VICTIM_FEE)
+        grab = self.send([o, atk], GRAB_FEE)     # evict (victim parked)
+        assert not self.in_mempool(victim)
+        # The attacker lets the replacement confirm -- i.e. pays for it. The victim's input is
+        # now spent on-chain, so it can never be reinstated; the buffer must drop it.
+        self.generate(self.wallet, 1)
+        assert not self.in_mempool(grab)         # confirmed
+        self.generate(self.wallet, 1)            # a further block: still no resurrection
+        assert not self.in_mempool(victim)
 
-        coin_O = wallet.get_utxo(confirmed_only=True)    # the protected input
-        coin_ATK = wallet.get_utxo(confirmed_only=True)  # the attacker's cycling input
+    def test_honest_fee_bump_not_fought(self):
+        self.log.info("6) honest fee-bump: the owner's replacement wins; the old tx is not resurrected")
+        self.fresh_slate()
+        node = self.nodes[0]
+        o = self.coin()
+        v = self.send([o], VICTIM_FEE)
+        bumped = self.send([o], FREE_FEE)        # the owner's own RBF replacement on the same input
+        assert not self.in_mempool(v)            # replaced
+        assert self.in_mempool(bumped)
+        # The buffer saw v evicted and parked it, but must NOT resurrect it over the owner's
+        # replacement while that replacement legitimately holds the input.
+        self.send([self.coin()], VICTIM_FEE)     # unrelated tx -> drives the validation queue
+        self.sync_all()
+        assert not self.in_mempool(v)
+        assert self.in_mempool(bumped)
 
-        # Victim H spends the protected input at a next-block feerate.
-        H = wallet.create_self_transfer_multi(utxos_to_spend=[coin_O], fee_per_output=5_000)
-        node.sendrawtransaction(H["hex"])
-        assert H["txid"] in mempool()
-
-        # Attacker B2 grabs coin_O (+ its own coin) at a higher feerate -> evicts H.
-        B2 = wallet.create_self_transfer_multi(utxos_to_spend=[coin_O, coin_ATK], fee_per_output=30_000)
-        node.sendrawtransaction(B2["hex"])
-        assert H["txid"] not in mempool()
-
-        # Attacker B3 replaces B2 on coin_ATK but does NOT spend coin_O -> frees coin_O.
-        B3 = wallet.create_self_transfer_multi(utxos_to_spend=[coin_ATK], fee_per_output=60_000)
-        node.sendrawtransaction(B3["hex"])
-
-        # The park buffer reinstates the victim once coin_O is unspent again. (Reinstatement
-        # happens on the validation queue, so wait for it.)
-        self.wait_until(lambda: H["txid"] in node.getrawmempool())
-        self.log.info("Victim reinstated by the -anticycle park buffer")
+    def run_test(self):
+        self.wallet = MiniWallet(self.nodes[0])
+        self.generate(self.wallet, 150)
+        self.test_single_tx_cycle()
+        self.test_1p1c_package_cycle()
+        self.test_sustained_cycling()
+        self.test_multiple_victims()
+        self.test_outpoint_spent_onchain_no_reinstate()
+        self.test_honest_fee_bump_not_fought()
+        self.log.info("All anti-cycling scenarios passed")
 
 
 if __name__ == '__main__':
-    AntiCycleTest(__file__).main()
+    AntiCycleScenariosTest(__file__).main()

@@ -1239,6 +1239,20 @@ void MemPoolAccept::FinalizeSubpackage(const ATMPArgs& args)
         );
         m_subpackage.m_replaced_transactions.push_back(it->GetSharedTx());
     }
+    // Notify listeners of the replacement (the evicted transactions and what replaced
+    // them) before applying the changeset, so the linkage is available alongside the
+    // per-transaction TransactionRemovedFromMempool(..., REPLACED, ...) events that follow.
+    if (m_pool.m_opts.signals && !m_subpackage.m_changeset->GetRemovals().empty()) {
+        MempoolReplacementInfo repl_info;
+        repl_info.replaced.reserve(m_subpackage.m_changeset->GetRemovals().size());
+        for (CTxMemPool::txiter it : m_subpackage.m_changeset->GetRemovals()) {
+            // Capture the mining (chunk) feerate before Apply() removes the entry, so
+            // listeners can tell whether the evicted tx was in the next-block set.
+            repl_info.replaced.push_back({it->GetSharedTx(), m_pool.GetMainChunkFeerate(*it)});
+        }
+        repl_info.replacement = m_subpackage.m_changeset->GetAddedTxns();
+        m_pool.m_opts.signals->MempoolTransactionsReplaced(repl_info);
+    }
     m_subpackage.m_changeset->Apply();
     m_subpackage.m_changeset.reset();
 }

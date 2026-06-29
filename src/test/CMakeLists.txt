@@ -9,6 +9,7 @@ add_executable(test_bitcoin
   addrman_tests.cpp
   allocator_tests.cpp
   amount_tests.cpp
+  anticycle_tests.cpp
   argsman_tests.cpp
   arith_uint256_tests.cpp
   banman_tests.cpp
@@ -56,6 +57,7 @@ add_executable(test_bitcoin
   key_io_tests.cpp
   key_tests.cpp
   logging_tests.cpp
+  mempool_replacement_feed_tests.cpp
   mempool_tests.cpp
   merkle_tests.cpp
   merkleblock_tests.cpp
@@ -73,6 +75,7 @@ add_executable(test_bitcoin
   node_init_tests.cpp
   node_warnings_tests.cpp
   orphanage_tests.cpp
+  park_buffer_tests.cpp
   pcp_tests.cpp
   peerman_tests.cpp
   pmt_tests.cpp

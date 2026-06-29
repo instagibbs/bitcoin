@@ -82,6 +82,7 @@ add_executable(fuzz
   p2p_transport_serialization.cpp
   pcp.cpp
   package_eval.cpp
+  park_buffer.cpp
   parse_hd_keypath.cpp
   parse_iso8601.cpp
   parse_numbers.cpp

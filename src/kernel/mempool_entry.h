@@ -12,6 +12,7 @@
 #include <policy/settings.h>
 #include <primitives/transaction.h>
 #include <txgraph.h>
+#include <util/feefrac.h>
 #include <util/overflow.h>
 #include <util/time.h>
 
@@ -197,6 +198,25 @@ struct NewMempoolTransactionInfo {
           m_submitted_in_package{submitted_in_package},
           m_chainstate_is_current{chainstate_is_current},
           m_has_no_mempool_parents{has_no_mempool_parents} {}
+};
+
+/** A transaction evicted by an RBF replacement, with its mining (chunk) feerate at the moment
+ *  of eviction -- its contribution to the block template, used to decide whether it was in the
+ *  next-block set. */
+struct ReplacedTransaction {
+    CTransactionRef tx;
+    FeePerWeight mining_feerate;
+};
+
+/** Transactions evicted from the mempool by an RBF replacement, with the transaction(s)
+ *  that replaced them. Emitted via CValidationInterface::MempoolTransactionsReplaced as a
+ *  richer, replacement-specific companion to the per-transaction
+ *  TransactionRemovedFromMempool(..., REPLACED, ...) notifications. */
+struct MempoolReplacementInfo {
+    /** The transactions evicted from the mempool by this replacement. */
+    std::vector<ReplacedTransaction> replaced;
+    /** The transaction(s) that replaced them. */
+    std::vector<CTransactionRef> replacement;
 };
 
 #endif // BITCOIN_KERNEL_MEMPOOL_ENTRY_H

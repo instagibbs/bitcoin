@@ -30,6 +30,7 @@ struct CBlockLocator;
 enum class MemPoolRemovalReason;
 struct RemovedMempoolTransactionInfo;
 struct NewMempoolTransactionInfo;
+struct MempoolReplacementInfo;
 
 /**
  * Implement this to subscribe to events generated in validation and mempool
@@ -107,6 +108,18 @@ protected:
      * Called on a background thread.
      */
     virtual void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) {}
+    /**
+     * Notifies listeners of transactions evicted from the mempool by an RBF replacement,
+     * together with the transaction(s) that replaced them.
+     *
+     * This is a richer companion to the per-transaction TransactionRemovedFromMempool
+     * notifications (which fire with reason=REPLACED for the same transactions but carry no
+     * linkage to the replacement). It is emitted once per replacement, before the
+     * corresponding TransactionRemovedFromMempool / TransactionAddedToMempool events.
+     *
+     * Called on a background thread.
+     */
+    virtual void MempoolTransactionsReplaced(const MempoolReplacementInfo& info) {}
     /*
      * Notifies listeners of transactions removed from the mempool as
      * as a result of new block being connected.
@@ -222,6 +235,7 @@ public:
     void ActiveTipChange(const CBlockIndex&, bool);
     void TransactionAddedToMempool(const NewMempoolTransactionInfo&, uint64_t mempool_sequence);
     void TransactionRemovedFromMempool(const CTransactionRef&, MemPoolRemovalReason, uint64_t mempool_sequence);
+    void MempoolTransactionsReplaced(const MempoolReplacementInfo&);
     void MempoolTransactionsRemovedForBlock(const std::vector<RemovedMempoolTransactionInfo>&, unsigned int nBlockHeight);
     void BlockConnected(const kernel::ChainstateRole&, std::shared_ptr<const CBlock>, const CBlockIndex* pindex);
     void BlockDisconnected(std::shared_ptr<const CBlock>, const CBlockIndex* pindex);

@@ -219,6 +219,17 @@ void ValidationSignals::TransactionRemovedFromMempool(const CTransactionRef& tx,
     ENQUEUE_AND_LOG_EVENT(std::move(event), std::move(log_msg));
 }
 
+void ValidationSignals::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
+{
+    auto log_msg = LOG_MSG("%s: replaced=%s replacement=%s", __func__,
+                          info.replaced.size(),
+                          info.replacement.size());
+    auto event = [info, this] {
+        m_internals->Iterate([&](CValidationInterface& callbacks) { callbacks.MempoolTransactionsReplaced(info); });
+    };
+    ENQUEUE_AND_LOG_EVENT(std::move(event), std::move(log_msg));
+}
+
 void ValidationSignals::BlockConnected(const ChainstateRole& role, std::shared_ptr<const CBlock> pblock, const CBlockIndex* pindex)
 {
     auto log_msg = LOG_MSG("%s: block hash=%s block height=%d", __func__,

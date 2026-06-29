@@ -214,6 +214,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   net_processing.cpp
   netgroup.cpp
   node/abort.cpp
+  node/anticycle.cpp
   node/blockmanager_args.cpp
   node/blockstorage.cpp
   node/caches.cpp
@@ -235,6 +236,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/mining_args.cpp
   node/mini_miner.cpp
   node/minisketchwrapper.cpp
+  node/park_buffer.cpp
   node/peerman_args.cpp
   node/psbt.cpp
   node/timeoffsets.cpp

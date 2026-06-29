@@ -59,7 +59,11 @@ void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPool
         for (const auto& in : tx->vin) {
             const auto* pkg = m_buffer.FindByInput(in.prevout);
             if (!pkg) continue;
-            if (m_mempool.GetConflictTx(in.prevout) != nullptr) continue; // outpoint still spent
+            // The removed tx was a top spender of this outpoint; reinstate only on a
+            // top -> free/low transition (it left the outpoint unspent). Decision routed through
+            // the unit-tested state machine.
+            const bool now_above = m_mempool.GetConflictTx(in.prevout) != nullptr;
+            if (OutpointTransition(/*prev_above=*/true, now_above, /*spender_changed=*/true) != CycleAction::kReinstate) continue;
             candidates.emplace_back(in.prevout, *pkg);
         }
     }

@@ -135,3 +135,28 @@ BOOST_AUTO_TEST_CASE(drains_parked_package_when_outpoint_spent_onchain)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+// The state-machine decision logic in isolation -- no transactions or mempool required.
+BOOST_AUTO_TEST_SUITE(anticycle_transition_tests)
+
+BOOST_AUTO_TEST_CASE(state_machine_transitions)
+{
+    using node::CycleAction;
+    using node::OutpointTransition;
+
+    // top -> top, different spender: a next-block victim was displaced (the cycling move) -> park.
+    BOOST_CHECK(OutpointTransition(/*prev_above=*/true, /*now_above=*/true, /*spender_changed=*/true) == CycleAction::kPark);
+    // top -> top, same spender: nothing changed.
+    BOOST_CHECK(OutpointTransition(true, true, false) == CycleAction::kNone);
+    // top -> free/low: the top spender withdrew -> reinstate.
+    BOOST_CHECK(OutpointTransition(true, false, true) == CycleAction::kReinstate);
+    BOOST_CHECK(OutpointTransition(true, false, false) == CycleAction::kReinstate);
+    // free/low -> top: legitimately refilled -> clear the stale victim (honest-user protection).
+    BOOST_CHECK(OutpointTransition(false, true, true) == CycleAction::kClear);
+    BOOST_CHECK(OutpointTransition(false, true, false) == CycleAction::kClear);
+    // free/low -> free/low: nothing.
+    BOOST_CHECK(OutpointTransition(false, false, true) == CycleAction::kNone);
+    BOOST_CHECK(OutpointTransition(false, false, false) == CycleAction::kNone);
+}
+
+BOOST_AUTO_TEST_SUITE_END()

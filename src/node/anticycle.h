@@ -21,6 +21,29 @@ namespace kernel { struct ChainstateRole; }
 
 namespace node {
 
+/** Action the anti-cycling state machine takes for a protected outpoint on a transition. */
+enum class CycleAction { kNone, kPark, kClear, kReinstate };
+
+/** The per-outpoint state-machine transition (faithful to the anticycle PoC). `*_above` is
+ *  whether the outpoint is spent at/above the next-block line; `spender_changed` whether the
+ *  current spender differs from the previous one.
+ *
+ *  - top -> top (different spender): a next-block victim was displaced -- the cycling move,
+ *    generally the attacker -> PARK the displaced victim.
+ *  - top -> free/low: the top spender withdrew -> REINSTATE the parked victim.
+ *  - free/low -> top: the slot was legitimately refilled at next-block feerate -- generally the
+ *    honest owner re-establishing -> CLEAR the stale victim (never resurrect a transaction the
+ *    owner deliberately replaced).
+ *
+ *  This is a pure function so the decision logic is unit-testable in isolation. */
+constexpr CycleAction OutpointTransition(bool prev_above, bool now_above, bool spender_changed)
+{
+    if (prev_above && now_above) return spender_changed ? CycleAction::kPark : CycleAction::kNone;
+    if (prev_above && !now_above) return CycleAction::kReinstate;
+    if (!prev_above && now_above) return CycleAction::kClear;
+    return CycleAction::kNone;
+}
+
 /** Coordinator for the anti-cycling mitigation.
  *
  *  Subscribes to mempool/validation events, parks RBF-evicted near-top packages in a

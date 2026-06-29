@@ -43,6 +43,7 @@ class SignalInterrupt;
 }
 
 namespace node {
+class AntiCycle;
 class KernelNotifications;
 class Warnings;
 
@@ -71,6 +72,8 @@ struct NodeContext {
     std::unique_ptr<CTxMemPool> mempool;
     std::unique_ptr<const NetGroupManager> netgroupman;
     std::unique_ptr<CBlockPolicyEstimator> fee_estimator;
+    //! Experimental anti-cycling park buffer (opt-in via -anticycle).
+    std::unique_ptr<AntiCycle> anticycle;
     std::unique_ptr<PeerManager> peerman;
     std::unique_ptr<TorController> tor_controller;
     std::unique_ptr<ChainstateManager> chainman;

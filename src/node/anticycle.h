@@ -21,6 +21,9 @@ namespace kernel { struct ChainstateRole; }
 
 namespace node {
 
+/** Default cap on the total weight of parked packages (~one block). */
+static constexpr int64_t DEFAULT_ANTICYCLE_MAX_WEIGHT{4'000'000};
+
 /** Action the anti-cycling state machine takes for a protected outpoint on a transition. */
 enum class CycleAction { kNone, kPark, kClear, kReinstate };
 

@@ -99,4 +99,39 @@ BOOST_AUTO_TEST_CASE(reinstates_victim_when_outpoint_frees)
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }
 
+// A parked package is dropped once its contended outpoint is spent on-chain by a non-member
+// (the attacker's replacement confirms): the victim can never be reinstated, so don't keep it.
+BOOST_AUTO_TEST_CASE(drains_parked_package_when_outpoint_spent_onchain)
+{
+    auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000);
+    m_node.validation_signals->RegisterSharedValidationInterface(ac);
+
+    const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
+    CreateAndProcessBlock({}, spk);
+    CreateAndProcessBlock({}, spk);
+
+    const auto A = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[0], /*input_vout=*/0, /*input_height=*/0, coinbaseKey, spk, 49 * COIN, /*submit=*/true));
+    const auto B = MakeTransactionRef(CreateValidMempoolTransaction(
+        A, /*input_vout=*/0, /*input_height=*/0, coinbaseKey, spk, 48 * COIN, /*submit=*/true));
+
+    // Attacker B2 spends A's output + own coin -> evicts B; coordinator parks {A, B}.
+    const auto B2 = CreateValidTransaction(
+        {A, m_coinbase_txns[1]},
+        {COutPoint{A->GetHash(), 0}, COutPoint{m_coinbase_txns[1]->GetHash(), 0}},
+        /*input_height=*/0, {coinbaseKey, coinbaseKey}, {CTxOut{95 * COIN, spk}},
+        /*feerate=*/std::nullopt, /*fee_output=*/std::nullopt).first;
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(MakeTransactionRef(B2)).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(ac->buffer().FindByInput(COutPoint{A->GetHash(), 0}) != nullptr);
+
+    // Confirm A and B2 in a block: B2 spends A's output on-chain, so {A, B} can never reinstate.
+    CreateAndProcessBlock({CMutableTransaction(*A), B2}, spk);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    BOOST_CHECK(ac->buffer().FindByInput(COutPoint{A->GetHash(), 0}) == nullptr);
+
+    m_node.validation_signals->UnregisterSharedValidationInterface(ac);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

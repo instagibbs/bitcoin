@@ -10,10 +10,14 @@
 #include <validationinterface.h>
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
+class CBlock;
+class CBlockIndex;
 class ChainstateManager;
 class CTxMemPool;
+namespace kernel { struct ChainstateRole; }
 
 namespace node {
 
@@ -36,6 +40,10 @@ public:
     /** When a removal leaves a parked package's contended outpoint unspent, reinstate the
      *  package through normal validation. */
     void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) override;
+
+    /** Drop parked packages whose footprint outpoint was spent on-chain by a non-member
+     *  transaction (permanently invalid). */
+    void BlockConnected(const kernel::ChainstateRole& role, const std::shared_ptr<const CBlock>& block, const CBlockIndex* pindex) override;
 
     /** Inspection access to the park buffer (for tests). */
     const ParkBuffer& buffer() const { return m_buffer; }

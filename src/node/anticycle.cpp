@@ -7,10 +7,12 @@
 #include <consensus/validation.h>
 #include <kernel/cs_main.h>
 #include <kernel/mempool_entry.h>
+#include <primitives/block.h>
 #include <sync.h>
 #include <txmempool.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <optional>
 #include <set>
 #include <utility>
@@ -66,6 +68,21 @@ void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPool
     // can pay its way back in -- retry, not immunity.
     for (const auto& [outpoint, pkg] : candidates) {
         if (Reinstate(pkg)) m_buffer.Remove(outpoint);
+    }
+}
+
+void AntiCycle::BlockConnected(const kernel::ChainstateRole&, const std::shared_ptr<const CBlock>& block, const CBlockIndex*)
+{
+    for (const auto& tx : block->vtx) {
+        for (const auto& in : tx->vin) {
+            const auto* pkg = m_buffer.FindByInput(in.prevout);
+            if (!pkg) continue;
+            // A package member confirming is the package progressing on-chain, not invalidation;
+            // only a non-member spend of a footprint outpoint makes the package unreinstatable.
+            const bool by_member = std::any_of(pkg->txns.begin(), pkg->txns.end(),
+                [&](const CTransactionRef& t) { return t->GetHash() == tx->GetHash(); });
+            if (!by_member) m_buffer.Remove(in.prevout);
+        }
     }
 }
 

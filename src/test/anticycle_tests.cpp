@@ -220,6 +220,64 @@ BOOST_AUTO_TEST_CASE(clears_parked_victim_when_outpoint_retaken)
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }
 
+// Weight cap, end-to-end: with a cap that holds one victim, parking a second (higher-value) victim
+// evicts the lowest-value one. The dropped victim is then not reinstated when its outpoint frees,
+// while the retained one is.
+BOOST_AUTO_TEST_CASE(weight_cap_drops_lowest_value_victim)
+{
+    const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
+    CreateAndProcessBlock({}, spk);  // mature coinbase[1..3]
+    CreateAndProcessBlock({}, spk);
+    CreateAndProcessBlock({}, spk);
+
+    // A low-value (low-fee) victim and a high-value (high-fee) victim, each on its own coin.
+    const auto lo = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[0], 0, 0, coinbaseKey, spk, /*output_amount=*/4999 * COIN / 100, /*submit=*/true)); // fee 0.01
+    const auto hi = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[1], 0, 0, coinbaseKey, spk, /*output_amount=*/49 * COIN, /*submit=*/true));          // fee 1
+
+    // Cap holds exactly one such single-tx victim.
+    auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool,
+                                          /*max_park_weight=*/GetTransactionWeight(*lo) * 3 / 2);
+    m_node.validation_signals->RegisterSharedValidationInterface(ac);
+
+    const COutPoint o_lo{m_coinbase_txns[0]->GetHash(), 0};
+    const COutPoint o_hi{m_coinbase_txns[1]->GetHash(), 0};
+    const auto grab = [&](const CTransactionRef& vcoin, const COutPoint& vop, const CTransactionRef& acoin,
+                          const COutPoint& aop, CAmount out) {
+        return MakeTransactionRef(CreateValidTransaction({vcoin, acoin}, {vop, aop}, 0,
+            {coinbaseKey, coinbaseKey}, {CTxOut{out, spk}}, std::nullopt, std::nullopt).first);
+    };
+
+    // Evict lo -> park it (within the cap).
+    const auto grab_lo = grab(m_coinbase_txns[0], o_lo, m_coinbase_txns[2],
+                              COutPoint{m_coinbase_txns[2]->GetHash(), 0}, 9950 * COIN / 100); // fee 0.5
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(grab_lo).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(ac->buffer().FindByInput(o_lo) != nullptr);
+
+    // Evict hi -> park it -> over the cap -> the lowest-value package (lo) is dropped.
+    const auto grab_hi = grab(m_coinbase_txns[1], o_hi, m_coinbase_txns[3],
+                              COutPoint{m_coinbase_txns[3]->GetHash(), 0}, 98 * COIN); // fee 2
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(grab_hi).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(ac->buffer().FindByInput(o_lo) == nullptr); // lowest-value victim dropped
+    BOOST_CHECK(ac->buffer().FindByInput(o_hi) != nullptr); // higher-value victim retained
+
+    // Consequence: freeing lo's outpoint does not reinstate it (dropped); freeing hi's does.
+    const auto wd_lo = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[2], 0, 0, coinbaseKey, spk, 49 * COIN, /*submit=*/false)); // RBF grab_lo, frees o_lo
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(wd_lo).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    const auto wd_hi = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[3], 0, 0, coinbaseKey, spk, 47 * COIN, /*submit=*/false)); // RBF grab_hi, frees o_hi
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(wd_hi).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(m_node.mempool->exists(hi->GetHash()));   // retained victim reinstated
+    BOOST_CHECK(!m_node.mempool->exists(lo->GetHash()));  // dropped victim not reinstated
+
+    m_node.validation_signals->UnregisterSharedValidationInterface(ac);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // The state-machine decision logic in isolation -- no transactions or mempool required.

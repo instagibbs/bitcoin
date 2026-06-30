@@ -56,17 +56,15 @@ static std::vector<CTransactionRef> TopoSort(const std::vector<CTransactionRef>&
 
 void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
 {
-    // Park the displaced CHUNK -- the mining-score unit, including surviving chunk-mates,
-    // reconstructed at eviction and carried in the feed. Not the whole cluster (over-grab), and
-    // not just the evicted portion (that drops the now-unbumped parent, which is the prime
+    // The A->A park. Park the displaced CHUNK -- the mining-score unit, including surviving
+    // chunk-mates, reconstructed at eviction and carried in the feed. Not the whole cluster
+    // (over-grab), and not just the evicted portion (that drops the now-unbumped parent, the prime
     // next-eviction candidate, leaving the package unreinstatable if it later goes).
-    // TODO: filter by chunk feerate >= cached next-block line; for now park every replacement,
-    // which is correct on an uncongested mempool.
-    if (info.displaced_chunk.empty()) return;
-    // "Above thresh": cache only near-top chunks (top evicted chunk feerate >= the cached
-    // next-block line). A below-line squatter is never cached, so it cannot deny a near-top victim
-    // its slot. When the mempool is under one block the line is the lowest chunk, so all park.
-    if (info.replaced.empty()) return;
+    m_recent_parks.clear(); // left empty on early return -> the replacer's add is treated as B->A
+    if (info.displaced_chunk.empty() || info.replaced.empty()) return;
+    // "Above thresh": cache only near-top chunks (top evicted chunk feerate >= the cached next-block
+    // line). A below-line squatter is never cached, so it cannot deny a near-top victim its slot.
+    // Under one block the line is the lowest chunk, so all park.
     FeePerWeight top_feerate = info.replaced.front().mining_feerate;
     for (const auto& rt : info.replaced) {
         if (ByRatio{rt.mining_feerate} > ByRatio{top_feerate}) top_feerate = rt.mining_feerate;
@@ -78,6 +76,33 @@ void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
     int64_t weight = 0;
     for (const auto& t : pkg) weight += GetTransactionWeight(*t);
     m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight});
+    // Mark these as A->A outpoints so the replacing transaction's add does not clear them as B->A.
+    for (const auto& t : info.displaced_chunk) {
+        for (const auto& in : t->vin) m_recent_parks.insert(in.prevout);
+    }
+}
+
+void AntiCycle::TransactionAddedToMempool(const NewMempoolTransactionInfo& tx_info, uint64_t)
+{
+    // The B->A clear. A transaction taking a protected outpoint into the next-block set ("top")
+    // from a free/below-line state is a B->A transition: drop any stale parked victim on it. The
+    // outpoints just parked by the concurrent A->A replacement (m_recent_parks) are exempt.
+    const CTransactionRef& tx = tx_info.info.m_tx;
+    const std::set<COutPoint> just_parked{std::move(m_recent_parks)};
+    m_recent_parks.clear();
+    bool above_line;
+    {
+        LOCK(m_mempool.cs);
+        const auto it = m_mempool.GetIter(tx->GetHash());
+        if (!it) return; // already gone
+        above_line = m_next_block_line.size == 0 ||
+                     !(ByRatio{m_mempool.GetMainChunkFeerate(**it)} < ByRatio{m_next_block_line});
+    }
+    if (!above_line) return; // a below-line spend stays in state B -- not a B->A into the top set
+    for (const auto& in : tx->vin) {
+        if (just_parked.count(in.prevout)) continue; // just parked here (A->A): keep it
+        m_buffer.Remove(in.prevout);                 // B->A: clear any stale parked victim
+    }
 }
 
 void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason, uint64_t)

@@ -177,6 +177,49 @@ BOOST_AUTO_TEST_CASE(does_not_park_below_next_block_line)
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }
 
+// B->A clear: when a top-feerate tx (re-)takes a protected outpoint of a parked victim from a free
+// state, the stale victim is dropped (honest-user protection / acquisition reset). Here the victim
+// V spends O and P; after V is parked, an unrelated tx retakes the now-free P, clearing V.
+BOOST_AUTO_TEST_CASE(clears_parked_victim_when_outpoint_retaken)
+{
+    const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
+    CreateAndProcessBlock({}, spk);  // mature coinbase[1] and [2]
+    CreateAndProcessBlock({}, spk);
+    CreateAndProcessBlock({}, spk);
+
+    auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000);
+    m_node.validation_signals->RegisterSharedValidationInterface(ac);
+
+    const COutPoint O{m_coinbase_txns[0]->GetHash(), 0};
+    const COutPoint P{m_coinbase_txns[1]->GetHash(), 0};
+    const COutPoint C2{m_coinbase_txns[2]->GetHash(), 0};
+    const auto two_in = [&](const CTransactionRef& a, const COutPoint& ai, const CTransactionRef& b,
+                            const COutPoint& bi, CAmount out) {
+        return MakeTransactionRef(CreateValidTransaction({a, b}, {ai, bi}, /*input_height=*/0,
+            {coinbaseKey, coinbaseKey}, {CTxOut{out, spk}}, std::nullopt, std::nullopt).first);
+    };
+
+    // Victim V spends O and P. Attacker grab G spends O + its own coin -> RBF-evicts V; V is parked,
+    // keyed by both O and P.
+    const auto V = two_in(m_coinbase_txns[0], O, m_coinbase_txns[1], P, 95 * COIN);
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(V).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    const auto G = two_in(m_coinbase_txns[0], O, m_coinbase_txns[2], C2, 94 * COIN);
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(G).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(ac->buffer().FindByInput(O) != nullptr);
+    BOOST_REQUIRE(ac->buffer().FindByInput(P) != nullptr);
+
+    // An unrelated top tx takes the now-free P (a victim footprint outpoint): B->A -> clear V.
+    const auto X = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[1], 0, 0, coinbaseKey, spk, 49 * COIN, /*submit=*/false));
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(X).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(ac->buffer().FindByInput(O) == nullptr);
+    BOOST_CHECK(ac->buffer().FindByInput(P) == nullptr);
+
+    m_node.validation_signals->UnregisterSharedValidationInterface(ac);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // The state-machine decision logic in isolation -- no transactions or mempool required.

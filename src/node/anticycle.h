@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <vector>
 
 class CBlock;
@@ -68,6 +69,11 @@ public:
      *  squatter cannot deny a near-top victim its slot. */
     void MempoolTransactionsReplaced(const MempoolReplacementInfo& info) override;
 
+    /** B->A clear: when a transaction (re-)takes a protected outpoint into the next-block set from
+     *  a free/below-line state, drop any stale parked victim on it -- honest-user protection, and
+     *  the reset that lets an honest defender eventually acquire the slot. */
+    void TransactionAddedToMempool(const NewMempoolTransactionInfo& tx, uint64_t mempool_sequence) override;
+
     /** When a removal leaves a parked package's contended outpoint unspent, reinstate the
      *  package through normal validation. */
     void TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason, uint64_t mempool_sequence) override;
@@ -93,6 +99,9 @@ private:
     ParkBuffer m_buffer;
     const int64_t m_line_weight;
     FeePerWeight m_next_block_line{};
+    /** Outpoints parked by the in-flight A->A replacement, so the replacing transaction's add is
+     *  not mistaken for a B->A take of them. Consumed by the next TransactionAddedToMempool. */
+    std::set<COutPoint> m_recent_parks;
 };
 
 } // namespace node

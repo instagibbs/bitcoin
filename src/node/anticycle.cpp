@@ -7,6 +7,7 @@
 #include <consensus/validation.h>
 #include <kernel/cs_main.h>
 #include <kernel/mempool_entry.h>
+#include <logging.h>
 #include <primitives/block.h>
 #include <sync.h>
 #include <txmempool.h>
@@ -75,9 +76,14 @@ void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
     std::vector<CTransactionRef> pkg = TopoSort(info.displaced_chunk);
     int64_t weight = 0;
     for (const auto& t : pkg) weight += GetTransactionWeight(*t);
+    const Txid first_txid = pkg.front()->GetHash();
     {
         LOCK(m_mutex);
-        if (m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight})) ++m_total_parked;
+        if (m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight})) {
+            ++m_total_parked;
+            LogDebug(BCLog::ANTICYCLE, "parked %s (value=%d weight=%d); buffer %d pkgs / %d wu",
+                     first_txid.ToString(), value, weight, m_buffer.Size(), m_buffer.TotalWeight());
+        }
     }
     // Mark these as A->A outpoints so the replacing transaction's add does not clear them as B->A.
     for (const auto& t : info.displaced_chunk) {
@@ -105,7 +111,11 @@ void AntiCycle::TransactionAddedToMempool(const NewMempoolTransactionInfo& tx_in
     LOCK(m_mutex);
     for (const auto& in : tx->vin) {
         if (just_parked.count(in.prevout)) continue;  // just parked here (A->A): keep it
-        if (m_buffer.Remove(in.prevout)) ++m_cleared; // B->A: clear any stale parked victim
+        if (m_buffer.Remove(in.prevout)) {            // B->A: clear any stale parked victim
+            ++m_cleared;
+            LogDebug(BCLog::ANTICYCLE, "cleared parked victim on %s (retaken by %s)",
+                     in.prevout.ToString(), tx->GetHash().ToString());
+        }
     }
 }
 
@@ -133,8 +143,16 @@ void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPool
     for (const auto& [outpoint, pkg] : candidates) {
         const bool ok = Reinstate(pkg);
         LOCK(m_mutex);
-        if (ok) { m_buffer.Remove(outpoint); ++m_reinstated; }
-        else { ++m_reinstate_failed; }
+        if (ok) {
+            m_buffer.Remove(outpoint);
+            ++m_reinstated;
+            LogDebug(BCLog::ANTICYCLE, "reinstated %s (outpoint %s freed)",
+                     pkg.txns.front()->GetHash().ToString(), outpoint.ToString());
+        } else {
+            ++m_reinstate_failed;
+            LogDebug(BCLog::ANTICYCLE, "reinstate failed for %s (outpoint %s)",
+                     pkg.txns.front()->GetHash().ToString(), outpoint.ToString());
+        }
     }
 }
 
@@ -150,7 +168,11 @@ void AntiCycle::BlockConnected(const kernel::ChainstateRole&, const std::shared_
                 // only a non-member spend of a footprint outpoint makes the package unreinstatable.
                 const bool by_member = std::any_of(pkg->txns.begin(), pkg->txns.end(),
                     [&](const CTransactionRef& t) { return t->GetHash() == tx->GetHash(); });
-                if (!by_member && m_buffer.Remove(in.prevout)) ++m_drained;
+                if (!by_member && m_buffer.Remove(in.prevout)) {
+                    ++m_drained;
+                    LogDebug(BCLog::ANTICYCLE, "drained parked victim on %s (spent on-chain by %s)",
+                             in.prevout.ToString(), tx->GetHash().ToString());
+                }
             }
         }
     }

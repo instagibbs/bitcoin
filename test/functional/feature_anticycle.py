@@ -33,7 +33,8 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.uses_wallet = None
-        self.extra_args = [["-anticycle=1", "-maxmempool=5"]]  # -maxmempool=5 for fill_mempool
+        # -maxmempool=5 for fill_mempool; -debug=anticycle to surface the lifecycle log lines.
+        self.extra_args = [["-anticycle=1", "-maxmempool=5", "-debug=anticycle"]]
 
     # --- helpers -----------------------------------------------------------------------------
 
@@ -62,10 +63,11 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         o, atk = self.coin(), self.coin()
         victim = self.send([o], VICTIM_FEE)
         assert self.in_mempool(victim)
-        self.send([o, atk], GRAB_FEE)            # evict the victim
-        assert not self.in_mempool(victim)
-        self.send([atk], FREE_FEE)               # withdraw, freeing the victim's input
-        self.wait_until(lambda: self.in_mempool(victim))
+        with self.nodes[0].assert_debug_log(expected_msgs=["parked", "reinstated"]):
+            self.send([o, atk], GRAB_FEE)            # evict the victim
+            assert not self.in_mempool(victim)
+            self.send([atk], FREE_FEE)               # withdraw, freeing the victim's input
+            self.wait_until(lambda: self.in_mempool(victim))
         # The stats RPC reflects the park + reinstate that just happened.
         info = self.nodes[0].getanticycleinfo()
         assert info["enabled"]

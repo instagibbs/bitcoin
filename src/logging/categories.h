@@ -46,6 +46,7 @@ enum LogFlags : CategoryMask {
     TXPACKAGES = (CategoryMask{1} << 28),
     KERNEL = (CategoryMask{1} << 29),
     PRIVBROADCAST = (CategoryMask{1} << 30),
+    ANTICYCLE = (CategoryMask{1} << 31),
     DEPRECATED = LIBEVENT,
     // Remove deprecated categories from ALL
     ALL = ~DEPRECATED,

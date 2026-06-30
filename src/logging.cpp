@@ -188,6 +188,7 @@ bool BCLog::Logger::DefaultShrinkDebugFile() const
 
 static const std::map<std::string, BCLog::LogFlags, std::less<>> LOG_CATEGORIES_BY_STR{
     {"net", BCLog::NET},
+    {"anticycle", BCLog::ANTICYCLE},
     {"tor", BCLog::TOR},
     {"mempool", BCLog::MEMPOOL},
     {"http", BCLog::HTTP},

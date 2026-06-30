@@ -217,6 +217,11 @@ struct MempoolReplacementInfo {
     std::vector<ReplacedTransaction> replaced;
     /** The transaction(s) that replaced them. */
     std::vector<CTransactionRef> replacement;
+    /** The full membership of the chunk(s) the evicted transactions belonged to, including any
+     *  surviving chunk-mates, captured before the replacement is applied. The chunk -- not the
+     *  whole cluster, not just the evicted portion -- is the unit of next-block value; within a
+     *  cluster, equal chunk feerate means same chunk, so this is reconstructed from the cluster. */
+    std::vector<CTransactionRef> displaced_chunk;
 };
 
 #endif // BITCOIN_KERNEL_MEMPOOL_ENTRY_H

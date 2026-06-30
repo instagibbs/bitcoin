@@ -47,19 +47,16 @@ static std::vector<CTransactionRef> TopoSort(const std::vector<CTransactionRef>&
 
 void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
 {
-    // Park only the EVICTED transactions that were in the next-block set -- the evicted portion of
-    // the chunk, never the whole cluster. Surviving ancestors stay in the mempool and are present
-    // at re-add, so we don't reconstruct them (caching a sub-line parent alone is meaningless).
-    // TODO: filter by chunk feerate >= cached next-block line; for now park all evicted, which is
-    // correct on an uncongested mempool.
-    std::vector<CTransactionRef> evicted;
+    // Park the displaced CHUNK -- the mining-score unit, including surviving chunk-mates,
+    // reconstructed at eviction and carried in the feed. Not the whole cluster (over-grab), and
+    // not just the evicted portion (that drops the now-unbumped parent, which is the prime
+    // next-eviction candidate, leaving the package unreinstatable if it later goes).
+    // TODO: filter by chunk feerate >= cached next-block line; for now park every replacement,
+    // which is correct on an uncongested mempool.
+    if (info.displaced_chunk.empty()) return;
     CAmount value = 0;
-    for (const auto& rt : info.replaced) {
-        evicted.push_back(rt.tx);
-        value = std::max(value, rt.mining_feerate.fee); // chunk fee (shared within a chunk)
-    }
-    if (evicted.empty()) return;
-    std::vector<CTransactionRef> pkg = TopoSort(evicted);
+    for (const auto& rt : info.replaced) value = std::max(value, rt.mining_feerate.fee); // chunk fee
+    std::vector<CTransactionRef> pkg = TopoSort(info.displaced_chunk);
     int64_t weight = 0;
     for (const auto& t : pkg) weight += GetTransactionWeight(*t);
     m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight});

@@ -60,7 +60,7 @@ class AntiCycle : public CValidationInterface
 public:
     AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight);
 
-    /** Park the 1P1C cluster of each transaction evicted by an RBF replacement. */
+    /** Park the chunk(s) displaced by an RBF replacement -- the next-block mining unit. */
     void MempoolTransactionsReplaced(const MempoolReplacementInfo& info) override;
 
     /** When a removal leaves a parked package's contended outpoint unspent, reinstate the

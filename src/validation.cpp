@@ -1245,10 +1245,21 @@ void MemPoolAccept::FinalizeSubpackage(const ATMPArgs& args)
     if (m_pool.m_opts.signals && !m_subpackage.m_changeset->GetRemovals().empty()) {
         MempoolReplacementInfo repl_info;
         repl_info.replaced.reserve(m_subpackage.m_changeset->GetRemovals().size());
+        std::set<Txid> chunk_seen;
         for (CTxMemPool::txiter it : m_subpackage.m_changeset->GetRemovals()) {
             // Capture the mining (chunk) feerate before Apply() removes the entry, so
             // listeners can tell whether the evicted tx was in the next-block set.
-            repl_info.replaced.push_back({it->GetSharedTx(), m_pool.GetMainChunkFeerate(*it)});
+            const FeePerWeight chunk_feerate = m_pool.GetMainChunkFeerate(*it);
+            repl_info.replaced.push_back({it->GetSharedTx(), chunk_feerate});
+            // Reconstruct the evicted tx's chunk: within a cluster the chunk feerates are strictly
+            // decreasing, so cluster members sharing this chunk feerate are exactly its chunk
+            // (including surviving chunk-mates). The chunk is the unit listeners re-instate.
+            for (const CTxMemPoolEntry* e : m_pool.GetCluster(it->GetTx().GetHash())) {
+                if (m_pool.GetMainChunkFeerate(*e) == chunk_feerate &&
+                    chunk_seen.insert(e->GetTx().GetHash()).second) {
+                    repl_info.displaced_chunk.push_back(e->GetSharedTx());
+                }
+            }
         }
         repl_info.replacement = m_subpackage.m_changeset->GetAddedTxns();
         m_pool.m_opts.signals->MempoolTransactionsReplaced(repl_info);

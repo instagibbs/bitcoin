@@ -20,10 +20,12 @@ using node::AntiCycle;
 
 BOOST_FIXTURE_TEST_SUITE(anticycle_tests, TestChain100Setup)
 
-// When an attacker RBF-evicts a CPFP child whose parent survives, only the evicted child is
-// parked -- keyed by the anchor (the parent's output) it spends, which is the contended outpoint.
-// The surviving parent is left in the mempool, not over-grabbed into the parked package.
-BOOST_AUTO_TEST_CASE(parks_evicted_child_keyed_by_anchor)
+// When an attacker RBF-evicts a CPFP child, the coordinator parks the whole CHUNK the victim
+// belonged to -- here {A, B}, since B's CPFP bumps A into the same chunk. Parking the chunk (not
+// just the evicted child) keeps the package reinstatable even if the now-unbumped parent A is
+// later size-evicted. The chunk is reconstructed at eviction from cluster members sharing the
+// chunk feerate, so it is exactly the chunk -- never the wider cluster.
+BOOST_AUTO_TEST_CASE(parks_displaced_chunk)
 {
     auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000);
     m_node.validation_signals->RegisterSharedValidationInterface(ac);
@@ -46,14 +48,14 @@ BOOST_AUTO_TEST_CASE(parks_evicted_child_keyed_by_anchor)
 
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
 
-    // Only the evicted child B is parked, keyed by the anchor (A's output) it spends.
-    const COutPoint anchor{A->GetHash(), 0};
-    const auto* pkg = ac->buffer().FindByInput(anchor);
+    // The whole chunk {A, B} is parked (parent first, topologically), keyed by the anchor.
+    const auto* pkg = ac->buffer().FindByInput(COutPoint{A->GetHash(), 0});
     BOOST_REQUIRE(pkg != nullptr);
-    BOOST_CHECK_EQUAL(pkg->txns.size(), 1U);
-    BOOST_CHECK(pkg->txns.at(0)->GetHash() == B->GetHash());
-    // The surviving parent A is not over-grabbed: its input is not claimed by the buffer.
-    BOOST_CHECK(ac->buffer().FindByInput(COutPoint{m_coinbase_txns[0]->GetHash(), 0}) == nullptr);
+    BOOST_REQUIRE_EQUAL(pkg->txns.size(), 2U);
+    BOOST_CHECK(pkg->txns.at(0)->GetHash() == A->GetHash()); // parent before child
+    BOOST_CHECK(pkg->txns.at(1)->GetHash() == B->GetHash());
+    // The chunk's footprint also covers A's own input (so a cycle on it would be seen too).
+    BOOST_CHECK(ac->buffer().FindByInput(COutPoint{m_coinbase_txns[0]->GetHash(), 0}) != nullptr);
 
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }

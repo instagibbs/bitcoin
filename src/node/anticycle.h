@@ -5,8 +5,10 @@
 #ifndef BITCOIN_NODE_ANTICYCLE_H
 #define BITCOIN_NODE_ANTICYCLE_H
 
+#include <consensus/consensus.h>
 #include <node/park_buffer.h>
 #include <primitives/transaction.h>
+#include <util/feefrac.h>
 #include <validationinterface.h>
 
 #include <cstdint>
@@ -58,9 +60,12 @@ constexpr CycleAction OutpointTransition(bool prev_above, bool now_above, bool s
 class AntiCycle : public CValidationInterface
 {
 public:
-    AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight);
+    AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight,
+              int64_t line_weight = MAX_BLOCK_WEIGHT);
 
-    /** Park the chunk(s) displaced by an RBF replacement -- the next-block mining unit. */
+    /** Park the chunk(s) displaced by an RBF replacement, if at/above the next-block line -- the
+     *  near-top mining unit. Below-line ("not above thresh") evictions are not cached, so a cheap
+     *  squatter cannot deny a near-top victim its slot. */
     void MempoolTransactionsReplaced(const MempoolReplacementInfo& info) override;
 
     /** When a removal leaves a parked package's contended outpoint unspent, reinstate the
@@ -70,6 +75,10 @@ public:
     /** Drop parked packages whose footprint outpoint was spent on-chain by a non-member
      *  transaction (permanently invalid). */
     void BlockConnected(const kernel::ChainstateRole& role, const std::shared_ptr<const CBlock>& block, const CBlockIndex* pindex) override;
+
+    /** Recompute and cache the next-block line from the current mempool. Called on block connect;
+     *  public so tests can refresh after staging a mempool. */
+    void RefreshNextBlockLine();
 
     /** Inspection access to the park buffer (for tests). */
     const ParkBuffer& buffer() const { return m_buffer; }
@@ -82,6 +91,8 @@ private:
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
     ParkBuffer m_buffer;
+    const int64_t m_line_weight;
+    FeePerWeight m_next_block_line{};
 };
 
 } // namespace node

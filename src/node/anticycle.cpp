@@ -10,6 +10,7 @@
 #include <primitives/block.h>
 #include <sync.h>
 #include <txmempool.h>
+#include <util/feefrac.h>
 #include <validation.h>
 
 #include <algorithm>
@@ -19,8 +20,16 @@
 
 namespace node {
 
-AntiCycle::AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight)
-    : m_chainman{chainman}, m_mempool{mempool}, m_buffer{max_park_weight} {}
+AntiCycle::AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight, int64_t line_weight)
+    : m_chainman{chainman}, m_mempool{mempool}, m_buffer{max_park_weight}, m_line_weight{line_weight}
+{
+    RefreshNextBlockLine();
+}
+
+void AntiCycle::RefreshNextBlockLine()
+{
+    m_next_block_line = WITH_LOCK(m_mempool.cs, return m_mempool.CalculateNextBlockFeerateFloor(m_line_weight));
+}
 
 // Order transactions so a parent precedes any of its children within the set (required to re-add
 // the set as a package). The input set is small (a chunk's worth).
@@ -54,6 +63,15 @@ void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
     // TODO: filter by chunk feerate >= cached next-block line; for now park every replacement,
     // which is correct on an uncongested mempool.
     if (info.displaced_chunk.empty()) return;
+    // "Above thresh": cache only near-top chunks (top evicted chunk feerate >= the cached
+    // next-block line). A below-line squatter is never cached, so it cannot deny a near-top victim
+    // its slot. When the mempool is under one block the line is the lowest chunk, so all park.
+    if (info.replaced.empty()) return;
+    FeePerWeight top_feerate = info.replaced.front().mining_feerate;
+    for (const auto& rt : info.replaced) {
+        if (ByRatio{rt.mining_feerate} > ByRatio{top_feerate}) top_feerate = rt.mining_feerate;
+    }
+    if (m_next_block_line.size > 0 && ByRatio{top_feerate} < ByRatio{m_next_block_line}) return;
     CAmount value = 0;
     for (const auto& rt : info.replaced) value = std::max(value, rt.mining_feerate.fee); // chunk fee
     std::vector<CTransactionRef> pkg = TopoSort(info.displaced_chunk);
@@ -100,6 +118,8 @@ void AntiCycle::BlockConnected(const kernel::ChainstateRole&, const std::shared_
             if (!by_member) m_buffer.Remove(in.prevout);
         }
     }
+    // The next-block line shifts as the chain advances; recompute against the new tip's mempool.
+    RefreshNextBlockLine();
 }
 
 bool AntiCycle::Reinstate(const ParkBuffer::ParkedPackage& package)

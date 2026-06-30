@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/amount.h>
+#include <consensus/validation.h>
 #include <node/anticycle.h>
 #include <node/park_buffer.h>
 #include <primitives/transaction.h>
@@ -135,6 +136,43 @@ BOOST_AUTO_TEST_CASE(drains_parked_package_when_outpoint_spent_onchain)
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
 
     BOOST_CHECK(ac->buffer().FindByInput(COutPoint{A->GetHash(), 0}) == nullptr);
+
+    m_node.validation_signals->UnregisterSharedValidationInterface(ac);
+}
+
+// "Above thresh": an eviction whose chunk feerate is below the cached next-block line is not
+// parked -- a cheap squatter cannot take a slot -- while a near-top eviction is.
+BOOST_AUTO_TEST_CASE(does_not_park_below_next_block_line)
+{
+    const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
+    // Mature a second coinbase so the two txs can spend independent inputs.
+    CreateAndProcessBlock({}, spk);
+    CreateAndProcessBlock({}, spk);
+
+    // A high-fee tx and a low-fee tx, in independent clusters.
+    const auto hi = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[0], 0, 0, coinbaseKey, spk, /*output_amount=*/40 * COIN, /*submit=*/true));
+    const auto lo = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[1], 0, 0, coinbaseKey, spk, /*output_amount=*/4999 * COIN / 100, /*submit=*/true));
+
+    // A line weight that fits only the higher-feerate chunk, putting the low-fee tx below the line.
+    auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000,
+                                          /*line_weight=*/GetTransactionWeight(*hi) * 3 / 2);
+    m_node.validation_signals->RegisterSharedValidationInterface(ac);
+
+    // Evicting the BELOW-line tx must NOT park it.
+    const auto lo2 = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[1], 0, 0, coinbaseKey, spk, /*output_amount=*/49 * COIN, /*submit=*/false));
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(lo2).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(ac->buffer().FindByInput(COutPoint{m_coinbase_txns[1]->GetHash(), 0}) == nullptr);
+
+    // Evicting the ABOVE-line tx parks it.
+    const auto hi2 = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns[0], 0, 0, coinbaseKey, spk, /*output_amount=*/39 * COIN, /*submit=*/false));
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(hi2).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(ac->buffer().FindByInput(COutPoint{m_coinbase_txns[0]->GetHash(), 0}) != nullptr);
 
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }

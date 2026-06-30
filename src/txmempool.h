@@ -732,6 +732,24 @@ public:
     void IncludeBuilderChunk() const EXCLUSIVE_LOCKS_REQUIRED(cs) { m_builder->Include(); }
     void SkipBuilderChunk() const EXCLUSIVE_LOCKS_REQUIRED(cs) { m_builder->Skip(); }
     void StopBlockBuilding() const EXCLUSIVE_LOCKS_REQUIRED(cs) { m_builder.reset(); }
+
+    /** The next-block "line": the feerate of the lowest-feerate chunk that still fits within a
+     *  block of `max_weight` built from the current mempool. Chunks at or above this feerate are
+     *  in the next-block set. Uses a transient block builder, so it does not disturb mining. If
+     *  the whole mempool fits under one block, returns the lowest chunk's feerate. */
+    FeePerWeight CalculateNextBlockFeerateFloor(int64_t max_weight) const EXCLUSIVE_LOCKS_REQUIRED(cs)
+    {
+        auto builder = m_txgraph->GetBlockBuilder();
+        FeePerWeight line{};
+        int64_t weight = 0;
+        while (const auto chunk = builder->GetCurrentChunk()) {
+            weight += chunk->second.size;
+            if (weight > max_weight) break;
+            line = chunk->second;
+            builder->Include();
+        }
+        return line;
+    }
 };
 
 /**

@@ -18,6 +18,7 @@ so each replacement strictly raises both absolute fee and feerate.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.mempool_util import fill_mempool
 from test_framework.util import assert_equal
 
 from test_framework.wallet import MiniWallet
@@ -32,7 +33,7 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.setup_clean_chain = True
         self.uses_wallet = None
-        self.extra_args = [["-anticycle=1"]]
+        self.extra_args = [["-anticycle=1", "-maxmempool=5"]]  # -maxmempool=5 for fill_mempool
 
     # --- helpers -----------------------------------------------------------------------------
 
@@ -154,6 +155,28 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         assert not self.in_mempool(v)
         assert self.in_mempool(bumped)
 
+    def test_b_to_a_clear_under_pressure(self):
+        self.log.info("8) B->A clear under pressure: a parked victim is dropped when its outpoint is legitimately retaken")
+        self.fresh_slate()
+        node = self.nodes[0]
+        # Congest the mempool so there is a real next-block line above minrelay; one block connect
+        # then re-refreshes the coordinator's cached line (the mempool stays > 1 block).
+        fill_mempool(self, node)
+        self.generate(self.wallet, 1)
+        o, p, atk = self.coin(), self.coin(), self.coin()
+        # Fees well above the ~150 sat/vB fill line, but under sendrawtransaction's relay fee cap.
+        # Near-top victim V spends o and p; cycled out by the attacker, it is parked (keyed by both).
+        victim = self.send([o, p], 300_000)
+        assert self.in_mempool(victim)
+        self.send([o, atk], 600_000)             # attacker grabs o -> evicts and parks V
+        assert not self.in_mempool(victim)
+        # A near-top tx legitimately (re-)takes V's other input p -- a B->A on p -- which clears the
+        # stale parked victim, so it is not resurrected when o later frees.
+        self.send([p], 300_000)
+        self.send([atk], 900_000)                # attacker withdraws, freeing o
+        self.sync_all()
+        assert not self.in_mempool(victim)
+
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
         self.generate(self.wallet, 150)
@@ -164,6 +187,7 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         self.test_package_evicted_together()
         self.test_outpoint_spent_onchain_no_reinstate()
         self.test_honest_fee_bump_not_fought()
+        self.test_b_to_a_clear_under_pressure()
         self.log.info("All anti-cycling scenarios passed")
 
 

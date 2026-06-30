@@ -43,8 +43,17 @@ bool ParkBuffer::Park(ParkedPackage package)
         auto lowest = std::min_element(m_packages.begin(), m_packages.end(),
             [](const auto& a, const auto& b) { return a.second.package.value < b.second.package.value; });
         EraseEntry(lowest);
+        ++m_evicted_over_cap;
     }
     return true;
+}
+
+std::vector<ParkBuffer::ParkedPackage> ParkBuffer::Packages() const
+{
+    std::vector<ParkedPackage> out;
+    out.reserve(m_packages.size());
+    for (const auto& [id, entry] : m_packages) out.push_back(entry.package);
+    return out;
 }
 
 void ParkBuffer::EraseEntry(std::map<uint64_t, Entry>::iterator it)

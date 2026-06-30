@@ -69,6 +69,15 @@ public:
     /** Total weight of all parked packages. */
     int64_t TotalWeight() const;
 
+    /** The configured maximum total weight (the cap). */
+    int64_t MaxWeight() const { return m_max_weight; }
+
+    /** Cumulative count of packages evicted because the weight cap was exceeded. */
+    uint64_t EvictedOverCap() const { return m_evicted_over_cap; }
+
+    /** A copy of every currently parked package, for inspection / stats. */
+    std::vector<ParkedPackage> Packages() const;
+
     /** Assert internal invariants: weight total, index consistency, footprint disjointness,
      *  and the weight cap. For use by tests and fuzzers. */
     void SanityCheck() const;
@@ -77,6 +86,7 @@ private:
     const int64_t m_max_weight;
     int64_t m_total_weight{0};
     uint64_t m_next_id{0};
+    uint64_t m_evicted_over_cap{0};
 
     struct Entry {
         ParkedPackage package;

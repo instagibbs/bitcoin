@@ -75,7 +75,10 @@ void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
     std::vector<CTransactionRef> pkg = TopoSort(info.displaced_chunk);
     int64_t weight = 0;
     for (const auto& t : pkg) weight += GetTransactionWeight(*t);
-    m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight});
+    {
+        LOCK(m_mutex);
+        if (m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight})) ++m_total_parked;
+    }
     // Mark these as A->A outpoints so the replacing transaction's add does not clear them as B->A.
     for (const auto& t : info.displaced_chunk) {
         for (const auto& in : t->vin) m_recent_parks.insert(in.prevout);
@@ -99,9 +102,10 @@ void AntiCycle::TransactionAddedToMempool(const NewMempoolTransactionInfo& tx_in
                      !(ByRatio{m_mempool.GetMainChunkFeerate(**it)} < ByRatio{m_next_block_line});
     }
     if (!above_line) return; // a below-line spend stays in state B -- not a B->A into the top set
+    LOCK(m_mutex);
     for (const auto& in : tx->vin) {
-        if (just_parked.count(in.prevout)) continue; // just parked here (A->A): keep it
-        m_buffer.Remove(in.prevout);                 // B->A: clear any stale parked victim
+        if (just_parked.count(in.prevout)) continue;  // just parked here (A->A): keep it
+        if (m_buffer.Remove(in.prevout)) ++m_cleared; // B->A: clear any stale parked victim
     }
 }
 
@@ -111,6 +115,7 @@ void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPool
     std::vector<std::pair<COutPoint, ParkBuffer::ParkedPackage>> candidates;
     {
         LOCK(m_mempool.cs);
+        LOCK(m_mutex);
         for (const auto& in : tx->vin) {
             const auto* pkg = m_buffer.FindByInput(in.prevout);
             if (!pkg) continue;
@@ -122,29 +127,52 @@ void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPool
             candidates.emplace_back(in.prevout, *pkg);
         }
     }
-    // Attempt re-add outside the mempool lock (ProcessTransaction/ProcessNewPackage lock
-    // internally). Re-add goes through normal validation, so it succeeds only if the package
-    // can pay its way back in -- retry, not immunity.
+    // Attempt re-add outside both locks (ProcessTransaction/ProcessNewPackage lock internally).
+    // Re-add goes through normal validation, so it succeeds only if the package can pay its way
+    // back in -- retry, not immunity.
     for (const auto& [outpoint, pkg] : candidates) {
-        if (Reinstate(pkg)) m_buffer.Remove(outpoint);
+        const bool ok = Reinstate(pkg);
+        LOCK(m_mutex);
+        if (ok) { m_buffer.Remove(outpoint); ++m_reinstated; }
+        else { ++m_reinstate_failed; }
     }
 }
 
 void AntiCycle::BlockConnected(const kernel::ChainstateRole&, const std::shared_ptr<const CBlock>& block, const CBlockIndex*)
 {
-    for (const auto& tx : block->vtx) {
-        for (const auto& in : tx->vin) {
-            const auto* pkg = m_buffer.FindByInput(in.prevout);
-            if (!pkg) continue;
-            // A package member confirming is the package progressing on-chain, not invalidation;
-            // only a non-member spend of a footprint outpoint makes the package unreinstatable.
-            const bool by_member = std::any_of(pkg->txns.begin(), pkg->txns.end(),
-                [&](const CTransactionRef& t) { return t->GetHash() == tx->GetHash(); });
-            if (!by_member) m_buffer.Remove(in.prevout);
+    {
+        LOCK(m_mutex);
+        for (const auto& tx : block->vtx) {
+            for (const auto& in : tx->vin) {
+                const auto* pkg = m_buffer.FindByInput(in.prevout);
+                if (!pkg) continue;
+                // A package member confirming is the package progressing on-chain, not invalidation;
+                // only a non-member spend of a footprint outpoint makes the package unreinstatable.
+                const bool by_member = std::any_of(pkg->txns.begin(), pkg->txns.end(),
+                    [&](const CTransactionRef& t) { return t->GetHash() == tx->GetHash(); });
+                if (!by_member && m_buffer.Remove(in.prevout)) ++m_drained;
+            }
         }
     }
     // The next-block line shifts as the chain advances; recompute against the new tip's mempool.
     RefreshNextBlockLine();
+}
+
+AntiCycle::Stats AntiCycle::GetStats() const
+{
+    LOCK(m_mutex);
+    return Stats{
+        .parked = m_buffer.Size(),
+        .parked_weight = m_buffer.TotalWeight(),
+        .max_weight = m_buffer.MaxWeight(),
+        .total_parked = m_total_parked,
+        .reinstated = m_reinstated,
+        .reinstate_failed = m_reinstate_failed,
+        .cleared = m_cleared,
+        .drained = m_drained,
+        .evicted_over_cap = m_buffer.EvictedOverCap(),
+        .packages = m_buffer.Packages(),
+    };
 }
 
 bool AntiCycle::Reinstate(const ParkBuffer::ParkedPackage& package)

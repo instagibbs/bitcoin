@@ -8,6 +8,7 @@
 #include <consensus/consensus.h>
 #include <node/park_buffer.h>
 #include <primitives/transaction.h>
+#include <sync.h>
 #include <util/feefrac.h>
 #include <validationinterface.h>
 
@@ -89,6 +90,21 @@ public:
     /** Inspection access to the park buffer (for tests). */
     const ParkBuffer& buffer() const { return m_buffer; }
 
+    /** A snapshot of buffer state and cumulative counters, for RPC/inspection. Thread-safe. */
+    struct Stats {
+        size_t parked{0};               //!< packages currently parked
+        int64_t parked_weight{0};       //!< total weight currently parked
+        int64_t max_weight{0};          //!< the weight cap
+        uint64_t total_parked{0};       //!< cumulative packages parked
+        uint64_t reinstated{0};         //!< cumulative successful reinstatements
+        uint64_t reinstate_failed{0};   //!< cumulative failed reinstatement attempts
+        uint64_t cleared{0};            //!< cumulative B->A clears (outpoint retaken)
+        uint64_t drained{0};            //!< cumulative on-chain drains
+        uint64_t evicted_over_cap{0};   //!< cumulative weight-cap evictions
+        std::vector<ParkBuffer::ParkedPackage> packages; //!< current buffer contents
+    };
+    Stats GetStats() const;
+
 private:
     /** Re-add the package members not already in the mempool, through normal validation.
      *  Returns true if anything was accepted. */
@@ -96,12 +112,20 @@ private:
 
     ChainstateManager& m_chainman;
     CTxMemPool& m_mempool;
+    /** Guards the buffer and counters against concurrent reads from RPC threads (handlers run on
+     *  the single validation thread; only inspection is cross-thread). */
+    mutable Mutex m_mutex;
     ParkBuffer m_buffer;
     const int64_t m_line_weight;
     FeePerWeight m_next_block_line{};
     /** Outpoints parked by the in-flight A->A replacement, so the replacing transaction's add is
      *  not mistaken for a B->A take of them. Consumed by the next TransactionAddedToMempool. */
     std::set<COutPoint> m_recent_parks;
+    uint64_t m_total_parked GUARDED_BY(m_mutex){0};
+    uint64_t m_reinstated GUARDED_BY(m_mutex){0};
+    uint64_t m_reinstate_failed GUARDED_BY(m_mutex){0};
+    uint64_t m_cleared GUARDED_BY(m_mutex){0};
+    uint64_t m_drained GUARDED_BY(m_mutex){0};
 };
 
 } // namespace node

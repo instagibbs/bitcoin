@@ -66,6 +66,10 @@ class AntiCycleScenariosTest(BitcoinTestFramework):
         assert not self.in_mempool(victim)
         self.send([atk], FREE_FEE)               # withdraw, freeing the victim's input
         self.wait_until(lambda: self.in_mempool(victim))
+        # The stats RPC reflects the park + reinstate that just happened.
+        info = self.nodes[0].getanticycleinfo()
+        assert info["enabled"]
+        assert info["total_parked"] >= 1 and info["reinstated"] >= 1
 
     def test_1p1c_package_cycle(self):
         self.log.info("2) 1P1C cycle: the CPFP child is reinstated, the parent is untouched")

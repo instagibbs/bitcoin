@@ -16,6 +16,8 @@
 #include <net_processing.h>
 #include <netbase.h>
 #include <node/mempool_persist_args.h>
+#include <node/anticycle.h>
+#include <node/context.h>
 #include <node/types.h>
 #include <policy/rbf.h>
 #include <policy/settings.h>
@@ -1537,6 +1539,74 @@ static RPCMethod submitpackage()
     };
 }
 
+static RPCMethod getanticycleinfo()
+{
+    return RPCMethod{"getanticycleinfo",
+        "Returns state and cumulative statistics of the experimental anti-cycling park buffer (-anticycle).",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "enabled", "Whether the anti-cycling park buffer is enabled"},
+                {RPCResult::Type::NUM, "parked", /*optional=*/true, "Packages currently parked"},
+                {RPCResult::Type::NUM, "parked_weight", /*optional=*/true, "Total weight of currently parked packages"},
+                {RPCResult::Type::NUM, "max_weight", /*optional=*/true, "Configured maximum total parked weight"},
+                {RPCResult::Type::NUM, "total_parked", /*optional=*/true, "Cumulative packages parked"},
+                {RPCResult::Type::NUM, "reinstated", /*optional=*/true, "Cumulative packages reinstated into the mempool"},
+                {RPCResult::Type::NUM, "reinstate_failed", /*optional=*/true, "Cumulative failed reinstatement attempts"},
+                {RPCResult::Type::NUM, "cleared", /*optional=*/true, "Cumulative packages cleared when their outpoint was retaken"},
+                {RPCResult::Type::NUM, "drained", /*optional=*/true, "Cumulative packages dropped after an on-chain spend"},
+                {RPCResult::Type::NUM, "evicted_over_cap", /*optional=*/true, "Cumulative packages evicted to stay within max_weight"},
+                {RPCResult::Type::ARR, "packages", /*optional=*/true, "Currently parked packages",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::NUM, "value", "Realizable next-block fee value (sats) used for ranking"},
+                                {RPCResult::Type::NUM, "weight", "Total weight of the package"},
+                                {RPCResult::Type::ARR, "txids", "Transaction ids in the package",
+                                    {{RPCResult::Type::STR_HEX, "", "transaction id"}}},
+                            }},
+                    }},
+            }},
+        RPCExamples{
+            HelpExampleCli("getanticycleinfo", "")
+            + HelpExampleRpc("getanticycleinfo", "")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    const NodeContext& node{EnsureAnyNodeContext(request.context)};
+    UniValue ret(UniValue::VOBJ);
+    if (!node.anticycle) {
+        ret.pushKV("enabled", false);
+        return ret;
+    }
+    const auto stats{node.anticycle->GetStats()};
+    ret.pushKV("enabled", true);
+    ret.pushKV("parked", (uint64_t)stats.parked);
+    ret.pushKV("parked_weight", stats.parked_weight);
+    ret.pushKV("max_weight", stats.max_weight);
+    ret.pushKV("total_parked", stats.total_parked);
+    ret.pushKV("reinstated", stats.reinstated);
+    ret.pushKV("reinstate_failed", stats.reinstate_failed);
+    ret.pushKV("cleared", stats.cleared);
+    ret.pushKV("drained", stats.drained);
+    ret.pushKV("evicted_over_cap", stats.evicted_over_cap);
+    UniValue packages(UniValue::VARR);
+    for (const auto& p : stats.packages) {
+        UniValue obj(UniValue::VOBJ);
+        obj.pushKV("value", p.value);
+        obj.pushKV("weight", p.weight);
+        UniValue txids(UniValue::VARR);
+        for (const auto& tx : p.txns) txids.push_back(tx->GetHash().ToString());
+        obj.pushKV("txids", std::move(txids));
+        packages.push_back(std::move(obj));
+    }
+    ret.pushKV("packages", std::move(packages));
+    return ret;
+},
+    };
+}
+
 void RegisterMempoolRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
@@ -1550,6 +1620,7 @@ void RegisterMempoolRPCCommands(CRPCTable& t)
         {"blockchain", &getmempoolcluster},
         {"blockchain", &gettxspendingprevout},
         {"blockchain", &getmempoolinfo},
+        {"blockchain", &getanticycleinfo},
         {"hidden", &getmempoolfeeratediagram},
         {"blockchain", &getrawmempool},
         {"blockchain", &importmempool},

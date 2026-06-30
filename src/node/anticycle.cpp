@@ -22,42 +22,47 @@ namespace node {
 AntiCycle::AntiCycle(ChainstateManager& chainman, CTxMemPool& mempool, int64_t max_park_weight)
     : m_chainman{chainman}, m_mempool{mempool}, m_buffer{max_park_weight} {}
 
-std::vector<CTransactionRef> AntiCycle::BuildVictimCluster(const std::vector<ReplacedTransaction>& replaced) const
+// Order transactions so a parent precedes any of its children within the set (required to re-add
+// the set as a package). The input set is small (a chunk's worth).
+static std::vector<CTransactionRef> TopoSort(const std::vector<CTransactionRef>& txns)
 {
-    std::vector<CTransactionRef> cluster;
     std::set<Txid> ids;
-    const auto add = [&](const CTransactionRef& t) {
-        if (ids.insert(t->GetHash()).second) cluster.push_back(t);
-    };
-    for (const auto& rt : replaced) add(rt.tx);
-    // Pull in any surviving mempool parents of the evicted transactions (e.g. a CPFP parent that
-    // outlived its evicted child); a parent evicted alongside its child is already present.
-    for (const auto& rt : replaced) {
-        for (const auto& in : rt.tx->vin) {
-            if (auto p = m_mempool.get(in.prevout.hash)) add(p);
+    for (const auto& t : txns) ids.insert(t->GetHash());
+    std::vector<CTransactionRef> sorted;
+    std::set<Txid> placed;
+    while (sorted.size() < txns.size()) {
+        const size_t before = sorted.size();
+        for (const auto& t : txns) {
+            if (placed.count(t->GetHash())) continue;
+            const bool parents_placed = std::none_of(t->vin.begin(), t->vin.end(),
+                [&](const CTxIn& in) { return ids.count(in.prevout.hash) && !placed.count(in.prevout.hash); });
+            if (parents_placed) { sorted.push_back(t); placed.insert(t->GetHash()); }
+        }
+        if (sorted.size() == before) { // no progress (cycle -- impossible for valid txns); bail
+            for (const auto& t : txns) if (placed.insert(t->GetHash()).second) sorted.push_back(t);
         }
     }
-    if (cluster.size() > 2) return {}; // beyond 1P1C: not parked (PoC bound)
-    // Order parent-before-child so the cluster can be re-added as a package.
-    if (cluster.size() == 2 &&
-        std::any_of(cluster[0]->vin.begin(), cluster[0]->vin.end(),
-                    [&](const CTxIn& in) { return in.prevout.hash == cluster[1]->GetHash(); })) {
-        std::swap(cluster[0], cluster[1]);
-    }
-    return cluster;
+    return sorted;
 }
 
 void AntiCycle::MempoolTransactionsReplaced(const MempoolReplacementInfo& info)
 {
-    // TODO: filter to near-top -- mining_feerate >= cached next-block line. For now park every
-    // replacement; the line filter arrives with the BlockConnected handler.
-    std::vector<CTransactionRef> cluster = BuildVictimCluster(info.replaced);
-    if (cluster.empty()) return;
-    int64_t weight = 0;
-    for (const auto& t : cluster) weight += GetTransactionWeight(*t);
+    // Park only the EVICTED transactions that were in the next-block set -- the evicted portion of
+    // the chunk, never the whole cluster. Surviving ancestors stay in the mempool and are present
+    // at re-add, so we don't reconstruct them (caching a sub-line parent alone is meaningless).
+    // TODO: filter by chunk feerate >= cached next-block line; for now park all evicted, which is
+    // correct on an uncongested mempool.
+    std::vector<CTransactionRef> evicted;
     CAmount value = 0;
-    for (const auto& rt : info.replaced) value += rt.mining_feerate.fee;
-    m_buffer.Park({.txns = std::move(cluster), .value = value, .weight = weight});
+    for (const auto& rt : info.replaced) {
+        evicted.push_back(rt.tx);
+        value = std::max(value, rt.mining_feerate.fee); // chunk fee (shared within a chunk)
+    }
+    if (evicted.empty()) return;
+    std::vector<CTransactionRef> pkg = TopoSort(evicted);
+    int64_t weight = 0;
+    for (const auto& t : pkg) weight += GetTransactionWeight(*t);
+    m_buffer.Park({.txns = std::move(pkg), .value = value, .weight = weight});
 }
 
 void AntiCycle::TransactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason, uint64_t)

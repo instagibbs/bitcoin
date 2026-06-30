@@ -20,15 +20,15 @@ using node::AntiCycle;
 
 BOOST_FIXTURE_TEST_SUITE(anticycle_tests, TestChain100Setup)
 
-// When an attacker RBF-evicts a CPFP child whose parent survives, the coordinator parks the
-// whole {parent, child} 1P1C package (keyed by the parent's input).
-BOOST_AUTO_TEST_CASE(parks_1p1c_on_child_eviction)
+// When an attacker RBF-evicts a CPFP child whose parent survives, only the evicted child is
+// parked -- keyed by the anchor (the parent's output) it spends, which is the contended outpoint.
+// The surviving parent is left in the mempool, not over-grabbed into the parked package.
+BOOST_AUTO_TEST_CASE(parks_evicted_child_keyed_by_anchor)
 {
     auto ac = std::make_shared<AntiCycle>(*m_node.chainman, *m_node.mempool, /*max_park_weight=*/4'000'000);
     m_node.validation_signals->RegisterSharedValidationInterface(ac);
 
     const CScript spk = m_coinbase_txns[0]->vout[0].scriptPubKey;
-    const COutPoint coin{m_coinbase_txns[0]->GetHash(), 0};
 
     // Parent A spends the coinbase; child B spends A's output. Both enter the mempool.
     const auto A = MakeTransactionRef(CreateValidMempoolTransaction(
@@ -42,15 +42,18 @@ BOOST_AUTO_TEST_CASE(parks_1p1c_on_child_eviction)
     const auto B2 = MakeTransactionRef(CreateValidMempoolTransaction(
         A, /*input_vout=*/0, /*input_height=*/0, coinbaseKey, spk,
         /*output_amount=*/40 * COIN, /*submit=*/false));
-    const auto result = m_node.chainman->ProcessTransaction(B2);
-    BOOST_REQUIRE(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(B2).m_result_type == MempoolAcceptResult::ResultType::VALID);
 
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
 
-    // The coordinator parked the {A, B} 1P1C package, keyed by A's input (the coinbase).
-    const auto* pkg = ac->buffer().FindByInput(coin);
+    // Only the evicted child B is parked, keyed by the anchor (A's output) it spends.
+    const COutPoint anchor{A->GetHash(), 0};
+    const auto* pkg = ac->buffer().FindByInput(anchor);
     BOOST_REQUIRE(pkg != nullptr);
-    BOOST_CHECK_EQUAL(pkg->txns.size(), 2U);
+    BOOST_CHECK_EQUAL(pkg->txns.size(), 1U);
+    BOOST_CHECK(pkg->txns.at(0)->GetHash() == B->GetHash());
+    // The surviving parent A is not over-grabbed: its input is not claimed by the buffer.
+    BOOST_CHECK(ac->buffer().FindByInput(COutPoint{m_coinbase_txns[0]->GetHash(), 0}) == nullptr);
 
     m_node.validation_signals->UnregisterSharedValidationInterface(ac);
 }

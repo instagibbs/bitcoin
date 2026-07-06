@@ -119,6 +119,31 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
             pb_ping_nonce = nonce;
             return;
         }
+        if (msg_type == NetMsgType::VERSION) {
+            // The VERSION sent on a private broadcast connection must not leak
+            // identifying information (services, time, address, UA, height, relay).
+            SpanReader ds{data};
+            int32_t version;
+            uint64_t my_services, your_services, my_services_dup, nonce;
+            int64_t my_time;
+            CService your_addr, my_addr;
+            std::string user_agent;
+            int32_t height;
+            bool relay;
+            ds >> version >> my_services >> my_time >>
+                your_services >> CNetAddr::V1(your_addr) >>
+                my_services_dup >> CNetAddr::V1(my_addr) >>
+                nonce >> user_agent >> height >> relay;
+            Assert(version == WTXID_RELAY_VERSION);
+            Assert(my_services == NODE_NONE && my_services_dup == NODE_NONE);
+            Assert(my_time == 0);
+            Assert(your_services == NODE_NONE);
+            Assert(your_addr == CService{});
+            Assert(user_agent == "/pynode:0.0.1/");
+            Assert(height == 0);
+            Assert(!relay);
+            return;
+        }
         if (msg_type != NetMsgType::INV) return;
         SpanReader ds{data};
         std::vector<CInv> invs;

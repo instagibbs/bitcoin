@@ -73,8 +73,9 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
     connman.SetMsgProc(node.peerman.get());
     connman.SetAddrman(*node.addrman);
 
-    // Seed with 1-3 transactions to test multiple pending broadcasts.
-    const int num_txs{fuzzed_data_provider.ConsumeIntegralInRange(1, 3)};
+    // Seed with 0-3 transactions to test multiple pending broadcasts; zero
+    // exercises the connected-in-vain disconnect in PushPrivateBroadcastTx().
+    const int num_txs{fuzzed_data_provider.ConsumeIntegralInRange(0, 3)};
     std::vector<CTransactionRef> seeded_txs;
     for (int i = 0; i < num_txs; ++i) {
         auto tx{MakeTransactionRef(ConsumeTransaction(fuzzed_data_provider, /*prevout_txids=*/std::nullopt))};

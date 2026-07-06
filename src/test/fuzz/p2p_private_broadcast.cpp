@@ -56,6 +56,9 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
     FakeNodeClock clock_ctx{1610000000s};
     FakeSteadyClock steady_clock;
     chainman.ResetIbd();
+    // Sometimes leave IBD: incoming TX processing (the broadcast-abort path)
+    // returns early during IBD.
+    if (fuzzed_data_provider.ConsumeBool()) chainman.JumpOutOfIbd();
 
     // Reset, so that dangling pointers can be detected by sanitizers.
     node.banman.reset();

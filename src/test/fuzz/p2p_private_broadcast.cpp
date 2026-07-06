@@ -102,13 +102,23 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
 
     peers.push_back(pb_node);
     connman.AddTestNode(*pb_node);
-    // Capture outbound INVs to verify if well formed, before SocketSendData drains vSendMsg.
+    // Capture outbound messages to verify if well formed (and to learn the PING
+    // nonce), before SocketSendData drains vSendMsg.
     connman.SetCaptureMessages(true);
     const auto CaptureMessageOrig = CaptureMessage;
     const CAddress pb_addr = pb_node->addr;
-    CaptureMessage = [&pb_addr](const CAddress& addr, const std::string& msg_type,
-                             std::span<const unsigned char> data, bool is_incoming) {
-        if (is_incoming || msg_type != NetMsgType::INV || addr != pb_addr) return;
+    std::optional<uint64_t> pb_ping_nonce;
+    CaptureMessage = [&](const CAddress& addr, const std::string& msg_type,
+                         std::span<const unsigned char> data, bool is_incoming) {
+        if (is_incoming || addr != pb_addr) return;
+        if (msg_type == NetMsgType::PING) {
+            Assert(data.size() == sizeof(uint64_t)); // Outgoing PING must carry a nonce.
+            uint64_t nonce;
+            SpanReader{data} >> nonce;
+            pb_ping_nonce = nonce;
+            return;
+        }
+        if (msg_type != NetMsgType::INV) return;
         SpanReader ds{data};
         std::vector<CInv> invs;
         ds >> invs;
@@ -167,6 +177,12 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
                     net_msg.emplace(NetMsg::Make(
                         NetMsgType::GETDATA,
                         std::vector<CInv>{{MSG_TX, tx->GetHash().ToUint256()}}));
+                }
+            },
+            [&] {
+                // Confirm reception of the pushed TX with a PONG matching the captured PING nonce.
+                if (&p2p_node == pb_node && pb_ping_nonce) {
+                    net_msg.emplace(NetMsg::Make(NetMsgType::PONG, *pb_ping_nonce));
                 }
             });
 

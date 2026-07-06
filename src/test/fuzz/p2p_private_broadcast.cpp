@@ -184,6 +184,16 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
                 if (&p2p_node == pb_node && pb_ping_nonce) {
                     net_msg.emplace(NetMsg::Make(NetMsgType::PONG, *pb_ping_nonce));
                 }
+            },
+            [&] {
+                // Echo a seeded tx back from a non-private-broadcast peer to exercise
+                // the received-from-network broadcast-abort path.
+                if (!p2p_node.IsPrivateBroadcastConn() &&
+                    p2p_node.fSuccessfullyConnected &&
+                    !seeded_txs.empty()) {
+                    const auto& tx{PickValue(fuzzed_data_provider, seeded_txs)};
+                    net_msg.emplace(NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx)));
+                }
             });
 
         if (net_msg) {

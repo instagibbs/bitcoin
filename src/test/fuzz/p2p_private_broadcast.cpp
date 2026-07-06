@@ -139,7 +139,11 @@ FUZZ_TARGET(p2p_private_broadcast, .init = ::initialize)
     // Optionally add extra peers of random connection types.
     const int extra_peers{fuzzed_data_provider.ConsumeIntegralInRange(0, 2)};
     for (int i = 0; i < extra_peers; ++i) {
-        peers.push_back(ConsumeNodeAsUniquePtr(fuzzed_data_provider, steady_clock, node_id++).release());
+        auto extra_peer{ConsumeNodeAsUniquePtr(fuzzed_data_provider, steady_clock, node_id++)};
+        // An address collision would match the capture hook's filter and fail
+        // its assertions on this peer's (legitimate) other-typed messages.
+        if (extra_peer->addr == pb_addr) continue;
+        peers.push_back(extra_peer.release());
         connman.AddTestNode(*peers.back());
         node.peerman->InitializeNode(
             *peers.back(),

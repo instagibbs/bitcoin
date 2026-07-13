@@ -15,6 +15,7 @@
 #include <util/time.h>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -31,6 +32,11 @@ static constexpr int ADDRMAN_NEW_BUCKET_COUNT{1 << ADDRMAN_NEW_BUCKET_COUNT_LOG2
 /** Maximum allowed number of entries in buckets for new and tried addresses */
 static constexpr int32_t ADDRMAN_BUCKET_SIZE_LOG2{6};
 static constexpr int ADDRMAN_BUCKET_SIZE{1 << ADDRMAN_BUCKET_SIZE_LOG2};
+/** Maximum number of quality-weighted netgroup draws SelectByNetgroup_() makes
+ *  before giving up. Bounds the work done while holding the addrman lock when
+ *  eligible entries have low GetChance(); the caller retries and ultimately
+ *  falls back to Select() when this returns nothing. */
+static constexpr int ADDRMAN_NETGROUP_SELECT_MAX_TRIES{64};
 
 /**
  * User-defined type for the internally used nIds
@@ -135,6 +141,9 @@ public:
     std::pair<CAddress, NodeSeconds> Select(bool new_only, const std::unordered_set<Network>& networks) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    AddrManSelection SelectWithNetgroup(const std::unordered_set<Network>& networks) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     std::vector<CAddress> GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, bool filtered = true) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
@@ -231,6 +240,36 @@ private:
     /** Number of entries in addrman per network and new/tried table. */
     std::unordered_map<Network, NewTriedCount> m_network_counts GUARDED_BY(cs);
 
+    struct TriedNetgroupNetwork {
+        //! Tried entries belonging to this netgroup and network family.
+        std::vector<nid_type> ids;
+        //! Position of this netgroup's key in the corresponding network's entry
+        //! of m_tried_group_lists, for O(1) removal.
+        size_t list_pos;
+    };
+
+    struct TriedNetgroup {
+        //! Per-family contents. An asmap group may contain both IPv4 and IPv6;
+        //! keeping them separate prevents one family from diluting selection of
+        //! the family already chosen by the legacy gate.
+        std::map<Network, TriedNetgroupNetwork> networks;
+    };
+
+    /** Tried clearnet (NET_IPV4/NET_IPV6) entries, indexed by
+     *  NetGroupManager::GetGroup(). Used by SelectWithNetgroup() to draw a
+     *  netgroup uniformly at random before selecting a tried entry within it.
+     *  Only the tried table is indexed: it admits no gossip-only entries (an entry
+     *  is promoted only after we dial it and it sends a valid VERSION), so it
+     *  cannot be filled by advertising addresses — a reachable Sybil can still
+     *  populate it, but at bounded storage/per-netgroup cost — and privacy-network
+     *  netgroups (derived from random keys) carry no grouping signal. Memory only. */
+    std::map<std::vector<unsigned char>, TriedNetgroup> m_tried_by_group GUARDED_BY(cs);
+
+    /** The keys of m_tried_by_group containing each clearnet family, for O(1)
+     *  uniform random eligible-netgroup selection. Kept in sync via
+     *  TriedNetgroupNetwork::list_pos (swap-with-last on removal). */
+    std::map<Network, std::vector<std::vector<unsigned char>>> m_tried_group_lists GUARDED_BY(cs);
+
     //! Find an entry.
     AddrInfo* Find(const CService& addr, nid_type* pnId = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
@@ -259,7 +298,14 @@ private:
 
     void Attempt_(const CService& addr, bool fCountFailure, NodeSeconds time) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
-    std::pair<CAddress, NodeSeconds> Select_(bool new_only, const std::unordered_set<Network>& networks) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+    std::pair<CAddress, NodeSeconds> Select_(bool new_only, const std::unordered_set<Network>& networks, bool* from_tried = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    std::pair<CAddress, NodeSeconds> SelectByNetgroup_(Network network) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    AddrManSelection SelectWithNetgroup_(const std::unordered_set<Network>& networks) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    //! Add/remove a tried entry from the netgroup index (no-op for non-clearnet addresses).
+    void UpdateTriedNetgroupIndex(const AddrInfo& info, nid_type nId, bool erase) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Helper to generalize looking up an addrman entry from either table.
      *

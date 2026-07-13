@@ -22,6 +22,7 @@
 #include <util/log.h>
 #include <util/time.h>
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 
@@ -286,6 +287,7 @@ void AddrManImpl::Unserialize(Stream& s_)
             mapInfo[nIdCount] = info;
             mapAddr[info] = nIdCount;
             vvTried[nKBucket][nKBucketPos] = nIdCount;
+            UpdateTriedNetgroupIndex(info, nIdCount, /*erase=*/false);
             nIdCount++;
             m_network_counts[info.GetNetwork()].n_tried++;
         } else {
@@ -392,6 +394,55 @@ AddrInfo* AddrManImpl::Find(const CService& addr, nid_type* pnId)
     if (it2 != mapInfo.end())
         return &(*it2).second;
     return nullptr;
+}
+
+void AddrManImpl::UpdateTriedNetgroupIndex(const AddrInfo& info, nid_type nId, bool erase)
+{
+    AssertLockHeld(cs);
+
+    const Network net{info.GetNetwork()};
+    if (net != NET_IPV4 && net != NET_IPV6) return;
+
+    const std::vector<unsigned char> group{m_netgroupman.GetGroup(info)};
+    if (erase) {
+        const auto it{m_tried_by_group.find(group)};
+        assert(it != m_tried_by_group.end());
+        TriedNetgroup& tried_group{it->second};
+        const auto network_it{tried_group.networks.find(net)};
+        assert(network_it != tried_group.networks.end());
+        TriedNetgroupNetwork& tried_network{network_it->second};
+        const auto id_it{std::find(tried_network.ids.begin(), tried_network.ids.end(), nId)};
+        assert(id_it != tried_network.ids.end());
+        *id_it = tried_network.ids.back();
+        tried_network.ids.pop_back();
+        if (tried_network.ids.empty()) {
+            // Swap the last group into this slot to keep the family's group list dense.
+            auto list_it{m_tried_group_lists.find(net)};
+            assert(list_it != m_tried_group_lists.end());
+            auto& group_list{list_it->second};
+            const size_t pos{tried_network.list_pos};
+            const std::vector<unsigned char>& moved{group_list.back()};
+            group_list[pos] = moved;
+            m_tried_by_group.at(moved).networks.at(net).list_pos = pos;
+            group_list.pop_back();
+            if (group_list.empty()) m_tried_group_lists.erase(list_it);
+            tried_group.networks.erase(network_it);
+        }
+        if (tried_group.networks.empty()) {
+            m_tried_by_group.erase(it);
+        }
+    } else {
+        TriedNetgroup& tried_group{m_tried_by_group.try_emplace(group).first->second};
+        const auto [network_it, network_inserted]{tried_group.networks.try_emplace(net)};
+        if (network_inserted) {
+            auto& group_list{m_tried_group_lists[net]};
+            network_it->second.list_pos = group_list.size();
+            group_list.push_back(group);
+        }
+        auto& ids{network_it->second.ids};
+        assert(std::find(ids.begin(), ids.end(), nId) == ids.end());
+        ids.push_back(nId);
+    }
 }
 
 AddrInfo* AddrManImpl::Create(const CAddress& addr, const CNetAddr& addrSource, nid_type* pnId)
@@ -505,6 +556,7 @@ void AddrManImpl::MakeTried(AddrInfo& info, nid_type nId)
         vvTried[nKBucket][nKBucketPos] = -1;
         nTried--;
         m_network_counts[infoOld.GetNetwork()].n_tried--;
+        UpdateTriedNetgroupIndex(infoOld, nIdEvict, /*erase=*/true);
 
         // find which new bucket it belongs to
         int nUBucket = infoOld.GetNewBucket(nKey, m_netgroupman);
@@ -526,6 +578,7 @@ void AddrManImpl::MakeTried(AddrInfo& info, nid_type nId)
     nTried++;
     info.fInTried = true;
     m_network_counts[info.GetNetwork()].n_tried++;
+    UpdateTriedNetgroupIndex(info, nId, /*erase=*/false);
 }
 
 bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::chrono::seconds time_penalty)
@@ -691,9 +744,11 @@ void AddrManImpl::Attempt_(const CService& addr, bool fCountFailure, NodeSeconds
     }
 }
 
-std::pair<CAddress, NodeSeconds> AddrManImpl::Select_(bool new_only, const std::unordered_set<Network>& networks) const
+std::pair<CAddress, NodeSeconds> AddrManImpl::Select_(bool new_only, const std::unordered_set<Network>& networks, bool* from_tried) const
 {
     AssertLockHeld(cs);
+
+    if (from_tried) *from_tried = false;
 
     if (vRandom.empty()) return {};
 
@@ -765,12 +820,72 @@ std::pair<CAddress, NodeSeconds> AddrManImpl::Select_(bool new_only, const std::
         // With probability GetChance() * chance_factor, return the entry.
         if (insecure_rand.randbits<30>() < chance_factor * info.GetChance() * (1 << 30)) {
             LogDebug(BCLog::ADDRMAN, "Selected %s from %s\n", info.ToStringAddrPort(), search_tried ? "tried" : "new");
+            if (from_tried) *from_tried = search_tried;
             return {info, info.m_last_try};
         }
 
         // Otherwise start over with a (likely) different bucket, and increased chance factor.
         chance_factor *= 1.2;
     }
+}
+
+std::pair<CAddress, NodeSeconds> AddrManImpl::SelectByNetgroup_(Network network) const
+{
+    AssertLockHeld(cs);
+
+    assert(network == NET_IPV4 || network == NET_IPV6);
+    const auto list_it{m_tried_group_lists.find(network)};
+    if (list_it == m_tried_group_lists.end()) return {};
+    const auto& group_list{list_it->second};
+
+    // Draw an eligible netgroup uniformly, then a tried entry within it,
+    // re-drawing on GetChance() rejection like Select_ re-draws its bucket.
+    // Family-specific lists are important under asmap, where an ASN group can
+    // contain both IPv4 and IPv6: opposite-family IPs must not suppress the
+    // family already selected by the legacy gate.
+    double chance_factor = 1.0;
+    for (int tries = 0; tries < ADDRMAN_NETGROUP_SELECT_MAX_TRIES; ++tries) {
+        const std::vector<unsigned char>& group{group_list[insecure_rand.randrange(group_list.size())]};
+        const TriedNetgroupNetwork& tried_network{m_tried_by_group.at(group).networks.at(network)};
+        const std::vector<nid_type>& ids{tried_network.ids};
+        const auto it_found{mapInfo.find(ids[insecure_rand.randrange(ids.size())])};
+        assert(it_found != mapInfo.end());
+        const AddrInfo& info{it_found->second};
+
+        // With probability GetChance() * chance_factor, return the entry.
+        if (insecure_rand.randbits<30>() < chance_factor * info.GetChance() * (1 << 30)) {
+            LogDebug(BCLog::ADDRMAN, "Selected %s by netgroup from tried\n", info.ToStringAddrPort());
+            return {info, info.m_last_try};
+        }
+
+        // Otherwise start over with a (likely) different netgroup, and increased chance factor.
+        chance_factor *= 1.2;
+    }
+    return {};
+}
+
+AddrManSelection AddrManImpl::SelectWithNetgroup_(const std::unordered_set<Network>& networks) const
+{
+    AssertLockHeld(cs);
+
+    // First make the complete legacy selection. Besides preserving Select()'s
+    // new/tried coin, this also preserves its distribution among clearnet and
+    // privacy networks within the selected table.
+    bool from_tried{false};
+    const auto selected{Select_(/*new_only=*/false, networks, &from_tried)};
+    const CAddress& address{selected.first};
+    if (!address.IsValid()) return {};
+    if (!from_tried) return {address, selected.second, AddrManSelectionMethod::LEGACY_NEW};
+    if (!address.IsIPv4() && !address.IsIPv6()) {
+        return {address, selected.second, AddrManSelectionMethod::LEGACY_TRIED};
+    }
+
+    // A legacy tried-clearnet result chooses the table and network family; now
+    // replace the particular address with a by-netgroup draw from that family.
+    // Keeping the family preserves Select()'s IPv4/IPv6 distribution, including
+    // when an asmap maps both families into the same ASN group.
+    const auto grouped{SelectByNetgroup_(address.GetNetwork())};
+    return {grouped.first, grouped.second, AddrManSelectionMethod::NETGROUP_TRIED};
 }
 
 nid_type AddrManImpl::GetEntry(bool use_tried, size_t bucket, size_t position) const
@@ -1051,6 +1166,7 @@ int AddrManImpl::CheckAddrman() const
     std::unordered_set<nid_type> setTried;
     std::unordered_map<nid_type, int> mapNew;
     std::unordered_map<Network, NewTriedCount> local_counts;
+    size_t tried_clearnet_count{0};
 
     if (vRandom.size() != (size_t)(nTried + nNew))
         return -7;
@@ -1058,6 +1174,20 @@ int AddrManImpl::CheckAddrman() const
     for (const auto& entry : mapInfo) {
         nid_type n = entry.first;
         const AddrInfo& info = entry.second;
+        const Network net{info.GetNetwork()};
+        // Every tried clearnet entry must be indexed under its recomputed
+        // netgroup. Together with the cardinality comparison below this implies
+        // the netgroup index holds exactly the tried clearnet entries.
+        if (info.fInTried && (net == NET_IPV4 || net == NET_IPV6)) {
+            ++tried_clearnet_count;
+            const auto it_group{m_tried_by_group.find(m_netgroupman.GetGroup(info))};
+            if (it_group == m_tried_by_group.end()) return -22;
+            const auto it_network{it_group->second.networks.find(net)};
+            if (it_network == it_group->second.networks.end() ||
+                std::find(it_network->second.ids.begin(), it_network->second.ids.end(), n) == it_network->second.ids.end()) {
+                return -22;
+            }
+        }
         if (info.fInTried) {
             if (!TicksSinceEpoch<std::chrono::seconds>(info.m_last_success)) {
                 return -1;
@@ -1065,14 +1195,14 @@ int AddrManImpl::CheckAddrman() const
             if (info.nRefCount)
                 return -2;
             setTried.insert(n);
-            local_counts[info.GetNetwork()].n_tried++;
+            local_counts[net].n_tried++;
         } else {
             if (info.nRefCount < 0 || info.nRefCount > ADDRMAN_NEW_BUCKETS_PER_ADDRESS)
                 return -3;
             if (!info.nRefCount)
                 return -4;
             mapNew[n] = info.nRefCount;
-            local_counts[info.GetNetwork()].n_new++;
+            local_counts[net].n_new++;
         }
         const auto it{mapAddr.find(info)};
         if (it == mapAddr.end() || it->second != n) {
@@ -1143,6 +1273,35 @@ int AddrManImpl::CheckAddrman() const
         }
     }
 
+    size_t indexed_ids{0};
+    size_t indexed_group_networks{0};
+    for (const auto& [group, tried_group] : m_tried_by_group) {
+        if (tried_group.networks.empty()) {
+            return -23; // unpruned empty netgroup
+        }
+        for (const auto& [network, tried_network] : tried_group.networks) {
+            if (network != NET_IPV4 && network != NET_IPV6) return -23;
+            if (tried_network.ids.empty()) return -23; // unpruned empty family
+            const auto list_it{m_tried_group_lists.find(network)};
+            if (list_it == m_tried_group_lists.end() ||
+                tried_network.list_pos >= list_it->second.size() ||
+                list_it->second[tried_network.list_pos] != group) {
+                return -23; // family group list does not point back at this group
+            }
+            ++indexed_group_networks;
+            indexed_ids += tried_network.ids.size();
+        }
+    }
+    size_t listed_group_networks{0};
+    for (const auto& [network, group_list] : m_tried_group_lists) {
+        if ((network != NET_IPV4 && network != NET_IPV6) || group_list.empty()) return -23;
+        listed_group_networks += group_list.size();
+    }
+    if (listed_group_networks != indexed_group_networks) return -23;
+    if (indexed_ids != tried_clearnet_count) {
+        return -22; // netgroup index holds entries beyond the tried clearnet ones verified above
+    }
+
     return 0;
 }
 
@@ -1205,6 +1364,15 @@ std::pair<CAddress, NodeSeconds> AddrManImpl::Select(bool new_only, const std::u
     auto addrRet = Select_(new_only, networks);
     Check();
     return addrRet;
+}
+
+AddrManSelection AddrManImpl::SelectWithNetgroup(const std::unordered_set<Network>& networks) const
+{
+    LOCK(cs);
+    Check();
+    auto addr_ret = SelectWithNetgroup_(networks);
+    Check();
+    return addr_ret;
 }
 
 std::vector<CAddress> AddrManImpl::GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
@@ -1308,6 +1476,11 @@ std::pair<CAddress, NodeSeconds> AddrMan::SelectTriedCollision()
 std::pair<CAddress, NodeSeconds> AddrMan::Select(bool new_only, const std::unordered_set<Network>& networks) const
 {
     return m_impl->Select(new_only, networks);
+}
+
+AddrManSelection AddrMan::SelectWithNetgroup(const std::unordered_set<Network>& networks) const
+{
+    return m_impl->SelectWithNetgroup(networks);
 }
 
 std::vector<CAddress> AddrMan::GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const

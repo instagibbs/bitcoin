@@ -81,6 +81,20 @@ struct AddressPosition {
         : tried{tried_in}, multiplicity{multiplicity_in}, bucket{bucket_in}, position{position_in} {}
 };
 
+/** How an address returned by SelectWithNetgroup() was selected. */
+enum class AddrManSelectionMethod {
+    NONE, //!< The complete legacy selection returned no eligible address.
+    LEGACY_NEW, //!< The legacy new-table address was returned unchanged.
+    LEGACY_TRIED, //!< A legacy non-clearnet tried-table address was returned.
+    NETGROUP_TRIED, //!< A tried clearnet result was replaced by a netgroup draw.
+};
+
+struct AddrManSelection {
+    CAddress address;
+    NodeSeconds last_try{0s};
+    AddrManSelectionMethod method{AddrManSelectionMethod::NONE};
+};
+
 /** Stochastic address manager
  *
  * Design goals:
@@ -186,6 +200,31 @@ public:
      *            seconds  The last time we attempted to connect to that peer.
      */
     std::pair<CAddress, NodeSeconds> Select(bool new_only = false, const std::unordered_set<Network>& networks = {}) const;
+
+    /**
+     * Choose an address while preserving Select()'s table and network selection
+     * policy, but replacing a selected tried-table IPv4/IPv6 address with a
+     * by-netgroup draw from the same network. New-table and privacy-network
+     * selections use the legacy bucket path unchanged.
+     *
+     * This keeps new-table source bucketing in front of every new address draw
+     * and preserves Select()'s 50/50 new/tried choice when both tables are
+     * eligible. The method reports whether the legacy result was retained or
+     * the tried-table by-netgroup path was taken. A bounded by-netgroup miss
+     * returns an empty address with NETGROUP_TRIED so the caller can consume a
+     * sampling attempt.
+     *
+     * The replacement draws an initially uniform tried clearnet netgroup, then
+     * a tried entry within it. This does not change tried-table admission or the
+     * legacy gate's network-family distribution. GetChance() rejection redraws
+     * the group, so accepted results are quality-weighted rather than strictly
+     * uniform. Gossip-only new entries never receive global destination-group
+     * tickets.
+     *
+     * @param[in] networks Select only addresses of these networks (empty = all).
+     * @return The selected peer, its last-attempt time, and selection method.
+     */
+    AddrManSelection SelectWithNetgroup(const std::unordered_set<Network>& networks = {}) const;
 
     /**
      * Return all or many randomly selected addresses, optionally by network.

@@ -187,6 +187,7 @@ FUZZ_TARGET(addrman, .init = initialize_addrman)
         }
     }
     (void)const_addr_man.Select(fuzzed_data_provider.ConsumeBool(), nets);
+    (void)const_addr_man.SelectWithNetgroup(nets);
 
     std::optional<bool> in_new;
     if (fuzzed_data_provider.ConsumeBool()) {

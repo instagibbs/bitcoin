@@ -8,8 +8,10 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <netgroup.h>
+#include <node/data/ip_asn.dat.h>
 #include <protocol.h>
 #include <random.h>
+#include <streams.h>
 #include <uint256.h>
 #include <util/check.h>
 #include <util/time.h>
@@ -78,7 +80,27 @@ static void FillAddrMan(AddrMan& addrman)
     AddAddressesToAddrMan(addrman);
 }
 
+// Populate the tried table too (SelectWithNetgroup and the tried netgroup index
+// only concern tried entries). The random IPv6 addresses give many distinct
+// netgroups to draw from.
+static void FillAddrManTried(AddrMan& addrman)
+{
+    FillAddrMan(addrman);
+    for (size_t source_i = 0; source_i < NUM_SOURCES; ++source_i) {
+        for (size_t addr_i = 0; addr_i < NUM_ADDRESSES_PER_SOURCE; ++addr_i) {
+            addrman.Good(g_addresses[source_i][addr_i]);
+        }
+    }
+    addrman.ResolveCollisions();
+}
+
 /* Benchmarks */
+
+static const NetGroupManager& AsmapNetGroupMan()
+{
+    static const auto ngm{NetGroupManager::WithEmbeddedAsmap(node::data::ip_asn)};
+    return ngm;
+}
 
 static void AddrManAdd(benchmark::Bench& bench)
 {
@@ -88,6 +110,45 @@ static void AddrManAdd(benchmark::Bench& bench)
         AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
         AddAddressesToAddrMan(addrman);
     });
+}
+
+static void AddrManAddAsmap(benchmark::Bench& bench)
+{
+    CreateAddresses();
+
+    bench.run([&] {
+        AddrMan addrman{AsmapNetGroupMan(), /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+        AddAddressesToAddrMan(addrman);
+    });
+}
+
+static void AddrManUnserializeImpl(benchmark::Bench& bench, const NetGroupManager& ngm)
+{
+    AddrMan addrman_source{ngm, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+    // Populate the tried table so this measures rebuilding the tried netgroup
+    // index on load, which is the only index work Unserialize does.
+    FillAddrManTried(addrman_source);
+    assert(addrman_source.Size(/*net=*/std::nullopt, /*in_new=*/false) > 0);
+    DataStream stream{};
+    stream << addrman_source;
+    const std::string data{stream.str()};
+
+    bench.run([&] {
+        DataStream s{MakeUCharSpan(data)};
+        AddrMan addrman{ngm, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+        s >> addrman;
+        assert(addrman.Size() > 0);
+    });
+}
+
+static void AddrManUnserialize(benchmark::Bench& bench)
+{
+    AddrManUnserializeImpl(bench, EMPTY_NETGROUPMAN);
+}
+
+static void AddrManUnserializeAsmap(benchmark::Bench& bench)
+{
+    AddrManUnserializeImpl(bench, AsmapNetGroupMan());
 }
 
 static void AddrManSelect(benchmark::Bench& bench)
@@ -137,6 +198,72 @@ static void AddrManSelectByNetwork(benchmark::Bench& bench)
     });
 }
 
+static void AddrManSelectWithNetgroup(benchmark::Bench& bench)
+{
+    AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/true, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+    FillAddrManTried(addrman);
+
+    bench.run([&] {
+        const auto selection = addrman.SelectWithNetgroup();
+        assert(selection.address.GetPort() > 0);
+    });
+}
+
+// Master-equivalent baseline on the same tried-heavy fixture, to isolate the
+// incremental cost of the hybrid replacement from ordinary Select().
+static void AddrManSelectTriedBaseline(benchmark::Bench& bench)
+{
+    AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/true, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+    FillAddrManTried(addrman);
+
+    bench.run([&] {
+        const auto selection = addrman.Select();
+        assert(selection.first.GetPort() > 0);
+    });
+}
+
+// Populate the worst case for the network filter: the tried table is full of
+// IPv6 entries but only a handful of IPv4 entries match the requested family.
+static void FillAddrManWrongFamilySkew(AddrMan& addrman)
+{
+    // Add a handful of IPv4 tried entries first, while tried slots are free, so
+    // a (rare) match exists; if added after the table is full they would collide
+    // and never reach tried, making the search early-out instead of exercising
+    // the bounded loop.
+    for (int i = 1; i <= 4; ++i) {
+        const CService addr{in_addr{.s_addr = htonl((250u << 24) | (i << 16) | 1)}, 8333};
+        addrman.Add({CAddress(addr, NODE_NONE)}, addr);
+        addrman.Good(addr);
+    }
+    FillAddrManTried(addrman); // many IPv6 tried netgroups dominate the table
+    assert(addrman.Size(NET_IPV4, /*in_new=*/false) > 0);
+}
+
+// Master-equivalent baseline for the same sparse-family fixture. The complete
+// legacy selection is also the first stage of SelectWithNetgroup().
+static void AddrManSelectWrongFamilySkew(benchmark::Bench& bench)
+{
+    AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/true, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+    FillAddrManWrongFamilySkew(addrman);
+
+    bench.run([&] {
+        (void)addrman.Select(/*new_only=*/false, {NET_IPV4});
+    });
+}
+
+// Hybrid cost for the same fixture. The by-netgroup replacement is bounded;
+// comparing this with AddrManSelectWrongFamilySkew isolates its incremental cost
+// from the legacy filtered selection that both paths must perform.
+static void AddrManSelectWithNetgroupWrongFamily(benchmark::Bench& bench)
+{
+    AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/true, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+    FillAddrManWrongFamilySkew(addrman);
+
+    bench.run([&] {
+        (void)addrman.SelectWithNetgroup({NET_IPV4});
+    });
+}
+
 static void AddrManGetAddr(benchmark::Bench& bench)
 {
     AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
@@ -170,8 +297,15 @@ static void AddrManAddThenGood(benchmark::Bench& bench)
 }
 
 BENCHMARK(AddrManAdd);
+BENCHMARK(AddrManAddAsmap);
+BENCHMARK(AddrManUnserialize);
+BENCHMARK(AddrManUnserializeAsmap);
 BENCHMARK(AddrManSelect);
 BENCHMARK(AddrManSelectFromAlmostEmpty);
 BENCHMARK(AddrManSelectByNetwork);
+BENCHMARK(AddrManSelectTriedBaseline);
+BENCHMARK(AddrManSelectWithNetgroup);
+BENCHMARK(AddrManSelectWrongFamilySkew);
+BENCHMARK(AddrManSelectWithNetgroupWrongFamily);
 BENCHMARK(AddrManGetAddr);
 BENCHMARK(AddrManAddThenGood);

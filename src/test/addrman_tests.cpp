@@ -19,9 +19,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 using namespace std::literals;
 using node::NodeContext;
@@ -345,6 +347,377 @@ BOOST_AUTO_TEST_CASE(addrman_select_special)
     // table gets selected even if new_only is false. if the table was being
     // selected at random, this test will sporadically fail
     BOOST_CHECK(addrman->Select(/*new_only=*/false, {NET_IPV4}).first == addr1);
+}
+
+BOOST_AUTO_TEST_CASE(addrman_select_with_netgroup_preserves_policy)
+{
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
+
+    // Empty remains empty and reports that no selection path ran.
+    auto selection{addrman->SelectWithNetgroup()};
+    BOOST_CHECK(!selection.address.IsValid());
+    BOOST_CHECK(selection.method == AddrManSelectionMethod::NONE);
+
+    const CNetAddr source{ResolveIP("252.2.2.2")};
+    const CService new_addr{ResolveService("250.1.1.1", 8333)};
+    BOOST_REQUIRE(addrman->Add({CAddress(new_addr, NODE_NONE)}, source));
+
+    // A new-only table uses the exact legacy path and is never marked as a
+    // netgroup draw.
+    selection = addrman->SelectWithNetgroup({NET_IPV4});
+    BOOST_CHECK(selection.address == new_addr);
+    BOOST_CHECK(selection.method == AddrManSelectionMethod::LEGACY_NEW);
+
+    // Once the same address is tried, the tried-clearnet gate is replaced by a
+    // by-netgroup draw in the same family.
+    BOOST_REQUIRE(addrman->Good(new_addr));
+    selection = addrman->SelectWithNetgroup({NET_IPV4});
+    BOOST_CHECK(selection.address == new_addr);
+    BOOST_CHECK(selection.method == AddrManSelectionMethod::NETGROUP_TRIED);
+
+    // Non-clearnet tried entries retain legacy selection. This is important for
+    // Tor/I2P reachability: the hybrid policy must not silently replace them by
+    // an unrelated clearnet peer.
+    CAddress i2p_addr;
+    i2p_addr.SetSpecial("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p");
+    BOOST_REQUIRE(addrman->Add({i2p_addr}, source));
+    BOOST_REQUIRE(addrman->Good(i2p_addr));
+    selection = addrman->SelectWithNetgroup({NET_I2P});
+    BOOST_CHECK(selection.address == i2p_addr);
+    BOOST_CHECK(selection.method == AddrManSelectionMethod::LEGACY_TRIED);
+}
+
+BOOST_AUTO_TEST_CASE(addrman_select_with_netgroup_preserves_table_split)
+{
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
+    const CNetAddr source{ResolveIP("252.2.2.2")};
+
+    const CService tried_addr{ResolveService("250.1.1.1", 8333)};
+    BOOST_REQUIRE(addrman->Add({CAddress(tried_addr, NODE_NONE)}, source));
+    BOOST_REQUIRE(addrman->Good(tried_addr));
+
+    const CService new_addr{ResolveService("240.1.1.1", 8333)};
+    BOOST_REQUIRE(addrman->Add({CAddress(new_addr, NODE_NONE)}, source));
+
+    // With both tables eligible, the legacy gate keeps Select()'s 50/50 table
+    // coin. New results remain bucket-selected; tried results are replaced by the
+    // only tried netgroup. The methods make the table origin directly observable.
+    constexpr int draws{4000};
+    int from_new{0};
+    int from_tried_netgroup{0};
+    for (int i = 0; i < draws; ++i) {
+        const auto result{addrman->SelectWithNetgroup({NET_IPV4})};
+        BOOST_REQUIRE(result.address.IsValid());
+        if (result.method == AddrManSelectionMethod::LEGACY_NEW) {
+            ++from_new;
+            BOOST_CHECK(result.address == new_addr);
+        } else {
+            BOOST_REQUIRE(result.method == AddrManSelectionMethod::NETGROUP_TRIED);
+            ++from_tried_netgroup;
+            BOOST_CHECK(result.address == tried_addr);
+        }
+    }
+    BOOST_CHECK(from_new > 0.45 * draws);
+    BOOST_CHECK(from_new < 0.55 * draws);
+    BOOST_CHECK_EQUAL(from_new + from_tried_netgroup, draws);
+}
+
+BOOST_AUTO_TEST_CASE(addrman_select_with_netgroup_new_flood_stays_legacy)
+{
+    // An attacker gossiping many addresses across many distinct destination
+    // netgroups (from one source) must not gain global netgroup tickets. New
+    // results remain on Select()'s source-bucketed path.
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
+
+    const CNetAddr attacker_source = ResolveIP("10.0.0.1");
+    for (int i = 0; i < 1000; ++i) {
+        // Distinct /16 destination groups, all from a single source.
+        const CService addr{ResolveService(ToString(1 + i / 256) + "." + ToString(i % 256) + ".0.1", 8333)};
+        addrman->Add({CAddress(addr, NODE_NONE)}, attacker_source);
+    }
+    BOOST_REQUIRE(addrman->Size() > 100U);
+    // Nothing is in tried, so the hybrid selector returns a legacy new-table
+    // result rather than globally randomizing the advertised destination groups.
+    auto selection{addrman->SelectWithNetgroup({NET_IPV4})};
+    BOOST_REQUIRE(selection.address.IsValid());
+    BOOST_CHECK(selection.method == AddrManSelectionMethod::LEGACY_NEW);
+
+    // Once one honest peer reaches tried, the 50/50 table gate returns either a
+    // legacy new result or that one tried netgroup. Flooding new destination
+    // groups cannot add weight to the tried-netgroup half.
+    const CService honest = ResolveService("250.1.1.1", 8333);
+    BOOST_CHECK(addrman->Add({CAddress(honest, NODE_NONE)}, ResolveIP("252.2.2.2")));
+    BOOST_CHECK(addrman->Good(honest));
+    bool saw_new{false};
+    bool saw_tried_group{false};
+    for (int i = 0; i < 200; ++i) {
+        selection = addrman->SelectWithNetgroup({NET_IPV4});
+        BOOST_REQUIRE(selection.address.IsValid());
+        if (selection.method == AddrManSelectionMethod::NETGROUP_TRIED) {
+            saw_tried_group = true;
+            BOOST_CHECK(selection.address == honest);
+        } else {
+            saw_new = true;
+            BOOST_CHECK(selection.method == AddrManSelectionMethod::LEGACY_NEW);
+        }
+    }
+    BOOST_CHECK(saw_new);
+    BOOST_CHECK(saw_tried_group);
+}
+
+BOOST_AUTO_TEST_CASE(addrman_select_by_netgroup_uniform)
+{
+    // A netgroup with many tried entries should not be selected more often than
+    // a netgroup with one. Without an asmap, IPv4 netgroups are /16 prefixes.
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
+
+    // Populate one /16 with many tried entries (spread over sources to limit
+    // tried-bucket collisions).
+    int group_a_tried{0};
+    for (int i = 1; i <= 200; ++i) {
+        const CService addr{ResolveService("250.1." + ToString(i / 256) + "." + ToString(i % 256), 8333)};
+        const CNetAddr src{ResolveIP("251." + ToString(i % 256) + "." + ToString(i / 256) + ".1")};
+        addrman->Add({CAddress(addr, NODE_NONE)}, src);
+        if (addrman->Good(addr)) ++group_a_tried;
+    }
+    BOOST_REQUIRE(group_a_tried >= 10);
+
+    // A single tried entry in a different /16.
+    const CService lone_addr{ResolveService("240.2.1.1", 9999)};
+    BOOST_CHECK(addrman->Add({CAddress(lone_addr, NODE_NONE)}, ResolveIP("252.2.2.2")));
+    BOOST_CHECK(addrman->Good(lone_addr));
+
+    // The lone netgroup is drawn ~50% of the time despite group A having many
+    // more entries; Select() would return it proportionally (~1/N).
+    const int draws{2000};
+    int netgroup_draws{0};
+    int lone_selected{0};
+    for (int attempts = 0; netgroup_draws < draws && attempts < draws * 4; ++attempts) {
+        const auto selection{addrman->SelectWithNetgroup()};
+        BOOST_REQUIRE(selection.address.IsValid());
+        if (selection.method != AddrManSelectionMethod::NETGROUP_TRIED) {
+            BOOST_CHECK(selection.method == AddrManSelectionMethod::LEGACY_NEW);
+            continue;
+        }
+        ++netgroup_draws;
+        if (selection.address == lone_addr) ++lone_selected;
+    }
+    BOOST_REQUIRE_EQUAL(netgroup_draws, draws);
+    BOOST_CHECK(lone_selected > 0.35 * draws);
+    BOOST_CHECK(lone_selected < 0.65 * draws);
+}
+
+BOOST_AUTO_TEST_CASE(addrman_select_by_netgroup_asmap_family_isolation)
+{
+    // Minimal ASMap for this test:
+    //   250.0.0.0/8 and 2600::/16 -> AS1000 (one mixed-family netgroup)
+    //   240.0.0.0/8                -> AS2000 (a second IPv4 netgroup)
+    const std::vector<std::byte> asmap{
+        std::byte{0x8b}, std::byte{0x8e}, std::byte{0x62}, std::byte{0xec}, std::byte{0x0f}, std::byte{0xb0},
+        std::byte{0x3f}, std::byte{0xc0}, std::byte{0xfe}, std::byte{0x00}, std::byte{0xfb}, std::byte{0x03},
+        std::byte{0xec}, std::byte{0x0f}, std::byte{0xb0}, std::byte{0x3f}, std::byte{0xc0}, std::byte{0xfe},
+        std::byte{0x00}, std::byte{0xfb}, std::byte{0x03}, std::byte{0xec}, std::byte{0x0f}, std::byte{0xb0},
+        std::byte{0x3f}, std::byte{0xfc}, std::byte{0xfe}, std::byte{0xff}, std::byte{0xfb}, std::byte{0xff},
+        std::byte{0x47}, std::byte{0x6e}, std::byte{0x00}, std::byte{0x3e}, std::byte{0xbf}, std::byte{0x09},
+        std::byte{0xf0}, std::byte{0xf9}, std::byte{0x1e}, std::byte{0xdb}, std::byte{0x1f}, std::byte{0x00},
+        std::byte{0xf0}, std::byte{0x39}};
+    auto netgroupman{NetGroupManager::WithEmbeddedAsmap(asmap)};
+    auto addrman = std::make_unique<AddrMan>(netgroupman, DETERMINISTIC, GetCheckRatio(m_node));
+    FakeNodeClock clock{};
+
+    const CService shared_as_v4{ResolveService("250.1.1.1", 8333)};
+    const CService other_as_v4{ResolveService("240.1.1.1", 8333)};
+    BOOST_REQUIRE(netgroupman.GetGroup(shared_as_v4) != netgroupman.GetGroup(other_as_v4));
+    for (const CService& address : {shared_as_v4, other_as_v4}) {
+        BOOST_REQUIRE(addrman->Add({CAddress(address, NODE_NONE)}, address));
+        BOOST_REQUIRE(addrman->Good(address));
+    }
+
+    // Populate many distinct IPv6 IPs in the same AS as shared_as_v4. They must
+    // neither dilute AS1000's IPv4 ticket nor cause bounded IPv4 draws to miss.
+    int ipv6_tried{0};
+    for (int i = 1; i <= 400; ++i) {
+        const CService address{ResolveService("2600:" + ToString(i) + "::1", 8333)};
+        BOOST_REQUIRE(netgroupman.GetGroup(address) == netgroupman.GetGroup(shared_as_v4));
+        if (!addrman->Add({CAddress(address, NODE_NONE)}, address)) continue;
+        if (addrman->Good(address)) ++ipv6_tried;
+    }
+    BOOST_REQUIRE(ipv6_tried >= 50);
+    clock += 11min;
+
+    constexpr int draws{4000};
+    int shared_as_selected{0};
+    for (int i = 0; i < draws; ++i) {
+        const auto selection{addrman->SelectWithNetgroup({NET_IPV4})};
+        BOOST_REQUIRE(selection.method == AddrManSelectionMethod::NETGROUP_TRIED);
+        BOOST_REQUIRE(selection.address.IsValid());
+        BOOST_REQUIRE(selection.address == shared_as_v4 || selection.address == other_as_v4);
+        if (selection.address == shared_as_v4) ++shared_as_selected;
+    }
+    BOOST_CHECK(shared_as_selected > 0.45 * draws);
+    BOOST_CHECK(shared_as_selected < 0.55 * draws);
+}
+
+BOOST_AUTO_TEST_CASE(addrman_select_by_netgroup_wrong_family)
+{
+    // With a tried table dominated by one family, the per-family group list must
+    // still select the requested family directly and never return the other one.
+    FakeNodeClock clock{};
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
+
+    // Many IPv6 tried netgroups. Use routable global-unicast /32s (2600::/12,
+    // ARIN); documentation space such as 2001:db8::/32 is !IsValid() and would
+    // never enter addrman, leaving the wrong-family search unexercised.
+    size_t ipv6_tried{0};
+    for (int i = 1; i <= 500; ++i) {
+        const CService addr{ResolveService("2600:" + ToString(i) + "::1", 8333)};
+        BOOST_REQUIRE(addrman->Add({CAddress(addr, NODE_NONE)}, addr));
+        if (addrman->Good(addr)) ++ipv6_tried;
+    }
+    // The point of the test is a tried table dominated by the wrong family.
+    BOOST_REQUIRE(ipv6_tried >= 100);
+    BOOST_CHECK_EQUAL(addrman->Size(NET_IPV6, /*in_new=*/false), ipv6_tried);
+
+    // A few IPv4 tried netgroups.
+    std::set<std::string> ipv4;
+    for (int i = 1; i <= 4; ++i) {
+        const CService addr{ResolveService("250." + ToString(i) + ".1.1", 8333)};
+        BOOST_REQUIRE(addrman->Add({CAddress(addr, NODE_NONE)}, addr));
+        BOOST_REQUIRE(addrman->Good(addr));
+        ipv4.insert(addr.ToStringAddr());
+    }
+    BOOST_CHECK_EQUAL(addrman->Size(NET_IPV4, /*in_new=*/false), ipv4.size());
+
+    // Advance past the 10-minute recent-attempt window so GetChance() is ~1 for
+    // these entries (as it would be for peers connected to in the past), rather
+    // than the 0.01 penalty freshly-tried entries carry.
+    clock += 11min;
+
+    // Opposite-family groups are not rejection-sampled, so every grouped result
+    // is one of the four IPv4 entries even though IPv6 dominates the table.
+    for (int i = 0; i < 200; ++i) {
+        const auto selection{addrman->SelectWithNetgroup({NET_IPV4})};
+        BOOST_REQUIRE(selection.method == AddrManSelectionMethod::NETGROUP_TRIED);
+        const CAddress& a{selection.address};
+        BOOST_REQUIRE(a.IsValid());
+        BOOST_CHECK(a.IsIPv4());
+        BOOST_CHECK(ipv4.count(a.ToStringAddr()));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(addrman_netgroup_index_consistency)
+{
+    // With a consistency check ratio of 1, CheckAddrman() (including the tried
+    // netgroup index invariants) runs after every operation. Exercise the index
+    // mutation paths: MakeTried, the MakeTried eviction branch, and Unserialize.
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, /*consistency_check_ratio=*/1);
+
+    // Same recipe as addrman_evictionworks: fill a tried bucket, then evict.
+    CNetAddr source = ResolveIP("252.2.2.2");
+    for (unsigned int i = 1; i < 36; i++) {
+        CService addr = ResolveService("250.1.1." + ToString(i));
+        BOOST_CHECK(addrman->Add({CAddress(addr, NODE_NONE)}, source));
+        BOOST_CHECK(addrman->Good(addr));
+    }
+
+    // Collision between 36 and 19.
+    CService addr = ResolveService("250.1.1.36");
+    BOOST_CHECK(addrman->Add({CAddress(addr, NODE_NONE)}, source));
+    BOOST_CHECK(!addrman->Good(addr));
+    auto info = addrman->SelectTriedCollision().first;
+    BOOST_CHECK_EQUAL(info.ToStringAddrPort(), "250.1.1.19:0");
+
+    // Make the test of the existing entry fail, so that it is evicted back to
+    // the new table (MakeTried eviction branch removes it from the tried index).
+    BOOST_CHECK(!addrman->Good(info, NodeSeconds{1s}));
+    addrman->Attempt(info, /*fCountFailure=*/false, Now<NodeSeconds>() - 61s);
+    addrman->ResolveCollisions();
+    BOOST_CHECK(addrman->SelectTriedCollision().first.ToStringAddrPort() == "[::]:0");
+
+    // Add more addresses across other netgroups and promote some to tried.
+    for (unsigned int i = 1; i < 30; i++) {
+        const CService a = ResolveService("250.2.1." + ToString(i));
+        addrman->Add({CAddress(a, NODE_NONE)}, source);
+        addrman->Good(a);
+    }
+
+    // Serialization round trip rebuilds the index (Unserialize path).
+    DataStream stream{};
+    stream << *addrman;
+    auto addrman2 = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, /*consistency_check_ratio=*/1);
+    stream >> *addrman2;
+    BOOST_CHECK_EQUAL(addrman->Size(), addrman2->Size());
+    BOOST_CHECK(addrman2->SelectWithNetgroup().address.IsValid());
+
+    // Deserializing under a different netgroup manager (asmap change across
+    // restarts) rebuilds the index under the new grouping.
+    auto ngm_asmap{NetGroupManager::WithEmbeddedAsmap(test::data::asmap)};
+    stream << *addrman;
+    auto addrman_asmap = std::make_unique<AddrMan>(ngm_asmap, DETERMINISTIC, /*consistency_check_ratio=*/1);
+    stream >> *addrman_asmap;
+    // Re-bucketing under a different netgroup manager may lose entries to
+    // bucket collisions.
+    BOOST_CHECK(addrman_asmap->Size() > 0);
+    BOOST_CHECK(addrman_asmap->Size() <= addrman->Size());
+    BOOST_CHECK(addrman_asmap->SelectWithNetgroup().address.IsValid());
+}
+
+BOOST_AUTO_TEST_CASE(addrman_netgroup_index_group_removal)
+{
+    // Empty a tried netgroup that is NOT last in m_tried_group_list, exercising
+    // the swap-with-last removal path. With consistency_check_ratio=1 the
+    // list_pos invariant (CheckAddrman -23) is verified after every operation.
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, /*consistency_check_ratio=*/1);
+    const uint256 nKey{uint256{1}}; // the key a DETERMINISTIC AddrMan uses internally
+    CNetAddr source = ResolveIP("252.2.2.2");
+
+    // A tried netgroup only empties when its sole entry is evicted by an address
+    // in a different netgroup that maps to the same tried slot. Find such a pair.
+    auto tried_slot = [&](const CService& s) {
+        const AddrInfo info{CAddress(s, NODE_NONE), source};
+        const int bucket{info.GetTriedBucket(nKey, EMPTY_NETGROUPMAN)};
+        return std::make_pair(bucket, info.GetBucketPosition(nKey, /*fNew=*/false, bucket));
+    };
+    std::map<std::pair<int, int>, CService> seen;
+    std::optional<CService> victim, evictor;
+    for (int a = 1; a <= 255 && !evictor; ++a) {
+        const CService s{ResolveService(ToString(a) + ".9.9.9", 8333)};
+        const auto [it, inserted] = seen.try_emplace(tried_slot(s), s);
+        if (!inserted) {
+            victim = it->second; // promoted to tried first
+            evictor = s;
+        }
+    }
+    BOOST_REQUIRE(victim.has_value() && evictor.has_value());
+    const auto victim_slot{tried_slot(*victim)};
+
+    // Promote the victim: its /16 becomes a singleton tried netgroup, first in the list.
+    BOOST_REQUIRE(addrman->Add({CAddress(*victim, NODE_NONE)}, source));
+    BOOST_REQUIRE(addrman->Good(*victim));
+
+    // Promote a few unrelated /16s so the victim's netgroup is no longer last in
+    // m_tried_group_list; only then does emptying it exercise the swap-with-last
+    // path. Require at least one to actually be promoted so a future bucketing
+    // change cannot silently reduce this to the (untested) remove-last case.
+    int unrelated_promoted{0};
+    for (int a = 200; a <= 220; ++a) {
+        const CService s{ResolveService(ToString(a) + ".7.7.7", 8333)};
+        if (tried_slot(s) == victim_slot) continue; // don't disturb the victim's slot
+        if (!addrman->Add({CAddress(s, NODE_NONE)}, source)) continue;
+        if (addrman->Good(s)) ++unrelated_promoted;
+    }
+    BOOST_REQUIRE(unrelated_promoted >= 1);
+
+    // Evict the victim with the colliding evictor (test-before-evict + terrible victim).
+    BOOST_REQUIRE(addrman->Add({CAddress(*evictor, NODE_NONE)}, source));
+    BOOST_CHECK(!addrman->Good(*evictor)); // collides with the victim's tried slot
+    BOOST_REQUIRE(addrman->SelectTriedCollision().first == *victim);
+    BOOST_CHECK(!addrman->Good(*victim, NodeSeconds{1s}));
+    addrman->Attempt(*victim, /*fCountFailure=*/false, Now<NodeSeconds>() - 61s);
+    addrman->ResolveCollisions(); // victim -> new empties its netgroup (swap-pop); evictor -> tried
+
+    // Index stayed consistent (check_ratio=1 would abort otherwise) and selection works.
+    BOOST_CHECK(addrman->SelectWithNetgroup().address.IsValid());
 }
 
 BOOST_AUTO_TEST_CASE(addrman_new_collisions)

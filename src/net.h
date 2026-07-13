@@ -222,6 +222,7 @@ public:
     Network m_network;
     uint32_t m_mapped_as;
     ConnectionType m_conn_type;
+    bool m_netgroup_sampled;
     /** Transport protocol type. */
     TransportProtocolType m_transport_type;
     /** BIP324 session id string in hex, if any. */
@@ -674,6 +675,7 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    bool is_netgroup_sampled = false;
 };
 
 /** Information about a peer */
@@ -753,6 +755,10 @@ public:
     const uint64_t m_network_key;
 
     const ConnectionType m_conn_type;
+
+    /** Whether this outbound connection's address was drawn by netgroup
+     *  (AddrMan::SelectWithNetgroup()) rather than by occurrence in addrman. */
+    const bool m_netgroup_sampled{false};
 
     /** Move all messages from the received queue to the processing queue. */
     void MarkReceivedMsgsForProcessing()
@@ -1079,6 +1085,91 @@ protected:
     ~NetEventsInterface() = default;
 };
 
+/**
+ * Anti-starvation state machine for opportunistic by-netgroup outbound peer
+ * sampling in CConnman::ThreadOpenConnections(). A policy attempt first preserves
+ * Select()'s legacy table/network decision and may therefore return an ordinary
+ * new/privacy candidate; only a tried-clearnet replacement is marked sampled.
+ * Extracted from the connection
+ * loop so its liveness properties can be unit-tested deterministically (the loop
+ * itself is not reachable through the test framework).
+ *
+ * Two distinct mechanisms keep ordinary selection from being starved, one per
+ * failure mode:
+ *  - Within a slot, a bounded NETGROUP_TRIED miss is retried directly, while a
+ *    valid by-netgroup candidate that is one of our own local addresses continues
+ *    via ContinueOnUnusableCandidate(). Both consume a hybrid attempt; after at
+ *    most `max_attempts`, ShouldSampleAttempt() returns false and the slot falls
+ *    back to Select(). So a repeatedly-unusable sampled netgroup cannot keep a
+ *    slot from reaching ordinary selection. If the legacy gate itself returns
+ *    no address, the caller stops immediately just as Select() does.
+ *  - Across slots, after any sampled *dial* the caller calls RecordSampledDial(),
+ *    which forces the next full-relay slot to use regular selection. This covers
+ *    failures that only surface after dialing (banned/discouraged, or a peer that
+ *    accepts TCP and drops before the version handshake, which the socket layer
+ *    still reports as a success). The guarantee is an intervening regular-selection
+ *    *turn*, not a guaranteed regular *dial* (that turn may find no usable
+ *    candidate, and delayed v2→v1 reconnection can reorder the literal dials);
+ *    that turn is enough to prevent starvation.
+ * A full-relay slot samples only while below the target and not on a forced-regular
+ * turn. The forced-regular flag persists across non-sampling iterations; the
+ * per-slot counters reset each slot.
+ */
+class NetgroupSampleController
+{
+public:
+    NetgroupSampleController(int target, int max_attempts)
+        : m_target{target}, m_max_attempts{max_attempts} {}
+
+    //! Begin a candidate search. `is_full_relay_slot`/`live_sampled` select
+    //! whether this slot may sample; a slot immediately after a sampled dial is
+    //! forced to use regular selection. Resets the per-slot attempt counter.
+    void BeginSlot(bool is_full_relay_slot, int live_sampled)
+    {
+        m_active = is_full_relay_slot && !m_force_regular_next && live_sampled < m_target;
+        // The forced-regular turn is consumed by the next full-relay slot only.
+        if (is_full_relay_slot) m_force_regular_next = false;
+        m_attempts = 0;
+    }
+
+     //! Whether the next candidate should use the hybrid selector (vs Select()).
+     //! The hybrid selector may return a legacy new/privacy candidate; only a
+     //! tried-clearnet result is redrawn by netgroup. Consumes one attempt when
+     //! true and hands the slot to fully regular selection on exhaustion.
+    bool ShouldSampleAttempt()
+    {
+        if (m_active && m_attempts < m_max_attempts) {
+            ++m_attempts;
+            return true;
+        }
+        return false;
+    }
+
+    //! Record that a by-netgroup candidate was dialed; the next full-relay slot
+    //! will use regular selection.
+    void RecordSampledDial() { m_force_regular_next = true; }
+
+    //! Whether the candidate loop should continue (try another candidate) rather
+    //! than break out when a valid drawn candidate is one of our own local
+    //! addresses. A sampled candidate must continue — breaking would
+    //! restart sampling next iteration and, if it is our only tried netgroup,
+    //! starve regular selection; the consumed attempt (ShouldSampleAttempt) bounds
+    //! the retries. Regular candidates keep the legacy break. Shared by the
+    //! production loop and its unit test so the two cannot diverge.
+    static bool ContinueOnUnusableCandidate(bool candidate_is_sampled) { return candidate_is_sampled; }
+
+    //! Test accessors.
+    bool sampling_active() const { return m_active; }
+    bool force_regular_next() const { return m_force_regular_next; }
+
+private:
+    const int m_target;
+    const int m_max_attempts;
+    bool m_force_regular_next{false};
+    int m_attempts{0};
+    bool m_active{false};
+};
+
 class CConnman
 {
 public:
@@ -1189,6 +1280,7 @@ public:
      * @param[in] conn_type Type of the connection to open, must not be `ConnectionType::INBOUND`.
      * @param[in] use_v2transport Use P2P encryption, (aka V2 transport, BIP324).
      * @param[in] proxy_override Optional proxy to use and override normal proxy selection.
+     * @param[in] is_netgroup_sampled The address was drawn by netgroup (AddrMan::SelectWithNetgroup()).
      * @retval true The connection was opened successfully.
      * @retval false The connection attempt failed.
      */
@@ -1198,7 +1290,8 @@ public:
                                const char* pszDest,
                                ConnectionType conn_type,
                                bool use_v2transport,
-                               const std::optional<Proxy>& proxy_override)
+                               const std::optional<Proxy>& proxy_override,
+                               bool is_netgroup_sampled = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     /// Group of private broadcast related members.
@@ -1558,7 +1651,8 @@ private:
                        bool fCountFailure,
                        ConnectionType conn_type,
                        bool use_v2transport,
-                       const std::optional<Proxy>& proxy_override)
+                       const std::optional<Proxy>& proxy_override,
+                       bool is_netgroup_sampled = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optional<CNetAddr> addr, const std::vector<NetWhitelistPermissions>& ranges) const;
@@ -1820,6 +1914,7 @@ private:
         std::string destination;
         ConnectionType conn_type;
         bool use_v2transport;
+        bool is_netgroup_sampled;
     };
 
     /**

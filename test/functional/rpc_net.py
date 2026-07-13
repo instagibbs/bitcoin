@@ -165,6 +165,7 @@ class NetTest(BitcoinTestFramework):
                 "lastrecv": 0 if not self.options.v2transport else no_version_peer_conntime,
                 "lastsend": 0 if not self.options.v2transport else no_version_peer_conntime,
                 "minfeefilter": Decimal("0E-8"),
+                "netgroup_sampled": False,
                 "network": "not_publicly_routable",
                 "permissions": [],
                 "presynced_headers": -1,

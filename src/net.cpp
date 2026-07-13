@@ -69,6 +69,27 @@ static constexpr int DNSSEEDS_TO_QUERY_AT_ONCE = 3;
 /** Minimum number of outbound connections under which we will keep fetching our address seeds. */
 static constexpr int SEED_OUTBOUND_CONNECTION_THRESHOLD = 2;
 
+/** Maximum target number of live OUTBOUND_FULL_RELAY connections whose
+ *  tried-clearnet addresses were replaced by a by-netgroup draw through
+ *  AddrMan::SelectWithNetgroup(). The hybrid selector first follows Select()'s
+ *  table/network policy: new and privacy-network results keep the legacy bucket
+ *  selection, while tried IPv4/IPv6 results are redrawn by netgroup. The target
+ *  is opportunistic, not an invariant, and therefore may not be reached. */
+static constexpr int NETGROUP_SAMPLED_FULL_RELAY_TARGET{4};
+
+/** Maximum number of hybrid selection attempts per ThreadOpenConnections
+ *  iteration before falling back to Select(). By-netgroup replacement is opportunistic:
+ *  it must never block a slot that ordinary selection could fill (e.g. when all
+ *  tried netgroups are already connected, or the tried table has too few
+ *  netgroups to reach the target). 29 keeps sampling off the attempt at which the
+ *  recently-tried candidate filter in ThreadOpenConnections relaxes (nTries == 30),
+ *  so ordinary selection owns that attempt. With both tables populated, rejected
+ *  legacy-new candidates, and only 1 of 4 equal-quality tried netgroups usable,
+ *  each hybrid attempt succeeds through the netgroup path with probability 1/8;
+ *  all 29 miss about 2.1% of the time. GetChance() skew can make fallback more
+ *  frequent; this affects only the opportunistic target, not safety. */
+static constexpr int MAX_NETGROUP_SAMPLE_ATTEMPTS{29};
+
 /** How long to delay before querying DNS seeds
  *
  * If we have more than THRESHOLD entries in addrman, then it's likely
@@ -380,7 +401,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                              bool fCountFailure,
                              ConnectionType conn_type,
                              bool use_v2transport,
-                             const std::optional<Proxy>& proxy_override)
+                             const std::optional<Proxy>& proxy_override,
+                             bool is_netgroup_sampled)
 {
     AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
@@ -547,6 +569,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                                     .i2p_sam_session = std::move(i2p_transient_session),
                                     .recv_flood_size = nReceiveFloodSize,
                                     .use_v2transport = use_v2transport,
+                                    .is_netgroup_sampled = is_netgroup_sampled,
                                 });
         pnode->AddRef();
 
@@ -662,6 +685,7 @@ void CNode::CopyStats(CNodeStats& stats)
     stats.addrLocal = addrLocalUnlocked.IsValid() ? addrLocalUnlocked.ToStringAddrPort() : "";
 
     X(m_conn_type);
+    X(m_netgroup_sampled);
 }
 #undef X
 
@@ -1971,7 +1995,8 @@ void CConnman::DisconnectNodes()
                         .grant = std::move(pnode->grantOutbound),
                         .destination = pnode->m_dest,
                         .conn_type = pnode->m_conn_type,
-                        .use_v2transport = false});
+                        .use_v2transport = false,
+                        .is_netgroup_sampled = pnode->m_netgroup_sampled});
                     LogDebug(BCLog::NET, "retrying with v1 transport protocol for peer=%d\n", pnode->GetId());
                 }
 
@@ -2623,6 +2648,16 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         LogInfo("Fixed seeds are disabled\n");
     }
 
+    // Opportunistic by-netgroup outbound sampling state (see the class for its
+    // anti-starvation invariants). Only OUTBOUND_FULL_RELAY slots opened below
+    // capacity use the hybrid selector; it preserves legacy new/privacy draws and
+    // replaces only tried-clearnet results by netgroup. The controller forces a
+    // fully regular selection after every by-netgroup dial so ordinary selection
+    // is never starved.
+    NetgroupSampleController netgroup_sampler{
+        std::min(NETGROUP_SAMPLED_FULL_RELAY_TARGET, m_max_outbound_full_relay / 2),
+        MAX_NETGROUP_SAMPLE_ATTEMPTS};
+
     while (!m_interrupt_net->interrupted()) {
         if (add_addr_fetch) {
             add_addr_fetch = false;
@@ -2694,17 +2729,22 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         // Choose an address to connect to based on most recently seen
         //
         CAddress addrConnect;
+        bool addrConnect_is_netgroup_sampled = false;
 
         // Only connect out to one peer per ipv4/ipv6 network group (/16 for IPv4).
         int nOutboundFullRelay = 0;
         int nOutboundBlockRelay = 0;
+        int nOutboundFullRelayNetgroupSampled = 0;
         int outbound_privacy_network_peers = 0;
         std::set<std::vector<unsigned char>> outbound_ipv46_peer_netgroups;
 
         {
             LOCK(m_nodes_mutex);
             for (const CNode* pnode : m_nodes) {
-                if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
+                if (pnode->IsFullOutboundConn()) {
+                    nOutboundFullRelay++;
+                    if (pnode->m_netgroup_sampled) nOutboundFullRelayNetgroupSampled++;
+                }
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
 
                 // Make sure our persistent outbound slots to ipv4/ipv6 peers belong to different netgroups.
@@ -2750,6 +2790,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         auto now = GetTime<std::chrono::microseconds>();
         bool anchor = false;
         bool fFeeler = false;
+        bool samplable_full_relay_slot = false;
         std::optional<Network> preferred_net;
 
         // Determine what type of connection to open. Opening
@@ -2768,6 +2809,15 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
             anchor = true;
         } else if (nOutboundFullRelay < m_max_outbound_full_relay) {
             // OUTBOUND_FULL_RELAY
+            // This is the only slot type eligible for hybrid selection: retain
+            // Select()'s table/network choice and legacy new/privacy path, but
+            // replace tried-clearnet results by a netgroup draw. It is
+            // opportunistic and applies only while filling a full-relay slot (not
+            // at capacity). The controller forces fully regular selection after
+            // any sampled dial so the slot cannot be starved by re-sampling a peer
+            // that, say, accepts TCP and then disconnects. Extra full-relay slots
+            // below (stale-tip, network-specific) are not eligible.
+            samplable_full_relay_slot = true;
         } else if (nOutboundBlockRelay < m_max_outbound_block_relay) {
             conn_type = ConnectionType::BLOCK_RELAY;
         } else if (GetTryNewOutboundPeer()) {
@@ -2820,6 +2870,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
         const auto current_time{NodeClock::now()};
         int nTries = 0;
+        netgroup_sampler.BeginSlot(samplable_full_relay_slot, nOutboundFullRelayNetgroupSampled);
         const auto reachable_nets{g_reachable_nets.All()};
 
         while (!m_interrupt_net->interrupted()) {
@@ -2843,6 +2894,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
             CAddress addr;
             NodeSeconds addr_last_try{0s};
+            bool addr_is_netgroup_sampled = false;
 
             if (fFeeler) {
                 // First, try to get a tried table collision address. This returns
@@ -2868,9 +2920,31 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                 // If preferred_net has a value set, pick an extra outbound
                 // peer from that network. The eviction logic in net_processing
                 // ensures that a peer from another network will be evicted.
-                std::tie(addr, addr_last_try) = preferred_net.has_value()
-                    ? addrman.get().Select(false, {*preferred_net})
-                    : addrman.get().Select(false, reachable_nets);
+                if (preferred_net.has_value()) {
+                    std::tie(addr, addr_last_try) = addrman.get().Select(false, {*preferred_net});
+                } else if (netgroup_sampler.ShouldSampleAttempt()) {
+                    // Preserve Select()'s table and network choice. New-table and
+                    // privacy-network results use the legacy bucket path; a tried
+                    // IPv4/IPv6 result is replaced by a by-netgroup draw in the same
+                    // family. Retry on an empty result because the bounded group
+                    // draw can miss; once the attempt budget is spent the branch
+                    // below uses fully regular selection.
+                    const auto selection{addrman.get().SelectWithNetgroup(reachable_nets)};
+                    addr = selection.address;
+                    addr_last_try = selection.last_try;
+                    addr_is_netgroup_sampled = selection.method == AddrManSelectionMethod::NETGROUP_TRIED && addr.IsValid();
+                    if (!addr.IsValid()) {
+                        // A NETGROUP_TRIED miss is stochastic (the bounded
+                        // GetChance loop exhausted), so consume the hybrid
+                        // attempt and retry. NONE means the complete legacy gate
+                        // found no address; match Select()'s behavior and end this
+                        // candidate search instead of repeating it 29 times.
+                        if (selection.method == AddrManSelectionMethod::NETGROUP_TRIED) continue;
+                        break;
+                    }
+                } else {
+                    std::tie(addr, addr_last_try) = addrman.get().Select(false, reachable_nets);
+                }
             }
 
             // Require outbound IPv4/IPv6 connections, other than feelers, to be to distinct network groups
@@ -2880,6 +2954,12 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
             // if we selected an invalid or local address, restart
             if (!addr.IsValid() || IsLocal(addr)) {
+                // A sampled candidate must not break out of the loop: that would
+                // restart sampling next iteration and, if this is our only tried
+                // netgroup and it is one of our own local addresses, starve regular
+                // selection. Treat it as a consumed sampled attempt and continue;
+                // the attempt budget then hands the slot to regular selection.
+                if (NetgroupSampleController::ContinueOnUnusableCandidate(addr_is_netgroup_sampled)) continue;
                 break;
             }
 
@@ -2918,6 +2998,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
             }
 
             addrConnect = addr;
+            addrConnect_is_netgroup_sampled = addr_is_netgroup_sampled;
             break;
         }
 
@@ -2945,7 +3026,17 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                                   /*pszDest=*/nullptr,
                                   /*conn_type=*/conn_type,
                                   /*use_v2transport=*/use_v2transport,
-                                  /*proxy_override=*/std::nullopt);
+                                  /*proxy_override=*/std::nullopt,
+                                  /*is_netgroup_sampled=*/addrConnect_is_netgroup_sampled);
+            // After a sampled dial, force the next full-relay slot to use regular
+            // selection. This holds regardless of the OpenNetworkConnection()
+            // result: it reports success once the socket and CNode exist, before
+            // the version handshake, so a peer that accepts TCP and then
+            // disconnects would otherwise be re-sampled indefinitely at a low peer
+            // count. Alternating guarantees ordinary selection is never starved.
+            if (addrConnect_is_netgroup_sampled) {
+                netgroup_sampler.RecordSampledDial();
+            }
         }
     }
 }
@@ -3070,7 +3161,8 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
                                      const char* pszDest,
                                      ConnectionType conn_type,
                                      bool use_v2transport,
-                                     const std::optional<Proxy>& proxy_override)
+                                     const std::optional<Proxy>& proxy_override,
+                                     bool is_netgroup_sampled)
 {
     AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
@@ -3094,7 +3186,7 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
         return false;
     }
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override);
+    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override, is_netgroup_sampled);
 
     if (!pnode)
         return false;
@@ -4071,6 +4163,7 @@ CNode::CNode(NodeId idIn,
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
       m_conn_type{conn_type_in},
+      m_netgroup_sampled{node_opts.is_netgroup_sampled},
       id{idIn},
       nLocalHostNonce{nLocalHostNonceIn},
       m_recv_flood_size{node_opts.recv_flood_size},
@@ -4249,7 +4342,8 @@ void CConnman::PerformReconnections()
                               item.destination.empty() ? nullptr : item.destination.c_str(),
                               item.conn_type,
                               item.use_v2transport,
-                              item.proxy_override);
+                              item.proxy_override,
+                              item.is_netgroup_sampled);
     }
 }
 

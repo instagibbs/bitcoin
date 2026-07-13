@@ -1626,4 +1626,131 @@ BOOST_AUTO_TEST_CASE(private_broadcast_version_does_not_update_addrman_services)
     m_node.peerman->FinalizeNode(node);
 }
 
+//! What a simulated ThreadOpenConnections slot ended up dialing.
+enum class SlotOutcome { NetgroupDial, HybridLegacyDial, RegularDial, NoCandidate };
+
+//! What SelectWithNetgroup() returns during the simulated hybrid attempts.
+enum class HybridOutcome { NetgroupUsable, NetgroupInvalid, NetgroupLocal, LegacyUsable, LegacyLocal, None };
+
+//! Drive one outer-iteration's worth of the controller exactly as the production
+//! candidate loop does, and report what the slot dials. A hybrid attempt can
+//! produce a by-netgroup tried result, or retain a legacy new/privacy result. An
+//! invalid by-netgroup result retries directly; a local by-netgroup result uses
+//! the same ContinueOnUnusableCandidate() helper as production.
+static SlotOutcome SimulateSlot(NetgroupSampleController& c, bool samplable, int live_sampled, HybridOutcome hybrid_outcome)
+{
+    c.BeginSlot(samplable, live_sampled);
+    for (int nTries = 0; nTries < 100; ++nTries) {
+        if (c.ShouldSampleAttempt()) {
+            if (hybrid_outcome == HybridOutcome::NetgroupInvalid) {
+                // Bounded GetChance miss: production retries directly.
+                continue;
+            }
+            if (hybrid_outcome == HybridOutcome::NetgroupLocal) {
+                // Valid but local by-netgroup candidate: continue or break per
+                // the shared production helper.
+                if (NetgroupSampleController::ContinueOnUnusableCandidate(/*candidate_is_sampled=*/true)) continue;
+                return SlotOutcome::NoCandidate; // helper regressed to break-on-sampled
+            }
+            if (hybrid_outcome == HybridOutcome::None) {
+                return SlotOutcome::NoCandidate; // legacy gate found no address
+            }
+            if (hybrid_outcome == HybridOutcome::LegacyLocal) {
+                if (NetgroupSampleController::ContinueOnUnusableCandidate(/*candidate_is_sampled=*/false)) continue;
+                return SlotOutcome::NoCandidate; // master-compatible break
+            }
+            if (hybrid_outcome == HybridOutcome::LegacyUsable) {
+                // SelectWithNetgroup retained a legacy new/privacy result. It is
+                // dialed unmarked and does not force the next slot to be regular.
+                return SlotOutcome::HybridLegacyDial;
+            }
+            c.RecordSampledDial();
+            return SlotOutcome::NetgroupDial;
+        }
+        return SlotOutcome::RegularDial;
+    }
+    return SlotOutcome::NoCandidate;
+}
+
+BOOST_AUTO_TEST_CASE(netgroup_sample_controller)
+{
+    constexpr int target{4};
+    constexpr int max_attempts{29};
+
+    // The unusable-candidate disposition shared with the production loop: sampled
+    // candidates continue (bounded by the attempt budget), regular ones break.
+    BOOST_CHECK(NetgroupSampleController::ContinueOnUnusableCandidate(/*candidate_is_sampled=*/true));
+    BOOST_CHECK(!NetgroupSampleController::ContinueOnUnusableCandidate(/*candidate_is_sampled=*/false));
+
+    // Below target with a healthy tried table: a sampled dial is followed by an
+    // intervening regular-selection turn (not a second sampled dial), then
+    // sampling resumes.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        BOOST_CHECK(SimulateSlot(c, /*samplable=*/true, /*live_sampled=*/0, HybridOutcome::NetgroupUsable) == SlotOutcome::NetgroupDial);
+        BOOST_CHECK(c.force_regular_next());
+        BOOST_CHECK(SimulateSlot(c, true, 1, HybridOutcome::NetgroupUsable) == SlotOutcome::RegularDial); // forced regular turn
+        BOOST_CHECK(!c.force_regular_next());
+        BOOST_CHECK(SimulateSlot(c, true, 1, HybridOutcome::NetgroupUsable) == SlotOutcome::NetgroupDial); // samples again
+    }
+
+    // A hybrid attempt that retains a legacy new/privacy result is not marked as
+    // netgroup-sampled and does not arm a forced-regular turn. This is what keeps
+    // the master table/network distribution while the controller remains active.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::LegacyUsable) == SlotOutcome::HybridLegacyDial);
+        BOOST_CHECK(!c.force_regular_next());
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::NetgroupUsable) == SlotOutcome::NetgroupDial);
+    }
+
+    // At/above target: never samples.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        BOOST_CHECK(SimulateSlot(c, true, target, HybridOutcome::NetgroupUsable) == SlotOutcome::RegularDial);
+        BOOST_CHECK(SimulateSlot(c, true, target + 1, HybridOutcome::NetgroupUsable) == SlotOutcome::RegularDial);
+    }
+
+    // Non-samplable slot (block-relay, feeler, extra full-relay): never samples,
+    // and does not consume the forced-regular turn queued by a prior sampled dial.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        c.RecordSampledDial();
+        BOOST_CHECK(SimulateSlot(c, /*samplable=*/false, 0, HybridOutcome::NetgroupUsable) == SlotOutcome::RegularDial); // flag preserved
+        BOOST_CHECK(c.force_regular_next());
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::NetgroupUsable) == SlotOutcome::RegularDial); // flag now consumed
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::NetgroupUsable) == SlotOutcome::NetgroupDial); // samples again
+    }
+
+    // Anti-starvation: bounded misses and valid-but-local netgroup candidates
+    // both reach regular selection within the iteration.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::NetgroupInvalid) == SlotOutcome::RegularDial);
+        BOOST_CHECK(!c.force_regular_next()); // no sampled dial happened
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::NetgroupLocal) == SlotOutcome::RegularDial);
+        BOOST_CHECK(!c.force_regular_next()); // no sampled dial happened
+    }
+
+    // Legacy-local and no-address outcomes retain master behavior: stop this
+    // outer iteration instead of spending the entire hybrid attempt budget.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::LegacyLocal) == SlotOutcome::NoCandidate);
+        BOOST_CHECK(SimulateSlot(c, true, 0, HybridOutcome::None) == SlotOutcome::NoCandidate);
+    }
+
+    // The per-slot budget: attempts 1..max_attempts use the hybrid selector, then the
+    // slot hands off to regular selection.
+    {
+        NetgroupSampleController c{target, max_attempts};
+        c.BeginSlot(/*samplable=*/true, /*live_sampled=*/0);
+        for (int i = 1; i <= max_attempts; ++i) {
+            BOOST_CHECK_MESSAGE(c.ShouldSampleAttempt(), "attempt " << i << " should sample");
+        }
+        BOOST_CHECK(!c.ShouldSampleAttempt()); // attempt max_attempts+1 (30th) is regular
+        BOOST_CHECK(!c.ShouldSampleAttempt());
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

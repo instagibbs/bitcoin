@@ -37,6 +37,14 @@ void initialize_pdb()
     g_setup = testing_setup.get();
 }
 
+struct FuzzedPartiallyDownloadedBlock : PartiallyDownloadedBlock {
+    using PartiallyDownloadedBlock::PartiallyDownloadedBlock;
+
+    size_t GetPrefilledCount() const { return prefilled_count; }
+    size_t GetMempoolCount() const { return mempool_count; }
+    size_t GetExtraCount() const { return extra_count; }
+};
+
 PartiallyDownloadedBlock::IsBlockMutatedFn FuzzedIsBlockMutated(bool result)
 {
     return [result](const CBlock& block, bool) {
@@ -61,7 +69,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
     Assert(error.empty());
-    PartiallyDownloadedBlock pdb{&pool};
+    FuzzedPartiallyDownloadedBlock pdb{&pool};
 
     // Set of available transactions (mempool or extra_txn)
     std::set<uint16_t> available;
@@ -69,21 +77,44 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     available.insert(0);
 
     std::vector<std::pair<Wtxid, CTransactionRef>> extra_txn;
+    // Indices whose slot will be filled from the mempool or extra_txn, and can
+    // therefore be targeted by a short ID collision.
+    std::vector<size_t> collidable;
+    size_t mempool_adds{0};
+    size_t extra_adds{0};
     for (size_t i = 1; i < block->vtx.size(); ++i) {
         auto tx{block->vtx[i]};
 
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
         bool add_to_mempool{fuzzed_data_provider.ConsumeBool()};
+        bool add_collision{fuzzed_data_provider.ConsumeBool()};
 
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx->GetWitnessHash(), tx);
-            available.insert(i);
+            if (available.insert(i).second) collidable.push_back(i);
+            extra_adds++;
         }
 
         if (add_to_mempool && !pool.exists(tx->GetHash())) {
             LOCK2(cs_main, pool.cs);
             TryAddToMempool(pool, ConsumeTxMemPoolEntry(fuzzed_data_provider, *tx));
-            available.insert(i);
+            // The addition may fail policy limits, so only treat the slot as
+            // occupied if the transaction actually made it into the pool.
+            if (pool.exists(tx->GetHash())) {
+                if (available.insert(i).second) collidable.push_back(i);
+                mempool_adds++;
+            }
+        }
+
+        if (add_collision && !collidable.empty()) {
+            // Pair an occupied slot's wtxid with a different transaction, so
+            // that InitData sees a short ID collision instead of filling the
+            // slot. Occupied slots stay occupied or become unavailable, keeping
+            // the available/reconstruction checks below valid.
+            const size_t target{collidable[fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, collidable.size() - 1)]};
+            auto foreign_mtx{ConsumeDeserializable<CMutableTransaction>(fuzzed_data_provider, TX_WITH_WITNESS)};
+            CTransactionRef foreign_tx{foreign_mtx ? MakeTransactionRef(std::move(*foreign_mtx)) : block->vtx[0]};
+            extra_txn.emplace_back(block->vtx[target]->GetWitnessHash(), foreign_tx);
         }
     }
 
@@ -93,6 +124,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     // Whether we skipped a transaction that should be included in `missing`.
     // FillBlock should never return READ_STATUS_OK if that is the case.
     bool skipped_missing{false};
+    size_t available_count{0};
     for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
         // If init_status == READ_STATUS_OK then a available transaction in the
         // compact block (i.e. IsTxAvailable(i) == true) implies that we marked
@@ -103,6 +135,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         if (init_status == READ_STATUS_OK) {
             assert(!pdb.IsTxAvailable(i) || available.contains(i));
         }
+        available_count += pdb.IsTxAvailable(i);
 
         bool skip{fuzzed_data_provider.ConsumeBool()};
         if (!pdb.IsTxAvailable(i) && !skip) {
@@ -110,6 +143,14 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         }
 
         skipped_missing |= (!pdb.IsTxAvailable(i) && skip);
+    }
+
+    if (init_status == READ_STATUS_OK) {
+        // Every available transaction is accounted to exactly one source, and
+        // collisions decrement the counter their slot was filled from.
+        assert(pdb.GetPrefilledCount() + pdb.GetMempoolCount() + pdb.GetExtraCount() == available_count);
+        assert(pdb.GetMempoolCount() <= mempool_adds);
+        assert(pdb.GetExtraCount() <= extra_adds);
     }
 
     bool segwit_active{fuzzed_data_provider.ConsumeBool()};

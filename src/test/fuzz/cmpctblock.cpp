@@ -170,6 +170,7 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
     auto& mempool = *setup->m_node.mempool;
     auto& chainman = static_cast<TestChainstateManager&>(*setup->m_node.chainman);
     chainman.ResetIbd();
+    if (fuzzed_data_provider.ConsumeBool()) chainman.JumpOutOfIbd();
     chainman.DisableNextWrite();
     const size_t initial_index_size{WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())};
 

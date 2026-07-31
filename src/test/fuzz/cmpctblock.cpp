@@ -504,6 +504,16 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
     setup->m_node.validation_signals->UnregisterAllValidationInterfaces();
     connman.StopNodes();
 
+    chainman.CheckBlockIndex();
+    {
+        LOCK(::cs_main);
+        auto& chainstate = chainman.ActiveChainstate();
+        const CBlockIndex* tip = chainman.ActiveChain().Tip();
+        assert(tip);
+        assert(chainstate.CoinsTip().GetBestBlock() == tip->GetBlockHash());
+        mempool.check(chainstate.CoinsTip(), tip->nHeight + 1);
+    }
+
     const size_t end_index_size{WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())};
     const uint64_t end_sequence{WITH_LOCK(mempool.cs, return mempool.GetSequence())};
 

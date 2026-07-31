@@ -447,6 +447,13 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
                 sent_net_msg = false;
             },
             [&]() {
+                // Send a full block. A valid block may cause the peer to be selected for
+                // high-bandwidth compact block announcements.
+                BlockInfo block_info = create_block();
+                net_msg = NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(*block_info.block));
+                info.push_back(std::move(block_info));
+            },
+            [&]() {
                 // Send a transaction.
                 CTransactionRef tx = create_tx();
                 net_msg = NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx));

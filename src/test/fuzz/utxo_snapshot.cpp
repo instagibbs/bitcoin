@@ -181,24 +181,64 @@ void utxo_snapshot_fuzz(FuzzBufferType buffer)
         }
     }
 
+    const bool complete_snapshot_validation{fuzzed_data_provider.ConsumeBool()};
     if (ActivateFuzzedSnapshot()) {
-        LOCK(::cs_main);
-        Assert(!chainman.ActiveChainstate().m_from_snapshot_blockhash->IsNull());
-        const auto& coinscache{chainman.ActiveChainstate().CoinsTip()};
-        for (const auto& block : *g_chain) {
-            Assert(coinscache.HaveCoin(COutPoint{block->vtx.at(0)->GetHash(), 0}));
-            const auto* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
-            Assert(index);
-            Assert(index->nTx == 0);
-            if (index->nHeight == chainman.ActiveChainstate().SnapshotBase()->nHeight) {
-                auto params{chainman.GetParams().AssumeutxoForHeight(index->nHeight)};
-                Assert(params.has_value());
-                Assert(params.value().m_chain_tx_count == index->m_chain_tx_count);
-            } else {
-                Assert(index->m_chain_tx_count == 0);
+        {
+            LOCK(::cs_main);
+            Assert(!chainman.ActiveChainstate().m_from_snapshot_blockhash->IsNull());
+            const auto& coinscache{chainman.ActiveChainstate().CoinsTip()};
+            for (const auto& block : *g_chain) {
+                Assert(coinscache.HaveCoin(COutPoint{block->vtx.at(0)->GetHash(), 0}));
+                const auto* index{chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+                Assert(index);
+                Assert(index->nTx == 0);
+                if (index->nHeight == chainman.ActiveChainstate().SnapshotBase()->nHeight) {
+                    auto params{chainman.GetParams().AssumeutxoForHeight(index->nHeight)};
+                    Assert(params.has_value());
+                    Assert(params.value().m_chain_tx_count == index->m_chain_tx_count);
+                } else {
+                    Assert(index->m_chain_tx_count == 0);
+                }
             }
+            Assert(g_chain->size() == coinscache.GetCacheSize());
         }
-        Assert(g_chain->size() == coinscache.GetCacheSize());
+
+        if (complete_snapshot_validation) {
+            Chainstate* const background_chainstate{WITH_LOCK(::cs_main, return chainman.HistoricalChainstate())};
+            Assert(background_chainstate);
+            const uint256 snapshot_tip{WITH_LOCK(::cs_main, return chainman.ActiveTip()->GetBlockHash())};
+
+            for (const auto& block : *g_chain) {
+                bool new_block{false};
+                Assert(chainman.ProcessNewBlock(block, /*force_processing=*/true, /*min_pow_checked=*/true, &new_block));
+                Assert(new_block);
+
+                LOCK(::cs_main);
+                Assert(chainman.ActiveTip()->GetBlockHash() == snapshot_tip);
+                Assert(background_chainstate->m_chain.Tip()->GetBlockHash() == block->GetHash());
+                Assert(background_chainstate->CoinsTip().GetBestBlock() == block->GetHash());
+            }
+
+            LOCK(::cs_main);
+            const auto params{chainman.GetParams().AssumeutxoForHeight(g_chain->size())};
+            Assert(params);
+            Assert(!chainman.HistoricalChainstate());
+            Assert(chainman.ActiveChainstate().m_assumeutxo == Assumeutxo::VALIDATED);
+            Assert(background_chainstate->ReachedTarget());
+            Assert(background_chainstate->m_target_utxohash);
+            Assert(*background_chainstate->m_target_utxohash == params->hash_serialized);
+            Assert(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == snapshot_tip);
+            for (const auto& block : *g_chain) {
+                const COutPoint outpoint{block->vtx.at(0)->GetHash(), 0};
+                const auto snapshot_coin{chainman.ActiveChainstate().CoinsTip().GetCoin(outpoint)};
+                const auto background_coin{background_chainstate->CoinsTip().GetCoin(outpoint)};
+                Assert(snapshot_coin && background_coin);
+                Assert(snapshot_coin->out == background_coin->out);
+                Assert(snapshot_coin->nHeight == background_coin->nHeight);
+                Assert(snapshot_coin->fCoinBase == background_coin->fCoinBase);
+            }
+            chainman.CheckBlockIndex();
+        }
         dirty_chainman = true;
     } else {
         Assert(!chainman.ActiveChainstate().m_from_snapshot_blockhash);

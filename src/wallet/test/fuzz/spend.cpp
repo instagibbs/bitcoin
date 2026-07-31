@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addresstype.h>
+#include <coins.h>
 #include <policy/policy.h>
 #include <script/interpreter.h>
 #include <test/fuzz/FuzzedDataProvider.h>
@@ -34,6 +35,32 @@ void initialize_setup()
     static const auto testing_setup = MakeNoLogFileContext<const TestingSetup>();
     g_setup = testing_setup.get();
 }
+
+class ScopedExternalCoin
+{
+    Chainstate& m_chainstate;
+    std::optional<COutPoint> m_outpoint;
+
+public:
+    explicit ScopedExternalCoin(Chainstate& chainstate) : m_chainstate{chainstate} {}
+    ScopedExternalCoin(const ScopedExternalCoin&) = delete;
+    ScopedExternalCoin& operator=(const ScopedExternalCoin&) = delete;
+    ~ScopedExternalCoin()
+    {
+        if (!m_outpoint) return;
+        LOCK(::cs_main);
+        assert(m_chainstate.CoinsTip().SpendCoin(*m_outpoint));
+    }
+
+    bool Add(const COutPoint& outpoint, Coin coin)
+    {
+        LOCK(::cs_main);
+        if (m_chainstate.CoinsTip().HaveCoin(outpoint)) return false;
+        m_chainstate.CoinsTip().AddCoin(outpoint, std::move(coin), /*possible_overwrite=*/false);
+        m_outpoint = outpoint;
+        return true;
+    }
+};
 
 FUZZ_TARGET(wallet_create_transaction, .init = initialize_setup)
 {
@@ -202,6 +229,31 @@ FUZZ_TARGET(wallet_fund_transaction, .init = initialize_setup)
         }
     }
 
+    ScopedExternalCoin external_coin{chainstate};
+    bool missing_external{false};
+    if (fuzzed_data_provider.ConsumeBool()) {
+        if (fuzzed_data_provider.ConsumeBool()) {
+            missing_external = true;
+            tx.vin.emplace_back(COutPoint{});
+        } else {
+            const COutPoint outpoint{Txid::FromUint256(ConsumeUInt256(fuzzed_data_provider)), fuzzed_data_provider.ConsumeIntegral<uint32_t>()};
+            if (outpoint.IsNull() || wallet_coins.contains(outpoint)) return;
+            CAmount value{ConsumeMoney(fuzzed_data_provider)};
+            all_values += value;
+            if (all_values > MAX_MONEY) return;
+            const CTxOut txout{value, CScript{} << OP_TRUE};
+            if (!external_coin.Add(outpoint, Coin{txout, chainstate.m_chain.Height(), /*coinbase=*/false})) return;
+            assert(wallet_coins.emplace(outpoint, txout).second);
+
+            CTxIn input{outpoint};
+            input.nSequence = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+            if (fuzzed_data_provider.ConsumeBool()) input.scriptSig = ConsumeScript(fuzzed_data_provider);
+            if (fuzzed_data_provider.ConsumeBool()) input.scriptWitness = ConsumeScriptWitness(fuzzed_data_provider);
+            tx.vin.push_back(std::move(input));
+            coin_control.SetInputWeight(outpoint, fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(GetTransactionInputWeight(CTxIn{}), MAX_STANDARD_TX_WEIGHT));
+        }
+    }
+
     std::vector<CRecipient> recipients;
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 100) {
         CTxDestination destination;
@@ -222,6 +274,10 @@ FUZZ_TARGET(wallet_fund_transaction, .init = initialize_setup)
     std::optional<unsigned int> change_pos;
     if (fuzzed_data_provider.ConsumeBool()) change_pos = fuzzed_data_provider.ConsumeIntegral<unsigned int>();
     auto result{FundTransaction(*fuzzed_wallet.wallet, tx, recipients, change_pos, lock_unspents, coin_control)};
+    if (missing_external) {
+        assert(!result);
+        return;
+    }
     if (!result) return;
 
     assert(result->tx->version == tx.version);

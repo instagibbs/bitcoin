@@ -22,6 +22,7 @@
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <test/util/time.h>
+#include <test/util/txmempool.h>
 #include <test/util/validation.h>
 #include <util/check.h>
 #include <util/time.h>
@@ -39,10 +40,19 @@
 namespace {
 TestingSetup* g_setup;
 
-void ResetChainman(TestingSetup& setup)
+void ResetChainmanAndMempool(TestingSetup& setup)
 {
-    SetMockTime(setup.m_node.chainman->GetParams().GenesisBlock().Time());
-    setup.m_node.chainman.reset();
+    auto& node_context{setup.m_node};
+    SetMockTime(node_context.chainman->GetParams().GenesisBlock().Time());
+    node_context.validation_signals->UnregisterAllValidationInterfaces();
+    static_cast<ConnmanTestMsg&>(*node_context.connman).SetMsgProc(nullptr);
+    node_context.peerman.reset();
+    node_context.chainman.reset();
+
+    bilingual_str error;
+    node_context.mempool = std::make_unique<CTxMemPool>(MemPoolOptionsForTest(node_context), error);
+    Assert(error.empty());
+
     setup.m_make_chainman();
     setup.LoadVerifyActivateChainstate();
     node::BlockCreateOptions options;
@@ -60,7 +70,7 @@ void initialize_process_messages()
             {}),
     };
     g_setup = testing_setup.get();
-    ResetChainman(*g_setup);
+    ResetChainmanAndMempool(*g_setup);
 }
 
 FUZZ_TARGET(process_messages, .init = initialize_process_messages)
@@ -78,6 +88,7 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
     FakeNodeClock clock{1610000000s}; // any time to successfully reset ibd
     FakeSteadyClock steady_clock;
     chainman.ResetIbd();
+    if (!buffer.empty() && (buffer.back() & 1) != 0) chainman.JumpOutOfIbd();
     chainman.DisableNextWrite();
 
     // Reset, so that dangling pointers can be detected by sanitizers.
@@ -151,7 +162,7 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
 
     if (block_index_size != WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size()) ||
         mempool_sequence != WITH_LOCK(mempool.cs, return mempool.GetSequence())) {
-        // Reuse the global chainman, but reset it when it is dirty
-        ResetChainman(*g_setup);
+        // Reuse the global chainman and mempool, but reset them when either is dirty.
+        ResetChainmanAndMempool(*g_setup);
     }
 }

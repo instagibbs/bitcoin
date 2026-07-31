@@ -23,6 +23,7 @@
 #include <test/util/setup_common.h>
 #include <test/util/time.h>
 #include <test/util/validation.h>
+#include <util/check.h>
 #include <util/time.h>
 #include <validation.h>
 #include <validationinterface.h>
@@ -71,7 +72,9 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
     auto& connman{static_cast<ConnmanTestMsg&>(*node.connman)};
     connman.Reset();
     auto& chainman{static_cast<TestChainstateManager&>(*node.chainman)};
+    auto& mempool{*node.mempool};
     const auto block_index_size{WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())};
+    const uint64_t mempool_sequence{WITH_LOCK(mempool.cs, return mempool.GetSequence())};
     FakeNodeClock clock{1610000000s}; // any time to successfully reset ibd
     FakeSteadyClock steady_clock;
     chainman.ResetIbd();
@@ -135,7 +138,19 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
     node.validation_signals->SyncWithValidationInterfaceQueue();
     node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     node.connman->StopNodes();
-    if (block_index_size != WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())) {
+
+    chainman.CheckBlockIndex();
+    {
+        LOCK(::cs_main);
+        auto& chainstate{chainman.ActiveChainstate()};
+        const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+        Assert(tip);
+        Assert(chainstate.CoinsTip().GetBestBlock() == tip->GetBlockHash());
+        mempool.check(chainstate.CoinsTip(), tip->nHeight + 1);
+    }
+
+    if (block_index_size != WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size()) ||
+        mempool_sequence != WITH_LOCK(mempool.cs, return mempool.GetSequence())) {
         // Reuse the global chainman, but reset it when it is dirty
         ResetChainman(*g_setup);
     }

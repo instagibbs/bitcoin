@@ -108,47 +108,49 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
 
     node.validation_signals->RegisterValidationInterface(node.peerman.get());
 
-    LOCK(NetEventsInterface::g_msgproc_mutex);
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
 
-    std::vector<CNode*> peers;
-    const auto num_peers_to_add = fuzzed_data_provider.ConsumeIntegralInRange(1, 3);
-    for (int i = 0; i < num_peers_to_add; ++i) {
-        peers.push_back(ConsumeNodeAsUniquePtr(fuzzed_data_provider, steady_clock, i).release());
-        CNode& p2p_node = *peers.back();
+        std::vector<CNode*> peers;
+        const auto num_peers_to_add = fuzzed_data_provider.ConsumeIntegralInRange(1, 3);
+        for (int i = 0; i < num_peers_to_add; ++i) {
+            peers.push_back(ConsumeNodeAsUniquePtr(fuzzed_data_provider, steady_clock, i).release());
+            CNode& p2p_node = *peers.back();
 
-        FillNode(fuzzed_data_provider, connman, p2p_node);
+            FillNode(fuzzed_data_provider, connman, p2p_node);
 
-        connman.AddTestNode(p2p_node);
-    }
-
-    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 30) {
-        const std::string random_message_type{fuzzed_data_provider.ConsumeBytesAsString(CMessageHeader::MESSAGE_TYPE_SIZE).c_str()};
-
-        clock.set(ConsumeTime(fuzzed_data_provider));
-
-        CSerializedNetMsg net_msg;
-        net_msg.m_type = random_message_type;
-        net_msg.data = ConsumeRandomLengthByteVector(fuzzed_data_provider, MAX_PROTOCOL_MESSAGE_LENGTH);
-
-        CNode& random_node = *PickValue(fuzzed_data_provider, peers);
-
-        connman.FlushSendBuffer(random_node);
-        (void)connman.ReceiveMsgFrom(random_node, std::move(net_msg));
-
-        bool more_work{true};
-        while (more_work) { // Ensure that every message is eventually processed in some way or another
-            random_node.fPauseSend = false;
-
-            try {
-                more_work = connman.ProcessMessagesOnce(random_node);
-            } catch (const std::ios_base::failure&) {
-            }
-            node.peerman->SendMessages(random_node);
+            connman.AddTestNode(p2p_node);
         }
+
+        LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 30) {
+            const std::string random_message_type{fuzzed_data_provider.ConsumeBytesAsString(CMessageHeader::MESSAGE_TYPE_SIZE).c_str()};
+
+            clock.set(ConsumeTime(fuzzed_data_provider));
+
+            CSerializedNetMsg net_msg;
+            net_msg.m_type = random_message_type;
+            net_msg.data = ConsumeRandomLengthByteVector(fuzzed_data_provider, MAX_PROTOCOL_MESSAGE_LENGTH);
+
+            CNode& random_node = *PickValue(fuzzed_data_provider, peers);
+
+            connman.FlushSendBuffer(random_node);
+            (void)connman.ReceiveMsgFrom(random_node, std::move(net_msg));
+
+            bool more_work{true};
+            while (more_work) { // Ensure that every message is eventually processed in some way or another
+                random_node.fPauseSend = false;
+
+                try {
+                    more_work = connman.ProcessMessagesOnce(random_node);
+                } catch (const std::ios_base::failure&) {
+                }
+                node.peerman->SendMessages(random_node);
+            }
+        }
+        node.validation_signals->SyncWithValidationInterfaceQueue();
+        node.validation_signals->UnregisterValidationInterface(node.peerman.get());
+        node.connman->StopNodes();
     }
-    node.validation_signals->SyncWithValidationInterfaceQueue();
-    node.validation_signals->UnregisterValidationInterface(node.peerman.get());
-    node.connman->StopNodes();
 
     chainman.CheckBlockIndex();
     {

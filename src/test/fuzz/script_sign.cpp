@@ -264,4 +264,81 @@ FUZZ_TARGET(script_sign, .init = initialize_script_sign)
     std::map<int, bilingual_str> missing_key_errors;
     Assert(!SignTransaction(missing_key_tx, &empty_provider, valid_coins, {.sighash_type = sighash_type}, missing_key_errors));
     Assert(missing_key_errors.size() == input_count);
+
+    FuzzedDataProvider taproot_provider(buffer.data(), buffer.size());
+    const CKey taproot_key{ConsumePrivateKey(taproot_provider, /*compressed=*/true)};
+    Assert(taproot_key.IsValid());
+    const CPubKey taproot_pubkey{taproot_key.GetPubKey()};
+    const XOnlyPubKey xonly_pubkey{taproot_pubkey};
+    const bool script_path{taproot_provider.ConsumeBool()};
+
+    FlatSigningProvider taproot_keys;
+    taproot_keys.keys.emplace(taproot_pubkey.GetID(), taproot_key);
+    TaprootBuilder builder;
+    CScript tapleaf;
+    if (script_path) {
+        tapleaf = CScript{} << ToByteVector(xonly_pubkey) << OP_CHECKSIG;
+        builder.Add(/*depth=*/0, tapleaf, TAPROOT_LEAF_TAPSCRIPT);
+        builder.Finalize(XOnlyPubKey::NUMS_H);
+    } else {
+        builder.Finalize(xonly_pubkey);
+    }
+    Assert(builder.IsValid() && builder.IsComplete());
+    const WitnessV1Taproot taproot_output{builder.GetOutput()};
+    Assert(taproot_keys.tr_trees.emplace(taproot_output, builder).second);
+    const CScript taproot_script{GetScriptForDestination(taproot_output)};
+    Assert(IsSegWitOutput(taproot_keys, taproot_script));
+
+    const CAmount taproot_amount{ConsumeMoney(taproot_provider, /*max=*/MAX_MONEY - 1)};
+    const COutPoint taproot_prevout{Txid::FromUint256(ConsumeUInt256(taproot_provider)), 0};
+    const Coin taproot_coin{CTxOut{taproot_amount, taproot_script}, /*height=*/1, /*coinbase=*/false};
+    const std::map<COutPoint, Coin> taproot_coins{{taproot_prevout, taproot_coin}};
+    CMutableTransaction taproot_unsigned;
+    taproot_unsigned.version = taproot_provider.ConsumeIntegralInRange<int32_t>(1, 3);
+    taproot_unsigned.nLockTime = taproot_provider.ConsumeIntegral<uint32_t>();
+    taproot_unsigned.vin.emplace_back(taproot_prevout, CScript{}, taproot_provider.ConsumeIntegral<uint32_t>());
+    taproot_unsigned.vout.emplace_back(0, CScript{} << OP_TRUE);
+    const int taproot_sighash{taproot_provider.PickValueInArray({
+        static_cast<int>(SIGHASH_DEFAULT),
+        static_cast<int>(SIGHASH_ALL),
+        static_cast<int>(SIGHASH_NONE),
+        static_cast<int>(SIGHASH_SINGLE),
+        SIGHASH_ALL | SIGHASH_ANYONECANPAY,
+        SIGHASH_NONE | SIGHASH_ANYONECANPAY,
+        SIGHASH_SINGLE | SIGHASH_ANYONECANPAY,
+    })};
+
+    CMutableTransaction taproot_signed{taproot_unsigned};
+    std::map<int, bilingual_str> taproot_errors;
+    Assert(SignTransaction(taproot_signed, &taproot_keys, taproot_coins, {.sighash_type = taproot_sighash}, taproot_errors));
+    Assert(taproot_errors.empty());
+    Assert(taproot_signed.version == taproot_unsigned.version);
+    Assert(taproot_signed.nLockTime == taproot_unsigned.nLockTime);
+    Assert(taproot_signed.vin[0].prevout == taproot_unsigned.vin[0].prevout);
+    Assert(taproot_signed.vin[0].nSequence == taproot_unsigned.vin[0].nSequence);
+    Assert(taproot_signed.vout == taproot_unsigned.vout);
+    Assert(taproot_signed.vin[0].scriptSig.empty());
+    Assert(taproot_signed.vin[0].scriptWitness.stack.size() == (script_path ? 3 : 1));
+    Assert(taproot_signed.vin[0].scriptWitness.stack[0].size() == (taproot_sighash == SIGHASH_DEFAULT ? 64 : 65));
+    if (script_path) {
+        Assert(taproot_signed.vin[0].scriptWitness.stack[1] == ToByteVector(tapleaf));
+    }
+
+    const CTransaction taproot_tx{taproot_signed};
+    PrecomputedTransactionData taproot_txdata;
+    taproot_txdata.Init(taproot_tx, {taproot_coin.out}, /*force=*/true);
+    ScriptError taproot_error{SCRIPT_ERR_OK};
+    Assert(VerifyScript(taproot_tx.vin[0].scriptSig, taproot_coin.out.scriptPubKey, &taproot_tx.vin[0].scriptWitness,
+                        STANDARD_SCRIPT_VERIFY_FLAGS,
+                        TransactionSignatureChecker{&taproot_tx, 0, taproot_amount, taproot_txdata, MissingDataBehavior::FAIL}, &taproot_error));
+
+    const CTransaction before_taproot_resign{taproot_signed};
+    Assert(SignTransaction(taproot_signed, &taproot_keys, taproot_coins, {.sighash_type = taproot_sighash}, taproot_errors));
+    Assert(taproot_errors.empty());
+    Assert(CTransaction{taproot_signed} == before_taproot_resign);
+
+    CMutableTransaction missing_taproot_key{taproot_unsigned};
+    std::map<int, bilingual_str> missing_taproot_errors;
+    Assert(!SignTransaction(missing_taproot_key, &empty_provider, taproot_coins, {.sighash_type = taproot_sighash}, missing_taproot_errors));
+    Assert(missing_taproot_errors.size() == 1);
 }

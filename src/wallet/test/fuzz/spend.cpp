@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <addresstype.h>
+#include <policy/policy.h>
+#include <script/interpreter.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -17,6 +19,9 @@
 #include <wallet/spend.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
+
+#include <map>
+#include <set>
 
 using util::ToString;
 
@@ -59,6 +64,7 @@ FUZZ_TARGET(wallet_create_transaction, .init = initialize_setup)
 
     int next_locktime{0};
     CAmount all_values{0};
+    std::map<COutPoint, CTxOut> wallet_coins;
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 10000) {
         CMutableTransaction tx;
         tx.nLockTime = next_locktime++;
@@ -73,6 +79,7 @@ FUZZ_TARGET(wallet_create_transaction, .init = initialize_setup)
         auto ret{fuzzed_wallet.wallet->mapWallet.emplace(std::piecewise_construct, std::forward_as_tuple(txid), std::forward_as_tuple(MakeTransactionRef(std::move(tx)), TxStateConfirmed{chainstate.m_chain.Tip()->GetBlockHash(), chainstate.m_chain.Height(), /*index=*/0}))};
         assert(ret.second);
         fuzzed_wallet.wallet->RefreshTXOsFromTx(ret.first->second);
+        assert(wallet_coins.emplace(COutPoint{txid, 0}, ret.first->second.tx->vout[0]).second);
     }
 
     std::vector<CRecipient> recipients;
@@ -99,7 +106,35 @@ FUZZ_TARGET(wallet_create_transaction, .init = initialize_setup)
 
     std::optional<unsigned int> change_pos;
     if (fuzzed_data_provider.ConsumeBool()) change_pos = fuzzed_data_provider.ConsumeIntegral<unsigned int>();
-    (void)CreateTransaction(*fuzzed_wallet.wallet, recipients, change_pos, coin_control);
+    auto result{CreateTransaction(*fuzzed_wallet.wallet, recipients, change_pos, coin_control)};
+    if (!result) return;
+
+    assert(MoneyRange(result->fee));
+    assert(!result->tx->vin.empty());
+    assert(!result->change_pos || *result->change_pos < result->tx->vout.size());
+
+    CAmount input_value{0};
+    std::set<COutPoint> spent_outpoints;
+    std::vector<CTxOut> spent_outputs;
+    spent_outputs.reserve(result->tx->vin.size());
+    for (const CTxIn& input : result->tx->vin) {
+        assert(spent_outpoints.insert(input.prevout).second);
+        const auto coin{wallet_coins.find(input.prevout)};
+        assert(coin != wallet_coins.end());
+        input_value += coin->second.nValue;
+        assert(MoneyRange(input_value));
+        spent_outputs.push_back(coin->second);
+    }
+    assert(input_value == CalculateOutputValue(*result->tx) + result->fee);
+
+    PrecomputedTransactionData txdata;
+    txdata.Init(*result->tx, std::move(spent_outputs));
+    for (unsigned int input_index{0}; input_index < result->tx->vin.size(); ++input_index) {
+        const CTxIn& input{result->tx->vin[input_index]};
+        const CTxOut& spent_output{txdata.m_spent_outputs[input_index]};
+        const TransactionSignatureChecker checker{result->tx.get(), input_index, spent_output.nValue, txdata, MissingDataBehavior::ASSERT_FAIL};
+        assert(VerifyScript(input.scriptSig, spent_output.scriptPubKey, &input.scriptWitness, STANDARD_SCRIPT_VERIFY_FLAGS, checker));
+    }
 }
 } // namespace
 } // namespace wallet

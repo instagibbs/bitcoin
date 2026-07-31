@@ -4,6 +4,7 @@
 
 #include <chainparams.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <kernel/coinstats.h>
 #include <node/miner.h>
@@ -19,6 +20,7 @@
 #include <test/util/setup_common.h>
 #include <test/util/time.h>
 #include <txdb.h>
+#include <txmempool.h>
 #include <uint256.h>
 #include <util/check.h>
 #include <validation.h>
@@ -105,6 +107,12 @@ FUZZ_TARGET(utxo_total_supply)
             *Assert(kernel::ComputeUTXOStats(kernel::CoinStatsHashType::HASH_SERIALIZED, chainman.ActiveChainstate().CoinsDB(), chainman.m_blockman, {})));
         // Check that miner can't print more money than they are allowed to
         assert(circulation == utxo_stats.total_amount);
+        const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+        assert(tip);
+        assert(utxo_stats.nHeight == tip->nHeight);
+        assert(utxo_stats.hashBlock == tip->GetBlockHash());
+        assert(chainman.ActiveChainstate().CoinsTip().GetBestBlock() == tip->GetBlockHash());
+        Assert(node.mempool)->check(chainman.ActiveChainstate().CoinsTip(), tip->nHeight + 1);
     };
 
 
@@ -187,5 +195,79 @@ FUZZ_TARGET(utxo_total_supply)
                 current_block = PrepareNextBlock();
                 StoreLastTxo();
             });
+    }
+
+    if (!buffer.empty() && (buffer.back() & 2) != 0 && ActiveHeight() >= 2) {
+        std::optional<std::pair<COutPoint, Coin>> spendable;
+        {
+            LOCK(chainman.GetMutex());
+            const int spend_height{chainman.ActiveHeight() + 1};
+            for (const auto& [outpoint, _] : txos) {
+                const Coin& coin{chainman.ActiveChainstate().CoinsTip().AccessCoin(outpoint)};
+                if (!coin.IsSpent() &&
+                    (!coin.IsCoinBase() || spend_height - coin.nHeight >= COINBASE_MATURITY) &&
+                    coin.out.scriptPubKey == (CScript{} << OP_TRUE)) {
+                    spendable.emplace(outpoint, coin);
+                    break;
+                }
+            }
+        }
+        if (spendable) {
+            auto spend_block{PrepareNextBlock()};
+            CMutableTransaction spend;
+            spend.vin.emplace_back(spendable->first);
+            spend.vout.emplace_back(spendable->second.out.nValue, spendable->second.out.scriptPubKey);
+            spend_block->vtx.push_back(MakeTransactionRef(spend));
+            node::RegenerateCommitments(*spend_block, chainman);
+            assert(!MineBlock(node, spend_block).IsNull());
+            circulation += GetBlockSubsidy(ActiveHeight(), Params().GetConsensus());
+            UpdateUtxoStats(/*wipe_cache=*/false);
+        }
+
+        const int original_height{ActiveHeight()};
+        const uint256 original_utxo_hash{utxo_stats.hashSerialized};
+        CBlockIndex* original_tip;
+        CBlockIndex* original_fork_child;
+        {
+            LOCK(chainman.GetMutex());
+            original_tip = chainman.ActiveChain().Tip();
+            assert(original_tip);
+            original_fork_child = original_tip->pprev;
+            assert(original_fork_child && original_fork_child->pprev);
+        }
+
+        BlockValidationState state;
+        assert(chainman.ActiveChainstate().InvalidateBlock(state, original_fork_child));
+        assert(ActiveHeight() == original_height - 2);
+        circulation -= GetBlockSubsidy(original_height, Params().GetConsensus());
+        circulation -= GetBlockSubsidy(original_height - 1, Params().GetConsensus());
+        UpdateUtxoStats(/*wipe_cache=*/false);
+
+        auto alternative_block{PrepareNextBlock()};
+        {
+            CMutableTransaction coinbase{*alternative_block->vtx.front()};
+            ++coinbase.version; // Ensure this fork block differs from the original block at the same height.
+            alternative_block->vtx.front() = MakeTransactionRef(coinbase);
+        }
+        node::RegenerateCommitments(*alternative_block, chainman);
+        assert(!MineBlock(node, alternative_block).IsNull());
+        assert(ActiveHeight() == original_height - 1);
+        circulation += GetBlockSubsidy(original_height - 1, Params().GetConsensus());
+        UpdateUtxoStats(/*wipe_cache=*/true);
+
+        {
+            LOCK(chainman.GetMutex());
+            chainman.ActiveChainstate().ResetBlockFailureFlags(original_fork_child);
+            chainman.RecalculateBestHeader();
+        }
+        state = BlockValidationState{};
+        assert(chainman.ActiveChainstate().ActivateBestChain(state));
+        assert(ActiveHeight() == original_height);
+        circulation += GetBlockSubsidy(original_height, Params().GetConsensus());
+        UpdateUtxoStats(/*wipe_cache=*/false);
+
+        assert(WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip()) == original_tip);
+        assert(utxo_stats.hashSerialized == original_utxo_hash);
+        chainman.CheckBlockIndex();
     }
 }

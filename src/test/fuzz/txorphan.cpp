@@ -54,7 +54,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
 
     CTransactionRef ptx_potential_parent = nullptr;
 
-    std::vector<CTransactionRef> tx_history;
+    std::vector<std::pair<CTransactionRef, int64_t>> tx_history;
 
     LIMITED_WHILE (outpoints.size() < 200'000 && fuzzed_data_provider.ConsumeBool(), 1000) {
         // construct transaction
@@ -83,7 +83,8 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
             return new_tx;
         }();
 
-        tx_history.push_back(tx);
+        const int64_t tx_weight{GetTransactionWeight(*tx)};
+        tx_history.emplace_back(tx, tx_weight);
 
         const auto wtxid{tx->GetWitnessHash()};
 
@@ -107,8 +108,6 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
             NodeId peer_id = fuzzed_data_provider.ConsumeIntegral<NodeId>();
             const auto total_bytes_start{orphanage->TotalOrphanUsage()};
             const auto total_peer_bytes_start{orphanage->UsageByPeer(peer_id)};
-            const auto tx_weight{GetTransactionWeight(*tx)};
-
             CallOneOf(
                 fuzzed_data_provider,
                 [&] {
@@ -122,8 +121,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                 [&] {
                     bool have_tx = orphanage->HaveTx(tx->GetWitnessHash());
                     bool have_tx_and_peer = orphanage->HaveTxFromPeer(wtxid, peer_id);
-                    // AddTx should return false if tx is too big or already have it
-                    // tx weight is unknown, we only check when tx is already in orphanage
+                    // AddTx should return false if the transaction is too big or already present.
                     {
                         bool add_tx = orphanage->AddTx(tx, peer_id);
                         // have_tx == true -> add_tx == false
@@ -198,8 +196,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                     int64_t block_weight{0};
                     int num_txs = fuzzed_data_provider.ConsumeIntegralInRange<unsigned int>(0, 1000);
                     for (int i{0}; i < num_txs; ++i) {
-                        auto& tx_to_remove = PickValue(fuzzed_data_provider, tx_history);
-                        const auto tx_weight = GetTransactionWeight(*tx_to_remove);
+                        const auto& [tx_to_remove, tx_weight] = PickValue(fuzzed_data_provider, tx_history);
                         if (block_weight + tx_weight > MAX_BLOCK_WEIGHT) break;
                         block_weight += tx_weight;
                         block.vtx.push_back(tx_to_remove);

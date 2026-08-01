@@ -107,6 +107,7 @@ add_executable(fuzz
   script.cpp
   script_assets_test_minimizer.cpp
   script_descriptor_cache.cpp
+  script_execution_cache.cpp
   script_flags.cpp
   script_format.cpp
   script_interpreter.cpp

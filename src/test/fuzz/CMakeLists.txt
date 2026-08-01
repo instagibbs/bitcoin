@@ -133,6 +133,7 @@ add_executable(fuzz
   tx_in.cpp
   tx_out.cpp
   tx_pool.cpp
+  tx_verify.cpp
   txgraph.cpp
   txorphan.cpp
   txrequest.cpp

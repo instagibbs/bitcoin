@@ -69,7 +69,7 @@ struct PrecomputedData
             CSHA256().Write(PREFIX_S, 1).Write(ser, sizeof(ser)).Finalize(hash.begin());
             /* Convert hash to scriptPubkeys (of different lengths, so SanityCheck's cached memory
              * usage check has a chance to detect mismatches). */
-            switch (i % 5U) {
+            switch (i % 6U) {
             case 0: /* P2PKH */
                 coins[i].out.scriptPubKey.resize(25);
                 coins[i].out.scriptPubKey[0] = OP_DUP;
@@ -104,7 +104,11 @@ struct PrecomputedData
                 coins[i].out.scriptPubKey[1] = 32;
                 std::copy(hash.begin(), hash.begin() + 32, coins[i].out.scriptPubKey.begin() + 2);
                 break;
+            case 5: /* Provably unspendable */
+                coins[i].out.scriptPubKey << OP_RETURN << std::vector<uint8_t>(hash.begin(), hash.end());
+                break;
             }
+            assert(coins[i].out.scriptPubKey.IsUnspendable() == (i % 6U == 5));
             /* Hash again to construct nValue and fCoinBase. */
             CSHA256().Write(PREFIX_M, 1).Write(ser, sizeof(ser)).Finalize(hash.begin());
             coins[i].out.nValue = CAmount(hash.GetUint64(0) % MAX_MONEY);
@@ -344,12 +348,15 @@ FUZZ_TARGET(coinscache_sim, .init = [] { static auto setup{MakeNoLogFileContext<
                 // Invoke on real caches.
                 Coin coin = data.coins[coinidx];
                 coin.nHeight = current_height;
+                const bool unspendable{coin.out.scriptPubKey.IsUnspendable()};
                 caches.back()->AddCoin(data.outpoints[outpointidx], std::move(coin), sim.has_value());
                 // Apply to simulation data.
-                auto& entry = sim_caches[caches.size()].entry[outpointidx];
-                entry.entrytype = EntryType::UNSPENT;
-                entry.coinidx = coinidx;
-                entry.height = current_height;
+                if (!unspendable) {
+                    auto& entry = sim_caches[caches.size()].entry[outpointidx];
+                    entry.entrytype = EntryType::UNSPENT;
+                    entry.coinidx = coinidx;
+                    entry.height = current_height;
+                }
             },
 
             [&]() { // AddCoin (always possible_overwrite)
@@ -358,12 +365,15 @@ FUZZ_TARGET(coinscache_sim, .init = [] { static auto setup{MakeNoLogFileContext<
                 // Invoke on real caches.
                 Coin coin = data.coins[coinidx];
                 coin.nHeight = current_height;
+                const bool unspendable{coin.out.scriptPubKey.IsUnspendable()};
                 caches.back()->AddCoin(data.outpoints[outpointidx], std::move(coin), true);
                 // Apply to simulation data.
-                auto& entry = sim_caches[caches.size()].entry[outpointidx];
-                entry.entrytype = EntryType::UNSPENT;
-                entry.coinidx = coinidx;
-                entry.height = current_height;
+                if (!unspendable) {
+                    auto& entry = sim_caches[caches.size()].entry[outpointidx];
+                    entry.entrytype = EntryType::UNSPENT;
+                    entry.coinidx = coinidx;
+                    entry.height = current_height;
+                }
             },
 
             [&]() { // SpendCoin (moveto = nullptr)

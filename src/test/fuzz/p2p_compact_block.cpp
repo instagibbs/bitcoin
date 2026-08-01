@@ -6,6 +6,7 @@
 #include <blockencodings.h>
 #include <chain.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <net.h>
 #include <netmessagemaker.h>
 #include <net_processing.h>
@@ -20,15 +21,23 @@
 #include <test/util/script.h>
 #include <test/util/setup_common.h>
 #include <test/util/time.h>
+#include <test/util/txmempool.h>
 #include <test/util/validation.h>
+#include <txmempool.h>
+#include <util/check.h>
+#include <util/task_runner.h>
+#include <util/translation.h>
 #include <validation.h>
+#include <validationinterface.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -36,6 +45,14 @@ namespace {
 TestChain100Setup* g_setup;
 std::shared_ptr<CBlock> g_block;
 const CBlockIndex* g_block_index;
+
+class ImmediateBackgroundTaskRunner : public util::TaskRunnerInterface
+{
+public:
+    void insert(std::function<void()> func) override { std::thread(std::move(func)).join(); }
+    void flush() override {}
+    size_t size() override { return 0; }
+};
 
 struct CapturedMessages {
     std::vector<std::vector<CInv>> getdata;
@@ -124,13 +141,14 @@ void AssertInFlight(PeerManager& peerman, const CNode& peer, bool expected)
     if (expected) assert(stats.vHeightInFlight.front() == g_block_index->nHeight);
 }
 
-void AssertRequest(const CapturedMessages& captured)
+void AssertRequest(const CapturedMessages& captured,
+                   const std::vector<uint16_t>& expected_indexes = {2, 3})
 {
     assert(captured.getdata.empty());
     assert(captured.getblocktxn.size() == 1);
     const auto& request{captured.getblocktxn.front()};
     assert(request.blockhash == g_block->GetHash());
-    assert(request.indexes == std::vector<uint16_t>({2, 3}));
+    assert(request.indexes == expected_indexes);
 }
 
 void AssertFullBlockRequest(const CapturedMessages& captured)
@@ -143,12 +161,8 @@ void AssertFullBlockRequest(const CapturedMessages& captured)
     assert(inv.hash == g_block->GetHash());
 }
 
-void initialize()
+void BuildCandidate(size_t submit_count)
 {
-    static const auto testing_setup{MakeNoLogFileContext<TestChain100Setup>()};
-    g_setup = testing_setup.get();
-    g_setup->mineBlocks(4);
-
     std::vector<CMutableTransaction> transactions;
     for (size_t i{0}; i < 3; ++i) {
         transactions.push_back(g_setup->CreateValidMempoolTransaction(
@@ -158,7 +172,7 @@ void initialize()
             g_setup->coinbaseKey,
             P2WSH_OP_TRUE,
             /*output_amount=*/COIN,
-            /*submit=*/i == 0));
+            /*submit=*/i < submit_count));
     }
     g_block = std::make_shared<CBlock>(g_setup->CreateBlock(transactions, P2WSH_OP_TRUE));
     assert(g_block->vtx.size() == 4);
@@ -171,8 +185,16 @@ void initialize()
     assert(WITH_LOCK(chainman.GetMutex(), return g_block_index->nHeight == chainman.ActiveChain().Height() + 1));
     assert(WITH_LOCK(chainman.GetMutex(), return chainman.m_best_header) == g_block_index);
     assert(WITH_LOCK(chainman.GetMutex(), return !(g_block_index->nStatus & BLOCK_HAVE_DATA)));
-    assert(g_setup->m_node.mempool->size() == 1);
+    assert(g_setup->m_node.mempool->size() == submit_count);
     chainman.CheckBlockIndex();
+}
+
+void initialize()
+{
+    static const auto testing_setup{MakeNoLogFileContext<TestChain100Setup>()};
+    g_setup = testing_setup.get();
+    g_setup->mineBlocks(4);
+    BuildCandidate(/*submit_count=*/1);
 }
 } // namespace
 
@@ -378,4 +400,239 @@ FUZZ_TARGET(p2p_compact_block, .init = ::initialize)
     assert(mempool.size() == mempool_size);
     assert(mempool.exists(g_block->vtx[1]->GetHash()));
     assert(WITH_LOCK(mempool.cs, return mempool.GetSequence()) == mempool_sequence);
+}
+
+namespace {
+void ResetSuccessState()
+{
+    auto& node{g_setup->m_node};
+    g_block.reset();
+    g_block_index = nullptr;
+
+    bilingual_str error;
+    node.mempool.reset();
+    node.mempool = std::make_unique<CTxMemPool>(MemPoolOptionsForTest(node), error);
+    Assert(error.empty());
+
+    node.chainman.reset();
+    g_setup->m_make_chainman();
+    g_setup->LoadVerifyActivateChainstate();
+
+    g_setup->m_coinbase_txns.clear();
+    g_setup->m_clock.set(std::chrono::seconds{1598887952});
+    g_setup->mineBlocks(COINBASE_MATURITY + 4);
+    BuildCandidate(/*submit_count=*/0);
+}
+
+void initialize_success()
+{
+    static const auto testing_setup{MakeNoLogFileContext<TestChain100Setup>()};
+    g_setup = testing_setup.get();
+    // Recreate chainman below so it owns the synchronous signal dispatcher.
+    testing_setup->m_node.validation_signals =
+        std::make_unique<ValidationSignals>(std::make_unique<ImmediateBackgroundTaskRunner>());
+    ResetSuccessState();
+}
+} // namespace
+
+FUZZ_TARGET(p2p_compact_block_success, .init = ::initialize_success)
+{
+    SeedRandomStateForTest(SeedRand::ZEROS);
+    FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
+
+    auto& node{g_setup->m_node};
+    auto& chainman{static_cast<TestChainstateManager&>(*node.chainman)};
+    auto& mempool{*node.mempool};
+    chainman.ResetIbd();
+    chainman.JumpOutOfIbd();
+    chainman.DisableNextWrite();
+    g_setup->m_clock.set(g_block->Time());
+
+    const uint8_t mode{fuzzed_data_provider.ConsumeIntegralInRange<uint8_t>(0, 3)};
+    const bool first_is_outbound{fuzzed_data_provider.ConsumeBool()};
+    const bool prefill_first{fuzzed_data_provider.ConsumeBool()};
+    const auto block_index_size{WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size())};
+    CBlockIndex* const old_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip())};
+    const uint256 old_coins_tip{WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChainstate().CoinsTip().GetBestBlock())};
+    assert(old_tip);
+    assert(g_block_index->pprev == old_tip);
+    assert(WITH_LOCK(chainman.GetMutex(), return chainman.m_best_header) == g_block_index);
+    assert(mempool.size() == 0);
+
+    auto add_transaction = [&](size_t index) {
+        assert(index > 0 && index < g_block->vtx.size());
+        const CTransactionRef& tx{g_block->vtx[index]};
+        assert(!mempool.exists(tx->GetHash()));
+        const MempoolAcceptResult result{
+            WITH_LOCK(chainman.GetMutex(), return chainman.ProcessTransaction(tx))};
+        assert(result.m_result_type == MempoolAcceptResult::ResultType::VALID);
+        assert(mempool.exists(tx->GetHash()));
+    };
+
+    std::vector<uint16_t> missing_indexes{1, 2, 3};
+    if (mode <= 1 && prefill_first) {
+        add_transaction(/*index=*/1);
+        missing_indexes.erase(missing_indexes.begin());
+    } else if (mode == 3) {
+        for (size_t i{1}; i < g_block->vtx.size(); ++i) add_transaction(i);
+        missing_indexes.clear();
+    }
+
+    AddrMan addrman{*node.netgroupman, /*deterministic=*/true, /*consistency_check_ratio=*/0};
+    ConnmanTestMsg connman{0, 0, addrman, *node.netgroupman, Params()};
+    auto peerman{PeerManager::make(
+        connman, addrman, /*banman=*/nullptr, chainman, mempool, *node.warnings,
+        PeerManager::Options{.deterministic_rng = true})};
+    CConnman::Options connman_options;
+    connman_options.m_msgproc = peerman.get();
+    connman_options.m_peer_connect_timeout = 99999;
+    connman.Init(connman_options);
+    node.validation_signals->RegisterValidationInterface(peerman.get());
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    std::vector<CNode*> peers;
+    peers.reserve(4);
+    CNode& first{AddPeer(connman, *peerman, peers, /*id=*/0,
+                         first_is_outbound ? ConnectionType::OUTBOUND_FULL_RELAY : ConnectionType::INBOUND,
+                         /*high_bandwidth=*/false)};
+    CNode& second{AddPeer(connman, *peerman, peers, /*id=*/1, ConnectionType::INBOUND,
+                          /*high_bandwidth=*/true)};
+    CNode& third_inbound{AddPeer(connman, *peerman, peers, /*id=*/2, ConnectionType::INBOUND,
+                                 /*high_bandwidth=*/true)};
+    CNode& outbound{AddPeer(connman, *peerman, peers, /*id=*/3, ConnectionType::OUTBOUND_FULL_RELAY,
+                            /*high_bandwidth=*/true)};
+
+    CapturedMessages captured;
+    const auto capture_message_orig{CaptureMessage};
+    connman.SetCaptureMessages(true);
+    CaptureMessage = [&](const CAddress&, const std::string& msg_type,
+                         std::span<const unsigned char> data, bool is_incoming) {
+        if (is_incoming) return;
+        if (msg_type == NetMsgType::GETDATA) {
+            std::vector<CInv> invs;
+            SpanReader{data} >> invs;
+            captured.getdata.push_back(std::move(invs));
+        } else if (msg_type == NetMsgType::GETBLOCKTXN) {
+            BlockTransactionsRequest request;
+            SpanReader{data} >> request;
+            captured.getblocktxn.push_back(std::move(request));
+        }
+    };
+
+    captured.Clear();
+    assert(peerman->FetchBlock(first.GetId(), *g_block_index).has_value());
+    AssertFullBlockRequest(captured);
+    AssertInFlight(*peerman, first, true);
+    connman.FlushSendBuffer(first);
+
+    const CBlockHeaderAndShortTxIDs compact_block{*g_block, /*nonce=*/0};
+    auto announce = [&](CNode& peer, bool expect_request)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
+        captured.Clear();
+        ProcessMessage(connman, peer, NetMsg::Make(NetMsgType::CMPCTBLOCK, compact_block));
+        if (expect_request) {
+            AssertRequest(captured, missing_indexes);
+        } else {
+            captured.AssertEmpty();
+        }
+        connman.FlushSendBuffer(peer);
+    };
+
+    announce(first, /*expect_request=*/mode != 3);
+
+    CNode* completing_peer{&first};
+    std::vector<CTransactionRef> missing_transactions;
+    if (mode != 3) {
+        AssertInFlight(*peerman, first, true);
+        announce(second, /*expect_request=*/true);
+        announce(third_inbound, /*expect_request=*/first_is_outbound);
+        announce(outbound, /*expect_request=*/!first_is_outbound);
+
+        CNode& spare{first_is_outbound ? outbound : third_inbound};
+        CNode& parallel{first_is_outbound ? third_inbound : outbound};
+        AssertInFlight(*peerman, first, true);
+        AssertInFlight(*peerman, second, true);
+        AssertInFlight(*peerman, parallel, true);
+        AssertInFlight(*peerman, spare, false);
+
+        for (uint16_t index : missing_indexes) missing_transactions.push_back(g_block->vtx.at(index));
+
+        if (mode == 0 || mode == 1) {
+            if (mode == 1) completing_peer = fuzzed_data_provider.ConsumeBool() ? &second : &parallel;
+            BlockTransactions response;
+            response.blockhash = g_block->GetHash();
+            response.txn = missing_transactions;
+            captured.Clear();
+            ProcessMessage(connman, *completing_peer, NetMsg::Make(NetMsgType::BLOCKTXN, response));
+            captured.AssertEmpty();
+            connman.FlushSendBuffer(*completing_peer);
+        } else {
+            for (size_t i{1}; i < g_block->vtx.size(); ++i) add_transaction(i);
+            completing_peer = &spare;
+            // All three request slots are occupied, so this peer may only
+            // complete the block through the optimistic reconstruction path.
+            announce(spare, /*expect_request=*/false);
+        }
+    }
+
+    node.validation_signals->SyncWithValidationInterfaceQueue();
+    for (CNode* peer : peers) AssertInFlight(*peerman, *peer, false);
+
+    // A correct response arriving after another peer completed the block must
+    // not recreate request ownership or process the block twice.
+    BlockTransactions late_response;
+    late_response.blockhash = g_block->GetHash();
+    late_response.txn = missing_transactions;
+    captured.Clear();
+    ProcessMessage(connman, second, NetMsg::Make(NetMsgType::BLOCKTXN, late_response));
+    captured.AssertEmpty();
+    for (CNode* peer : peers) AssertInFlight(*peerman, *peer, false);
+
+    chainman.CheckBlockIndex();
+    assert(WITH_LOCK(chainman.GetMutex(), return chainman.BlockIndex().size()) == block_index_size);
+    assert(WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChain().Tip()) == g_block_index);
+    assert(WITH_LOCK(chainman.GetMutex(), return chainman.m_best_header) == g_block_index);
+    assert(WITH_LOCK(chainman.GetMutex(), return chainman.ActiveChainstate().CoinsTip().GetBestBlock()) == g_block->GetHash());
+    assert(WITH_LOCK(chainman.GetMutex(), return g_block_index->nStatus & BLOCK_HAVE_DATA));
+    assert(WITH_LOCK(chainman.GetMutex(), return g_block_index->nTx) == g_block->vtx.size());
+    assert(WITH_LOCK(chainman.GetMutex(), return g_block_index->IsValid(BLOCK_VALID_SCRIPTS)));
+    assert(!mempool.exists(g_block->vtx[1]->GetHash()));
+    assert(!mempool.exists(g_block->vtx[2]->GetHash()));
+    assert(!mempool.exists(g_block->vtx[3]->GetHash()));
+    assert(mempool.size() == 0);
+
+    {
+        LOCK(chainman.GetMutex());
+        auto& coins{chainman.ActiveChainstate().CoinsTip()};
+        for (size_t i{1}; i < g_block->vtx.size(); ++i) {
+            assert(!coins.GetCoin(g_block->vtx[i]->vin.front().prevout));
+            const auto output{coins.GetCoin(COutPoint{g_block->vtx[i]->GetHash(), 0})};
+            assert(output);
+            assert(!output->IsCoinBase());
+            assert(output->nHeight == g_block_index->nHeight);
+            assert(output->out == g_block->vtx[i]->vout.front());
+        }
+        const auto coinbase{coins.GetCoin(COutPoint{g_block->vtx.front()->GetHash(), 0})};
+        assert(coinbase);
+        assert(coinbase->IsCoinBase());
+        assert(coinbase->nHeight == g_block_index->nHeight);
+        mempool.check(coins, g_block_index->nHeight + 1);
+    }
+    assert(old_coins_tip == old_tip->GetBlockHash());
+
+    CaptureMessage = capture_message_orig;
+    connman.SetCaptureMessages(false);
+    node.validation_signals->UnregisterValidationInterface(peerman.get());
+    node.validation_signals->SyncWithValidationInterfaceQueue();
+    for (CNode* peer : peers) {
+        peerman->FinalizeNode(*peer);
+        CNodeStateStats stats;
+        assert(!peerman->GetNodeStateStats(peer->GetId(), stats));
+    }
+    connman.ClearTestNodes();
+    connman.SetMsgProc(nullptr);
+    peerman.reset();
+
+    ResetSuccessState();
 }

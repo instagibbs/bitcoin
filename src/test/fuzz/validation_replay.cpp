@@ -6,6 +6,7 @@
 #include <coins.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
+#include <kernel/coinstats.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
@@ -21,6 +22,7 @@
 #include <cassert>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <utility>
@@ -35,6 +37,7 @@ std::array<std::vector<CBlock>, 2> g_branch_blocks;
 std::array<std::vector<CBlockIndex*>, 2> g_branch_indices;
 std::array<std::vector<CoinMap>, 2> g_branch_states;
 std::set<COutPoint> g_all_outpoints;
+kernel::CCoinsStats g_verify_stats;
 
 class ReplayCoinsView final : public CCoinsViewCache
 {
@@ -155,7 +158,7 @@ void BuildBranch(unsigned branch)
     }
 }
 
-void AssertViewEquals(const ReplayCoinsView& view, const CoinMap& expected)
+void AssertCoinsEqual(const CCoinsView& view, const CoinMap& expected)
 {
     CAmount total{0};
     size_t count{0};
@@ -173,7 +176,34 @@ void AssertViewEquals(const ReplayCoinsView& view, const CoinMap& expected)
     for (const auto& [_, coin] : expected) expected_total += coin.out.nValue;
     assert(total == expected_total);
     assert(count == expected.size());
+}
+
+void AssertViewEquals(const ReplayCoinsView& view, const CoinMap& expected)
+{
+    AssertCoinsEqual(view, expected);
     assert(view.GetCacheSize() == expected.size());
+}
+
+void AssertStatsEqual(const kernel::CCoinsStats& first, const kernel::CCoinsStats& second)
+{
+    assert(first.nHeight == second.nHeight);
+    assert(first.hashBlock == second.hashBlock);
+    assert(first.nTransactions == second.nTransactions);
+    assert(first.nTransactionOutputs == second.nTransactionOutputs);
+    assert(first.nBogoSize == second.nBogoSize);
+    assert(first.hashSerialized == second.hashSerialized);
+    assert(first.nDiskSize == second.nDiskSize);
+    assert(first.total_amount == second.total_amount);
+    assert(first.coins_count == second.coins_count);
+    assert(first.index_used == second.index_used);
+    assert(first.total_subsidy == second.total_subsidy);
+    assert(first.total_unspendables_genesis_block == second.total_unspendables_genesis_block);
+    assert(first.total_unspendables_bip30 == second.total_unspendables_bip30);
+    assert(first.total_unspendables_scripts == second.total_unspendables_scripts);
+    assert(first.total_unspendables_unclaimed_rewards == second.total_unspendables_unclaimed_rewards);
+    assert(first.total_prevout_spent_amount == second.total_prevout_spent_amount);
+    assert(first.total_new_outputs_ex_coinbase_amount == second.total_new_outputs_ex_coinbase_amount);
+    assert(first.total_coinbase_amount == second.total_coinbase_amount);
 }
 
 void SeedView(ReplayCoinsView& view, const CoinMap& old_state, const CoinMap& new_state,
@@ -248,6 +278,26 @@ void initialize_validation_replay()
             ApplyBlock(state, g_branch_blocks[branch][depth], COINBASE_MATURITY + depth + 1);
             g_branch_states[branch].push_back(std::move(state));
         }
+    }
+    chainman.CheckBlockIndex();
+}
+
+void initialize_validation_verify_db()
+{
+    initialize_validation_replay();
+    auto& chainman{*Assert(g_setup->m_node.chainman)};
+    {
+        LOCK(chainman.GetMutex());
+        auto& chainstate{chainman.ActiveChainstate()};
+        chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
+        assert(chainstate.CoinsDB().GetBestBlock() == chainman.ActiveTip()->GetBlockHash());
+        AssertCoinsEqual(chainstate.CoinsDB(), g_branch_states[1].back());
+        g_verify_stats = *Assert(kernel::ComputeUTXOStats(
+            kernel::CoinStatsHashType::HASH_SERIALIZED,
+            chainstate.CoinsDB(),
+            chainman.m_blockman));
+        assert(g_verify_stats.hashBlock == chainman.ActiveTip()->GetBlockHash());
+        assert(g_verify_stats.nHeight == chainman.ActiveHeight());
     }
     chainman.CheckBlockIndex();
 }
@@ -374,5 +424,147 @@ FUZZ_TARGET(validation_replay, .init = initialize_validation_replay)
         assert(mempool.size() == mempool_size);
         mempool.check(chainstate.CoinsTip(), chainman.ActiveHeight() + 1);
     }
+    chainman.CheckBlockIndex();
+}
+
+FUZZ_TARGET(validation_verify_db, .init = initialize_validation_verify_db)
+{
+    SeedRandomStateForTest(SeedRand::ZEROS);
+    FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
+    auto& chainman{*Assert(g_setup->m_node.chainman)};
+    auto& chainstate{chainman.ActiveChainstate()};
+    auto& mempool{*Assert(g_setup->m_node.mempool)};
+    const unsigned operation{fuzzed_data_provider.ConsumeIntegralInRange<unsigned>(0, 15)};
+    constexpr int VERIFY_HEIGHT{COINBASE_MATURITY + 3};
+
+    int check_level{0};
+    int check_depth{1};
+    bool insufficient_cache{false};
+    bool interrupt{false};
+    unsigned corruption{0};
+    switch (operation) {
+    case 0: break;
+    case 1: check_level = 1; break;
+    case 2: check_level = 2; break;
+    case 3: check_level = 3; break;
+    case 4: check_level = 4; break;
+    case 5: check_level = 4; check_depth = 3; break;
+    case 6: check_level = 4; check_depth = 0; break;
+    case 7: check_level = -1; check_depth = -1; break;
+    case 8: check_level = 5; check_depth = VERIFY_HEIGHT + 1; break;
+    case 9: check_level = 3; check_depth = 2; insufficient_cache = true; break;
+    case 10: check_level = 4; check_depth = 0; insufficient_cache = true; break;
+    case 11: check_level = 2; check_depth = 3; interrupt = true; break;
+    case 12: check_level = 3; corruption = 1; break;
+    case 13: check_level = 3; corruption = 2; break;
+    case 14: check_level = 4; corruption = 3; break;
+    case 15:
+        check_level = fuzzed_data_provider.ConsumeIntegral<int>();
+        check_depth = fuzzed_data_provider.ConsumeIntegral<int>();
+        break;
+    }
+
+    LOCK(chainman.GetMutex());
+    const CBlockIndex* const active_tip{Assert(chainman.ActiveTip())};
+    assert(active_tip == g_branch_indices[1].back());
+    assert(active_tip->nHeight == VERIFY_HEIGHT);
+    const uint256 coins_tip_best{chainstate.CoinsTip().GetBestBlock()};
+    const uint256 coins_db_best{chainstate.CoinsDB().GetBestBlock()};
+    const size_t coins_tip_size{chainstate.CoinsTip().GetCacheSize()};
+    const size_t block_index_size{chainman.BlockIndex().size()};
+    const size_t candidate_count{chainstate.setBlockIndexCandidates.size()};
+    const size_t mempool_size{mempool.size()};
+    const size_t original_cache_budget{chainstate.m_coinstip_cache_size_bytes};
+    const kernel::CCoinsStats stats_before{*Assert(kernel::ComputeUTXOStats(
+        kernel::CoinStatsHashType::HASH_SERIALIZED,
+        chainstate.CoinsDB(),
+        chainman.m_blockman))};
+    AssertStatsEqual(stats_before, g_verify_stats);
+    AssertCoinsEqual(chainstate.CoinsDB(), g_branch_states[1].back());
+
+    CCoinsView* coins_view{&chainstate.CoinsDB()};
+    CoinMap corrupt_state;
+    std::unique_ptr<ReplayCoinsView> corrupt_view;
+    if (corruption != 0) {
+        corrupt_state = g_branch_states[1].back();
+        const CTransactionRef& tip_coinbase{g_branch_blocks[1].back().vtx.front()};
+        const COutPoint tip_coinbase_out{tip_coinbase->GetHash(), 0};
+        if (corruption == 1) {
+            assert(corrupt_state.erase(tip_coinbase_out) == 1);
+        } else if (corruption == 2) {
+            Coin& coin{corrupt_state.at(tip_coinbase_out)};
+            switch (fuzzed_data_provider.ConsumeIntegralInRange<unsigned>(0, 3)) {
+            case 0: ++coin.out.nValue; break;
+            case 1: --coin.nHeight; break;
+            case 2: coin.fCoinBase = false; break;
+            case 3: coin.out.scriptPubKey << OP_DROP; break;
+            }
+        } else {
+            const CTransactionRef& previous_tx{g_branch_blocks[1].at(1).vtx.at(1)};
+            const COutPoint stale_outpoint{g_branch_blocks[1].at(2).vtx.at(1)->vin.front().prevout};
+            assert(stale_outpoint == COutPoint(previous_tx->GetHash(), 0));
+            assert(corrupt_state.emplace(
+                stale_outpoint,
+                Coin{previous_tx->vout.at(0), VERIFY_HEIGHT - 1, /*coinbase=*/false}).second);
+        }
+        corrupt_view = std::make_unique<ReplayCoinsView>(std::vector<uint256>{});
+        for (const auto& [outpoint, coin] : corrupt_state) {
+            corrupt_view->AddCoin(outpoint, Coin{coin}, /*possible_overwrite=*/false);
+        }
+        corrupt_view->SetBestBlock(active_tip->GetBlockHash());
+        AssertViewEquals(*corrupt_view, corrupt_state);
+        coins_view = corrupt_view.get();
+    }
+
+    VerifyDBResult expected{VerifyDBResult::SUCCESS};
+    if (insufficient_cache) {
+        assert(chainstate.CoinsTip().DynamicMemoryUsage() > 0);
+        chainstate.m_coinstip_cache_size_bytes = 0;
+        expected = VerifyDBResult::SKIPPED_L3_CHECKS;
+    } else if (interrupt) {
+        expected = VerifyDBResult::INTERRUPTED;
+    } else if (corruption != 0) {
+        expected = VerifyDBResult::CORRUPTED_BLOCK_DB;
+    }
+
+    const auto verify_once = [&]() EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        assert(!static_cast<bool>(g_setup->m_interrupt));
+        if (interrupt) assert(g_setup->m_interrupt());
+        VerifyDBResult result;
+        {
+            CVerifyDB verify_db{chainman.GetNotifications()};
+            result = verify_db.VerifyDB(
+                chainstate,
+                chainman.GetConsensus(),
+                *coins_view,
+                check_level,
+                check_depth);
+        }
+        if (interrupt) assert(g_setup->m_interrupt.reset());
+        return result;
+    };
+    assert(verify_once() == expected);
+    assert(verify_once() == expected);
+    chainstate.m_coinstip_cache_size_bytes = original_cache_budget;
+
+    if (corrupt_view) {
+        assert(corrupt_view->GetBestBlock() == active_tip->GetBlockHash());
+        AssertViewEquals(*corrupt_view, corrupt_state);
+    }
+    const kernel::CCoinsStats stats_after{*Assert(kernel::ComputeUTXOStats(
+        kernel::CoinStatsHashType::HASH_SERIALIZED,
+        chainstate.CoinsDB(),
+        chainman.m_blockman))};
+    AssertStatsEqual(stats_after, g_verify_stats);
+    AssertCoinsEqual(chainstate.CoinsDB(), g_branch_states[1].back());
+    assert(chainman.ActiveTip() == active_tip);
+    assert(chainman.ActiveHeight() == VERIFY_HEIGHT);
+    assert(chainstate.CoinsTip().GetBestBlock() == coins_tip_best);
+    assert(chainstate.CoinsDB().GetBestBlock() == coins_db_best);
+    assert(chainstate.CoinsTip().GetCacheSize() == coins_tip_size);
+    assert(chainman.BlockIndex().size() == block_index_size);
+    assert(chainstate.setBlockIndexCandidates.size() == candidate_count);
+    assert(mempool.size() == mempool_size);
+    mempool.check(chainstate.CoinsTip(), chainman.ActiveHeight() + 1);
     chainman.CheckBlockIndex();
 }

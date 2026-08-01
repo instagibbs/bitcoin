@@ -281,6 +281,21 @@ FUZZ_TARGET(txdownloadman, .init = initialize)
 // peer without tracking anything (this is only for the txdownload_impl target).
 static bool HasRelayPermissions(NodeId peer) { return peer == 0; }
 
+static GenTxid DeterministicGenTxid(uint32_t domain, uint32_t index, bool wtxid)
+{
+    const uint256 hash{(HashWriter() << domain << index).GetHash()};
+    if (wtxid) return Wtxid::FromUint256(hash);
+    return Txid::FromUint256(hash);
+}
+
+static void CheckRequests(const std::vector<GenTxid>& actual, const std::vector<GenTxid>& expected)
+{
+    Assert(actual.size() == expected.size());
+    for (const GenTxid& gtxid : expected) {
+        Assert(std::find(actual.begin(), actual.end(), gtxid) != actual.end());
+    }
+}
+
 static void CheckInvariants(const node::TxDownloadManagerImpl& txdownload_impl)
 {
     txdownload_impl.m_orphanage->SanityCheck();
@@ -652,6 +667,145 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
         txdownload_impl.CheckIsEmpty(nodeid);
     }
     txdownload_impl.CheckIsEmpty();
+}
+
+FUZZ_TARGET(txdownloadman_request_limits, .init = initialize)
+{
+    SeedRandomStateForTest(SeedRand::ZEROS);
+    FuzzedDataProvider provider{buffer.data(), buffer.size()};
+    const bool preferred{provider.ConsumeBool()};
+    const bool relay_permissions{provider.ConsumeBool()};
+    const bool wtxid_relay{provider.ConsumeBool()};
+    FakeNodeClock clock{ConsumeTime(provider)};
+    const NodeId peer{relay_permissions ? 0 : 1};
+    const node::TxDownloadConnectionInfo info{
+        .m_preferred = preferred,
+        .m_relay_permissions = relay_permissions,
+        .m_wtxid_relay = wtxid_relay,
+    };
+
+    bilingual_str error;
+    CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
+    FastRandomContext det_rand{true};
+    const std::chrono::microseconds now{244466666};
+
+    {
+        node::TxDownloadManagerImpl manager{node::TxDownloadOptions{pool, det_rand, true}};
+        manager.ConnectedPeer(peer, info);
+        for (uint32_t index{0}; index < node::MAX_PEER_TX_ANNOUNCEMENTS; ++index) {
+            Assert(!manager.AddTxAnnouncement(peer, DeterministicGenTxid(0, index, /*wtxid=*/true), now));
+        }
+        Assert(manager.m_txrequest.Count(peer) == node::MAX_PEER_TX_ANNOUNCEMENTS);
+
+        Assert(!manager.AddTxAnnouncement(
+            peer, DeterministicGenTxid(0, node::MAX_PEER_TX_ANNOUNCEMENTS, /*wtxid=*/true), now));
+        Assert(manager.m_txrequest.Count(peer) ==
+               node::MAX_PEER_TX_ANNOUNCEMENTS + (relay_permissions ? 1 : 0));
+        CheckInvariants(manager);
+        manager.DisconnectedPeer(peer);
+        manager.CheckIsEmpty(peer);
+        manager.CheckIsEmpty();
+    }
+
+    {
+        node::TxDownloadManagerImpl manager{node::TxDownloadOptions{pool, det_rand, true}};
+        manager.ConnectedPeer(peer, info);
+        std::vector<GenTxid> initial;
+        initial.reserve(node::MAX_PEER_TX_REQUEST_IN_FLIGHT);
+        for (uint32_t index{0}; index < node::MAX_PEER_TX_REQUEST_IN_FLIGHT; ++index) {
+            initial.push_back(DeterministicGenTxid(1, index, /*wtxid=*/true));
+            Assert(!manager.AddTxAnnouncement(peer, initial.back(), now));
+        }
+
+        const auto nonpreferred_delay{preferred ? std::chrono::microseconds{0} :
+            std::chrono::duration_cast<std::chrono::microseconds>(node::NONPREF_PEER_TX_DELAY)};
+        if (nonpreferred_delay.count() > 0) {
+            Assert(manager.GetRequestsToSend(peer, now + nonpreferred_delay - std::chrono::microseconds{1}).empty());
+        }
+        CheckRequests(manager.GetRequestsToSend(peer, now + nonpreferred_delay), initial);
+        Assert(manager.m_txrequest.CountInFlight(peer) == node::MAX_PEER_TX_REQUEST_IN_FLIGHT);
+
+        const auto extra{DeterministicGenTxid(1, node::MAX_PEER_TX_REQUEST_IN_FLIGHT, /*wtxid=*/true)};
+        const auto extra_time{now + nonpreferred_delay};
+        Assert(!manager.AddTxAnnouncement(peer, extra, extra_time));
+        const auto overload_delay{relay_permissions ? std::chrono::microseconds{0} :
+            std::chrono::duration_cast<std::chrono::microseconds>(node::OVERLOADED_PEER_TX_DELAY)};
+        const auto total_delay{nonpreferred_delay + overload_delay};
+        if (total_delay.count() > 0) {
+            Assert(manager.GetRequestsToSend(peer, extra_time + total_delay - std::chrono::microseconds{1}).empty());
+        }
+        CheckRequests(manager.GetRequestsToSend(peer, extra_time + total_delay), {extra});
+        Assert(manager.m_txrequest.CountInFlight(peer) == node::MAX_PEER_TX_REQUEST_IN_FLIGHT + 1);
+        CheckInvariants(manager);
+        manager.DisconnectedPeer(peer);
+        manager.CheckIsEmpty(peer);
+        manager.CheckIsEmpty();
+    }
+
+    {
+        constexpr NodeId txid_peer{1};
+        constexpr NodeId wtxid_peer{2};
+        node::TxDownloadManagerImpl manager{node::TxDownloadOptions{pool, det_rand, true}};
+        manager.ConnectedPeer(txid_peer, {
+            .m_preferred = true,
+            .m_relay_permissions = false,
+            .m_wtxid_relay = false,
+        });
+        manager.ConnectedPeer(wtxid_peer, {
+            .m_preferred = true,
+            .m_relay_permissions = false,
+            .m_wtxid_relay = true,
+        });
+
+        const GenTxid delayed{DeterministicGenTxid(2, 0, /*wtxid=*/false)};
+        Assert(!manager.AddTxAnnouncement(txid_peer, delayed, now));
+        Assert(manager.GetRequestsToSend(txid_peer, now).empty());
+        const auto txid_delay{
+            std::chrono::duration_cast<std::chrono::microseconds>(node::TXID_RELAY_DELAY)};
+        CheckRequests(manager.GetRequestsToSend(txid_peer, now + txid_delay), {delayed});
+        manager.ReceivedNotFound(txid_peer, {delayed});
+
+        manager.DisconnectedPeer(wtxid_peer);
+        const GenTxid immediate{DeterministicGenTxid(2, 1, /*wtxid=*/false)};
+        Assert(!manager.AddTxAnnouncement(txid_peer, immediate, now + txid_delay));
+        CheckRequests(manager.GetRequestsToSend(txid_peer, now + txid_delay), {immediate});
+        CheckInvariants(manager);
+        manager.DisconnectedPeer(txid_peer);
+        manager.CheckIsEmpty(txid_peer);
+        manager.CheckIsEmpty();
+    }
+
+    {
+        constexpr NodeId first_peer{1};
+        constexpr NodeId second_peer{2};
+        node::TxDownloadManagerImpl manager{node::TxDownloadOptions{pool, det_rand, true}};
+        manager.ConnectedPeer(first_peer, {
+            .m_preferred = true,
+            .m_relay_permissions = false,
+            .m_wtxid_relay = true,
+        });
+        manager.ConnectedPeer(second_peer, {
+            .m_preferred = false,
+            .m_relay_permissions = false,
+            .m_wtxid_relay = true,
+        });
+        const GenTxid request{DeterministicGenTxid(3, 0, /*wtxid=*/true)};
+        Assert(!manager.AddTxAnnouncement(first_peer, request, now));
+        Assert(!manager.AddTxAnnouncement(second_peer, request, now));
+        CheckRequests(manager.GetRequestsToSend(first_peer, now), {request});
+
+        const auto expiry{
+            std::chrono::duration_cast<std::chrono::microseconds>(node::GETDATA_TX_INTERVAL)};
+        Assert(manager.GetRequestsToSend(second_peer, now + expiry - std::chrono::microseconds{1}).empty());
+        CheckRequests(manager.GetRequestsToSend(second_peer, now + expiry), {request});
+        manager.ReceivedNotFound(second_peer, {request});
+        CheckInvariants(manager);
+        manager.DisconnectedPeer(first_peer);
+        manager.CheckIsEmpty(first_peer);
+        manager.DisconnectedPeer(second_peer);
+        manager.CheckIsEmpty(second_peer);
+        manager.CheckIsEmpty();
+    }
 }
 
 } // namespace

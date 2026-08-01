@@ -24,6 +24,10 @@
 #include <validation.h>
 #include <validationinterface.h>
 
+#include <algorithm>
+#include <chrono>
+#include <set>
+
 namespace {
 
 const TestingSetup* g_setup;
@@ -294,6 +298,7 @@ static void ExercisePackageReconsideration(CTxMemPool& pool, uint8_t selector)
     FastRandomContext det_rand{true};
     node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{pool, det_rand, true}};
     const NodeId peer{selector % NUM_PEERS};
+    const NodeId second_peer{(peer + 1) % NUM_PEERS};
     node::TxDownloadConnectionInfo info{
         .m_preferred = static_cast<bool>(selector & 2),
         .m_relay_permissions = HasRelayPermissions(peer),
@@ -314,6 +319,17 @@ static void ExercisePackageReconsideration(CTxMemPool& pool, uint8_t selector)
     Assert(child_todo.m_unique_parents == std::vector<Txid>{parent->GetHash()});
     Assert(!child_todo.m_package_to_validate);
     Assert(txdownload_impl.m_orphanage->HaveTx(child->GetWitnessHash()));
+
+    txdownload_impl.ConnectedPeer(second_peer, {
+        .m_preferred = true,
+        .m_relay_permissions = HasRelayPermissions(second_peer),
+        .m_wtxid_relay = true,
+    });
+    Assert(!txdownload_impl.m_orphanage->HaveTxFromPeer(child->GetWitnessHash(), second_peer));
+    Assert(txdownload_impl.AddTxAnnouncement(
+        second_peer, child->GetWitnessHash(), std::chrono::microseconds{244466666}));
+    Assert(txdownload_impl.m_orphanage->HaveTxFromPeer(child->GetWitnessHash(), second_peer));
+    Assert(txdownload_impl.m_txrequest.Count(second_peer) == 1);
 
     TxValidationState reconsiderable;
     reconsiderable.Invalid(TxValidationResult::TX_RECONSIDERABLE, "");
@@ -349,22 +365,140 @@ static void ExercisePackageReconsideration(CTxMemPool& pool, uint8_t selector)
     // Accepting the parent queues its orphan child exactly once. Reconsidering
     // and then accepting the child must drain the work set and orphanage.
     txdownload_impl.MempoolAcceptedTx(parent);
-    Assert(txdownload_impl.HaveMoreWork(peer));
-    const CTransactionRef reconsidered_child{txdownload_impl.GetTxToReconsider(peer)};
+    const bool first_peer_work{txdownload_impl.HaveMoreWork(peer)};
+    const bool second_peer_work{txdownload_impl.HaveMoreWork(second_peer)};
+    Assert(first_peer_work != second_peer_work);
+    const NodeId work_peer{first_peer_work ? peer : second_peer};
+    const CTransactionRef reconsidered_child{txdownload_impl.GetTxToReconsider(work_peer)};
     Assert(reconsidered_child && reconsidered_child->GetWitnessHash() == child->GetWitnessHash());
     Assert(!txdownload_impl.HaveMoreWork(peer));
+    Assert(!txdownload_impl.HaveMoreWork(second_peer));
     const node::RejectedTxTodo repeated_child{
-        txdownload_impl.MempoolRejectedTx(child, missing_inputs, peer, /*first_time_failure=*/false)};
+        txdownload_impl.MempoolRejectedTx(child, missing_inputs, work_peer, /*first_time_failure=*/false)};
     Assert(!repeated_child.m_should_add_extra_compact_tx);
     Assert(txdownload_impl.m_orphanage->HaveTx(child->GetWitnessHash()));
     txdownload_impl.MempoolAcceptedTx(child);
     Assert(!txdownload_impl.m_orphanage->HaveTx(child->GetWitnessHash()));
     Assert(!txdownload_impl.HaveMoreWork(peer));
+    Assert(!txdownload_impl.HaveMoreWork(second_peer));
     Assert(!txdownload_impl.GetTxToReconsider(peer));
+    Assert(!txdownload_impl.GetTxToReconsider(second_peer));
 
     CheckInvariants(txdownload_impl);
     txdownload_impl.DisconnectedPeer(peer);
     txdownload_impl.CheckIsEmpty(peer);
+    txdownload_impl.DisconnectedPeer(second_peer);
+    txdownload_impl.CheckIsEmpty(second_peer);
+    txdownload_impl.CheckIsEmpty();
+}
+
+static void ExerciseMultipleReconsiderableParents(CTxMemPool& pool, uint8_t selector)
+{
+    FastRandomContext det_rand{true};
+    node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{pool, det_rand, true}};
+    const NodeId peer{selector % NUM_PEERS};
+    txdownload_impl.ConnectedPeer(peer, {
+        .m_preferred = static_cast<bool>(selector & 2),
+        .m_relay_permissions = HasRelayPermissions(peer),
+        .m_wtxid_relay = static_cast<bool>(selector & 4),
+    });
+
+    const bool witness_parents{static_cast<bool>(selector & 8)};
+    const CTransactionRef parent1{MakeTransactionSpending(
+        {COINS[NUM_COINS - 2]}, /*num_outputs=*/1, /*add_witness=*/witness_parents)};
+    const CTransactionRef parent2{MakeTransactionSpending(
+        {COINS[NUM_COINS - 3]}, /*num_outputs=*/1, /*add_witness=*/witness_parents)};
+    const CTransactionRef child{MakeTransactionSpending(
+        {COutPoint{parent1->GetHash(), 0}, COutPoint{parent2->GetHash(), 0}},
+        /*num_outputs=*/1, /*add_witness=*/true)};
+
+    TxValidationState reconsiderable;
+    reconsiderable.Invalid(TxValidationResult::TX_RECONSIDERABLE, "");
+    Assert(!txdownload_impl.MempoolRejectedTx(
+        parent1, reconsiderable, peer, /*first_time_failure=*/true).m_package_to_validate);
+    Assert(!txdownload_impl.MempoolRejectedTx(
+        parent2, reconsiderable, peer, /*first_time_failure=*/true).m_package_to_validate);
+
+    TxValidationState missing_inputs;
+    missing_inputs.Invalid(TxValidationResult::TX_MISSING_INPUTS, "");
+    const node::RejectedTxTodo child_todo{
+        txdownload_impl.MempoolRejectedTx(child, missing_inputs, peer, /*first_time_failure=*/true)};
+    Assert(child_todo.m_should_add_extra_compact_tx);
+    Assert(!child_todo.m_package_to_validate);
+    if (witness_parents) {
+        std::vector<Txid> expected_parents{parent1->GetHash(), parent2->GetHash()};
+        std::sort(expected_parents.begin(), expected_parents.end());
+        Assert(child_todo.m_unique_parents == expected_parents);
+        Assert(txdownload_impl.m_orphanage->HaveTx(child->GetWitnessHash()));
+        const auto [should_validate_orphan, orphan_package]{txdownload_impl.ReceivedTx(peer, child)};
+        Assert(!should_validate_orphan);
+        Assert(!orphan_package);
+    } else {
+        Assert(child_todo.m_unique_parents.empty());
+        Assert(!txdownload_impl.m_orphanage->HaveTx(child->GetWitnessHash()));
+        Assert(txdownload_impl.RecentRejectsFilter().contains(child->GetHash().ToUint256()));
+        Assert(txdownload_impl.RecentRejectsFilter().contains(child->GetWitnessHash().ToUint256()));
+
+        const auto [should_validate_rejected, rejected_package]{txdownload_impl.ReceivedTx(peer, child)};
+        Assert(!should_validate_rejected);
+        Assert(!rejected_package);
+        txdownload_impl.ActiveTipChange();
+        const auto [should_validate_after_tip, package_after_tip]{txdownload_impl.ReceivedTx(peer, child)};
+        Assert(should_validate_after_tip);
+        Assert(!package_after_tip);
+    }
+
+    CheckInvariants(txdownload_impl);
+    txdownload_impl.DisconnectedPeer(peer);
+    txdownload_impl.CheckIsEmpty(peer);
+    txdownload_impl.CheckIsEmpty();
+}
+
+static void ExerciseKnownOrphanParent(CTxMemPool& pool, uint8_t selector)
+{
+    FastRandomContext det_rand{true};
+    node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{pool, det_rand, true}};
+    const NodeId peer{selector % NUM_PEERS};
+    const NodeId second_peer{(peer + 1) % NUM_PEERS};
+    txdownload_impl.ConnectedPeer(peer, {
+        .m_preferred = true,
+        .m_relay_permissions = HasRelayPermissions(peer),
+        .m_wtxid_relay = true,
+    });
+    txdownload_impl.ConnectedPeer(second_peer, {
+        .m_preferred = true,
+        .m_relay_permissions = HasRelayPermissions(second_peer),
+        .m_wtxid_relay = true,
+    });
+
+    const CTransactionRef parent{MakeTransactionSpending(
+        {COINS[NUM_COINS - 4]}, /*num_outputs=*/1, /*add_witness=*/static_cast<bool>(selector & 8))};
+    const CTransactionRef child{MakeTransactionSpending(
+        {COutPoint{parent->GetHash(), 0}}, /*num_outputs=*/1, /*add_witness=*/true)};
+    TxValidationState missing_inputs;
+    missing_inputs.Invalid(TxValidationResult::TX_MISSING_INPUTS, "");
+    const node::RejectedTxTodo child_todo{
+        txdownload_impl.MempoolRejectedTx(child, missing_inputs, peer, /*first_time_failure=*/true)};
+    Assert(child_todo.m_unique_parents == std::vector<Txid>{parent->GetHash()});
+    const auto orphans{txdownload_impl.GetOrphanTransactions()};
+    Assert(orphans.size() == 1);
+    Assert(orphans.front().tx->GetWitnessHash() == child->GetWitnessHash());
+    Assert(orphans.front().announcers == std::set<NodeId>{peer});
+
+    CBlock block;
+    block.vtx.push_back(parent);
+    txdownload_impl.BlockConnected(std::make_shared<CBlock>(block));
+    Assert(txdownload_impl.m_orphanage->HaveTx(child->GetWitnessHash()));
+    Assert(txdownload_impl.AddTxAnnouncement(
+        second_peer, child->GetWitnessHash(), std::chrono::microseconds{244466666}));
+    Assert(!txdownload_impl.m_orphanage->HaveTxFromPeer(child->GetWitnessHash(), second_peer));
+    Assert(txdownload_impl.m_txrequest.Count(second_peer) == 0);
+
+    CheckInvariants(txdownload_impl);
+    txdownload_impl.DisconnectedPeer(peer);
+    txdownload_impl.CheckIsEmpty(peer);
+    txdownload_impl.DisconnectedPeer(second_peer);
+    txdownload_impl.CheckIsEmpty(second_peer);
     txdownload_impl.CheckIsEmpty();
 }
 
@@ -378,6 +512,8 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
     ExercisePackageReconsideration(pool, buffer.empty() ? 0 : buffer.back());
+    ExerciseMultipleReconsiderableParents(pool, buffer.empty() ? 0 : buffer.front());
+    ExerciseKnownOrphanParent(pool, buffer.empty() ? 0 : buffer.back());
     FastRandomContext det_rand{true};
     node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{pool, det_rand, true}};
 

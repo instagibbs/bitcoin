@@ -77,6 +77,7 @@ add_executable(fuzz
   netbase_dns_lookup.cpp
   node_eviction.cpp
   overflow.cpp
+  p2p_compact_block.cpp
   p2p_handshake.cpp
   p2p_headers_presync.cpp
   p2p_private_broadcast.cpp

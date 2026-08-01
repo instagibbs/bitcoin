@@ -4800,8 +4800,12 @@ bool Chainstate::RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& in
 bool Chainstate::ReplayBlocks()
 {
     LOCK(cs_main);
+    return ReplayBlocks(CoinsDB());
+}
 
-    CCoinsView& db = this->CoinsDB();
+bool Chainstate::ReplayBlocks(CCoinsView& db)
+{
+    AssertLockHeld(cs_main);
     CCoinsViewCache cache(&db);
 
     std::vector<uint256> hashHeads = db.GetHeadBlocks();

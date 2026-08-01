@@ -868,6 +868,9 @@ protected:
 
     bool RollforwardBlock(const CBlockIndex* pindex, CCoinsViewCache& inputs) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Replay an interrupted coins database transition against the provided view. */
+    bool ReplayBlocks(CCoinsView& view) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     void CheckForkWarningConditions() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void InvalidChainFound(CBlockIndex* pindexNew) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 

@@ -7,12 +7,14 @@
 #include <consensus/tx_check.h>
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
+#include <dbwrapper.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
+#include <serialize.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -26,9 +28,11 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -36,6 +40,21 @@
 
 namespace {
 const Coin EMPTY_COIN{};
+const BasicTestingSetup* g_testing_setup{nullptr};
+
+constexpr uint8_t FUZZ_DB_COIN{'C'};
+constexpr uint8_t FUZZ_DB_BEST_BLOCK{'B'};
+constexpr uint8_t FUZZ_DB_HEAD_BLOCKS{'H'};
+
+struct ReplayCoinEntry {
+    COutPoint* outpoint;
+    uint8_t key{FUZZ_DB_COIN};
+    explicit ReplayCoinEntry(const COutPoint* ptr) : outpoint(const_cast<COutPoint*>(ptr)) {}
+
+    SERIALIZE_METHODS(ReplayCoinEntry, obj) { READWRITE(obj.key, obj.outpoint->hash, VARINT(obj.outpoint->n)); }
+};
+
+using CoinMap = std::map<COutPoint, Coin>;
 
 bool operator==(const Coin& a, const Coin& b)
 {
@@ -97,6 +116,102 @@ void StartPoolIfNeeded()
     if (!g_thread_pool->WorkersCount()) g_thread_pool->Start(DEFAULT_PREVOUTFETCH_THREADS);
 }
 
+std::vector<COutPoint> CollectDBCoins(CCoinsViewDB& db)
+{
+    const std::unique_ptr<CCoinsViewCursor> cursor{db.Cursor()};
+    assert(cursor);
+    assert(cursor->GetBestBlock() == db.GetBestBlock());
+
+    std::set<COutPoint> seen;
+    std::vector<COutPoint> outpoints;
+    while (cursor->Valid()) {
+        COutPoint outpoint;
+        Coin coin;
+        assert(cursor->GetKey(outpoint));
+        assert(cursor->GetValue(coin));
+        assert(!coin.IsSpent());
+        assert(seen.insert(outpoint).second);
+
+        const std::optional<Coin> from_get{db.GetCoin(outpoint)};
+        const std::optional<Coin> from_peek{db.PeekCoin(outpoint)};
+        assert(from_get && *from_get == coin);
+        assert(from_peek && *from_peek == coin);
+        assert(db.HaveCoin(outpoint));
+
+        COutPoint repeated_outpoint;
+        Coin repeated_coin;
+        assert(cursor->GetKey(repeated_outpoint));
+        assert(cursor->GetValue(repeated_coin));
+        assert(repeated_outpoint == outpoint);
+        assert(repeated_coin == coin);
+
+        outpoints.push_back(outpoint);
+        cursor->Next();
+    }
+    COutPoint outpoint;
+    assert(!cursor->GetKey(outpoint));
+    return outpoints;
+}
+
+void AssertDBState(CCoinsViewDB& db)
+{
+    assert(db.GetHeadBlocks().empty());
+    assert(!db.NeedsUpgrade());
+    assert(CollectDBCoins(db) == CollectDBCoins(db));
+}
+
+void AssertDBCoins(CCoinsViewDB& db, const CoinMap& expected)
+{
+    const std::vector<COutPoint> actual{CollectDBCoins(db)};
+    assert(actual.size() == expected.size());
+    for (const COutPoint& outpoint : actual) assert(expected.contains(outpoint));
+    for (const auto& [outpoint, coin] : expected) {
+        const std::optional<Coin> actual_coin{db.GetCoin(outpoint)};
+        assert(actual_coin && *actual_coin == coin);
+    }
+}
+
+void BatchWriteDBState(CCoinsViewDB& db, const CoinMap& state,
+                       const std::set<COutPoint>& outpoints, const uint256& block_hash)
+{
+    CoinsCachePair sentinel{};
+    sentinel.second.SelfRef(sentinel);
+    size_t dirty_count{0};
+    CCoinsMapMemoryResource resource;
+    CCoinsMap coins_map{0, SaltedCoinsCacheHasher{/*deterministic=*/true}, CCoinsMap::key_equal{}, &resource};
+    for (const COutPoint& outpoint : outpoints) {
+        CCoinsCacheEntry entry;
+        if (const auto it{state.find(outpoint)}; it != state.end()) entry.coin = it->second;
+        const auto [map_it, inserted]{coins_map.emplace(outpoint, std::move(entry))};
+        assert(inserted);
+        CCoinsCacheEntry::SetDirty(*map_it, sentinel);
+        ++dirty_count;
+    }
+    auto cursor{CoinsViewCacheCursor(dirty_count, sentinel, coins_map, /*will_erase=*/true)};
+    db.BatchWrite(cursor, block_hash);
+    assert(dirty_count == 0);
+}
+
+Coin ConsumeReplayCoin(FuzzedDataProvider& fuzzed_data_provider, uint8_t tag)
+{
+    const CAmount amount{fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(0, MAX_MONEY)};
+    const int height{fuzzed_data_provider.ConsumeIntegralInRange<int>(0, std::numeric_limits<int>::max())};
+    CScript script{CScript{} << static_cast<int64_t>(tag) << OP_DROP << OP_TRUE};
+    Coin coin{CTxOut{amount, std::move(script)}, height, fuzzed_data_provider.ConsumeBool()};
+    assert(!coin.IsSpent());
+    assert(!coin.out.scriptPubKey.IsUnspendable());
+    return coin;
+}
+
+Coin ModifiedReplayCoin(const Coin& coin)
+{
+    Coin modified{coin};
+    modified.out.scriptPubKey << OP_NOP;
+    assert(modified != coin);
+    assert(!modified.out.scriptPubKey.IsUnspendable());
+    return modified;
+}
+
 //! Build a random block and seed a view with utxos for its inputs.
 CBlock BuildRandomBlock(FuzzedDataProvider& fuzzed_data_provider, CCoinsView& view)
 {
@@ -136,6 +251,7 @@ CBlock BuildRandomBlock(FuzzedDataProvider& fuzzed_data_provider, CCoinsView& vi
 void initialize_coins_view()
 {
     static const auto testing_setup = MakeNoLogFileContext<>();
+    g_testing_setup = testing_setup.get();
 }
 
 void TestCoinsView(FuzzedDataProvider& fuzzed_data_provider, CCoinsViewCache& coins_view_cache, CCoinsView* backend_coins_view)
@@ -401,6 +517,8 @@ void TestCoinsView(FuzzedDataProvider& fuzzed_data_provider, CCoinsViewCache& co
             assert(!exists_using_have_coin_in_backend);
         }
     }
+
+    if (db) AssertDBState(*db);
 }
 
 FUZZ_TARGET(coins_view, .init = initialize_coins_view)
@@ -418,9 +536,116 @@ FUZZ_TARGET(coins_view_db, .init = initialize_coins_view)
         .cache_bytes = 1_MiB,
         .memory_only = true,
     };
-    CCoinsViewDB backend_coins_view{std::move(db_params), CoinsViewOptions{}};
+    CCoinsViewDB backend_coins_view{
+        std::move(db_params),
+        CoinsViewOptions{.batch_write_bytes = 0},
+    };
     CCoinsViewCache coins_view_cache{&backend_coins_view, /*deterministic=*/true};
     TestCoinsView(fuzzed_data_provider, coins_view_cache, &backend_coins_view);
+}
+
+FUZZ_TARGET(coins_view_db_replay, .init = initialize_coins_view)
+{
+    FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
+    assert(g_testing_setup);
+
+    uint256 old_tip{ConsumeUInt256(fuzzed_data_provider)};
+    if (old_tip.IsNull()) old_tip = uint256::ONE;
+    uint256 new_tip{ConsumeUInt256(fuzzed_data_provider)};
+    if (new_tip.IsNull() || new_tip == old_tip) {
+        new_tip = old_tip;
+        new_tip.begin()[0] ^= 0x80;
+        if (new_tip.IsNull()) new_tip = uint256::ONE;
+    }
+    assert(!new_tip.IsNull() && new_tip != old_tip);
+    const std::vector<uint256> heads{new_tip, old_tip};
+
+    CoinMap old_state;
+    CoinMap new_state;
+    std::set<COutPoint> all_outpoints;
+    std::vector<COutPoint> changed_outpoints;
+    const uint8_t count{fuzzed_data_provider.ConsumeIntegralInRange<uint8_t>(1, 16)};
+    const uint256 base_hash{ConsumeUInt256(fuzzed_data_provider)};
+    for (uint8_t index{0}; index < count; ++index) {
+        uint256 hash{base_hash};
+        hash.begin()[0] = index;
+        const COutPoint outpoint{
+            Txid::FromUint256(hash),
+            fuzzed_data_provider.ConsumeIntegral<uint32_t>(),
+        };
+        assert(all_outpoints.insert(outpoint).second);
+
+        uint8_t mode{fuzzed_data_provider.ConsumeIntegralInRange<uint8_t>(0, 3)};
+        if (index == 0 && mode == 2) mode = 3;
+        if (mode != 1) old_state.emplace(outpoint, ConsumeReplayCoin(fuzzed_data_provider, index));
+        if (mode == 1) {
+            new_state.emplace(outpoint, ConsumeReplayCoin(fuzzed_data_provider, index));
+        } else if (mode == 2) {
+            new_state.emplace(outpoint, old_state.at(outpoint));
+        } else if (mode == 3) {
+            new_state.emplace(outpoint, ModifiedReplayCoin(old_state.at(outpoint)));
+        }
+        if (mode != 2) changed_outpoints.push_back(outpoint);
+    }
+    assert(!changed_outpoints.empty());
+
+    const fs::path db_path{g_testing_setup->m_path_root / "coins_view_db_replay"};
+    const auto make_db_params{[&](bool wipe_data) {
+        return DBParams{
+            .path = db_path,
+            .cache_bytes = 1_MiB,
+            .wipe_data = wipe_data,
+        };
+    }};
+    const CoinsViewOptions options{.batch_write_bytes = 0};
+    {
+        CCoinsViewDB db{make_db_params(/*wipe_data=*/true), options};
+        std::set<COutPoint> old_outpoints;
+        for (const auto& [outpoint, _] : old_state) old_outpoints.insert(outpoint);
+        BatchWriteDBState(db, old_state, old_outpoints, old_tip);
+        assert(db.GetBestBlock() == old_tip);
+        assert(db.GetHeadBlocks().empty());
+        AssertDBCoins(db, old_state);
+    }
+
+    CoinMap partial_state{old_state};
+    const size_t partial_count{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(1, changed_outpoints.size())};
+    {
+        CDBWrapper raw_db{make_db_params(/*wipe_data=*/false)};
+        CDBBatch batch{raw_db};
+        batch.Erase(FUZZ_DB_BEST_BLOCK);
+        batch.Write(FUZZ_DB_HEAD_BLOCKS, heads);
+        for (size_t index{0}; index < partial_count; ++index) {
+            const COutPoint& outpoint{changed_outpoints[index]};
+            if (const auto it{new_state.find(outpoint)}; it == new_state.end()) {
+                batch.Erase(ReplayCoinEntry{&outpoint});
+                partial_state.erase(outpoint);
+            } else {
+                batch.Write(ReplayCoinEntry{&outpoint}, it->second);
+                partial_state.insert_or_assign(outpoint, it->second);
+            }
+        }
+        raw_db.WriteBatch(batch);
+    }
+
+    CCoinsViewDB db{make_db_params(/*wipe_data=*/false), options};
+    assert(db.GetBestBlock().IsNull());
+    assert(db.GetHeadBlocks() == heads);
+    AssertDBCoins(db, partial_state);
+
+    BatchWriteDBState(db, new_state, all_outpoints, new_tip);
+    assert(db.GetBestBlock() == new_tip);
+    AssertDBState(db);
+    AssertDBCoins(db, new_state);
+
+    {
+        LOCK(::cs_main);
+        db.ResizeCache(fuzzed_data_provider.ConsumeIntegralInRange<size_t>(64 << 10, 2_MiB));
+    }
+    assert(db.GetBestBlock() == new_tip);
+    AssertDBState(db);
+    AssertDBCoins(db, new_state);
+    assert(!db.GetDBProperty("not-a-leveldb-property"));
 }
 
 // Creates a CoinsViewOverlay and a MutationGuardCoinsViewCache as the base.
@@ -449,7 +674,10 @@ FUZZ_TARGET(coins_view_stacked, .init = initialize_coins_view)
         .cache_bytes = 1_MiB,
         .memory_only = true,
     };
-    CCoinsViewDB backend_base_coins_view{std::move(db_params), CoinsViewOptions{}};
+    CCoinsViewDB backend_base_coins_view{
+        std::move(db_params),
+        CoinsViewOptions{.batch_write_bytes = 0},
+    };
     CCoinsViewCache backend_cache{&backend_base_coins_view, /*deterministic=*/true};
     TestCoinsView(fuzzed_data_provider, backend_cache, &backend_base_coins_view);
     CoinsViewOverlay coins_view_cache{&backend_cache, g_thread_pool, /*deterministic=*/true};

@@ -34,6 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -52,6 +53,23 @@ public:
     void insert(std::function<void()> func) override { std::thread(std::move(func)).join(); }
     void flush() override {}
     size_t size() override { return 0; }
+};
+
+class FuzzedCompactBlock : public CBlockHeaderAndShortTxIDs
+{
+    using CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs;
+
+public:
+    void MakePrefilledIndexInvalid()
+    {
+        prefilledtxn.front().index = std::numeric_limits<uint16_t>::max();
+    }
+
+    void MakeShortIdCollision()
+    {
+        assert(!shorttxids.empty());
+        shorttxids.push_back(shorttxids.front());
+    }
 };
 
 struct CapturedMessages {
@@ -269,6 +287,40 @@ FUZZ_TARGET(p2p_compact_block, .init = ::initialize)
     connman.FlushSendBuffer(first);
 
     const CBlockHeaderAndShortTxIDs compact_block{*g_block, /*nonce=*/0};
+    auto malformed_compact_block = [&](uint8_t kind) {
+        assert(kind == 1 || kind == 2);
+        FuzzedCompactBlock malformed{*g_block, /*nonce=*/0};
+        if (kind == 1) {
+            malformed.MakePrefilledIndexInvalid();
+        } else {
+            malformed.MakeShortIdCollision();
+        }
+        return CBlockHeaderAndShortTxIDs{malformed};
+    };
+
+    const uint8_t first_preflight{fuzzed_data_provider.ConsumeIntegralInRange<uint8_t>(0, 2)};
+    if (first_preflight != 0) {
+        captured.Clear();
+        ProcessMessage(connman, first,
+                       NetMsg::Make(NetMsgType::CMPCTBLOCK, malformed_compact_block(first_preflight)));
+        if (first_preflight == 2) {
+            AssertFullBlockRequest(captured);
+            AssertInFlight(*peerman, first, true);
+        } else {
+            captured.AssertEmpty();
+            AssertInFlight(*peerman, first, false);
+        }
+        connman.FlushSendBuffer(first);
+
+        // FetchBlock replaces either the retained failed reconstruction or the
+        // removed invalid one with a clean full-block request.
+        captured.Clear();
+        assert(peerman->FetchBlock(first.GetId(), *g_block_index).has_value());
+        AssertFullBlockRequest(captured);
+        AssertInFlight(*peerman, first, true);
+        connman.FlushSendBuffer(first);
+    }
+
     auto announce = [&](CNode& peer, bool expect_request) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
         captured.Clear();
         ProcessMessage(connman, peer, NetMsg::Make(NetMsgType::CMPCTBLOCK, compact_block));
@@ -282,6 +334,17 @@ FUZZ_TARGET(p2p_compact_block, .init = ::initialize)
 
     announce(first, /*expect_request=*/true);
     AssertInFlight(*peerman, first, true);
+
+    const uint8_t second_preflight{fuzzed_data_provider.ConsumeIntegralInRange<uint8_t>(0, 2)};
+    if (second_preflight != 0) {
+        captured.Clear();
+        ProcessMessage(connman, second,
+                       NetMsg::Make(NetMsgType::CMPCTBLOCK, malformed_compact_block(second_preflight)));
+        captured.AssertEmpty();
+        AssertInFlight(*peerman, first, true);
+        AssertInFlight(*peerman, second, false);
+        connman.FlushSendBuffer(second);
+    }
     announce(second, /*expect_request=*/true);
     AssertInFlight(*peerman, second, true);
 
@@ -294,6 +357,19 @@ FUZZ_TARGET(p2p_compact_block, .init = ::initialize)
     CNode& parallel{first_is_outbound ? third_inbound : outbound};
     AssertInFlight(*peerman, spare, false);
     AssertInFlight(*peerman, parallel, true);
+
+    if (fuzzed_data_provider.ConsumeBool()) {
+        const uint8_t kind{fuzzed_data_provider.ConsumeBool() ? uint8_t{1} : uint8_t{2}};
+        captured.Clear();
+        ProcessMessage(connman, spare,
+                       NetMsg::Make(NetMsgType::CMPCTBLOCK, malformed_compact_block(kind)));
+        captured.AssertEmpty();
+        AssertInFlight(*peerman, first, true);
+        AssertInFlight(*peerman, second, true);
+        AssertInFlight(*peerman, parallel, true);
+        AssertInFlight(*peerman, spare, false);
+        connman.FlushSendBuffer(spare);
+    }
 
     // Repeated announcements must neither replace a live reconstruction nor
     // circumvent the reserved/final parallel slot.

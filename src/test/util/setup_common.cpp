@@ -26,6 +26,7 @@
 #include <net_processing.h>
 #include <netbase.h>
 #include <netgroup.h>
+#include <node/blockmanager_args.h>
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
 #include <node/context.h>
@@ -316,7 +317,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
             chainman_opts.script_execution_cache_bytes = 0;
             chainman_opts.signature_cache_bytes = 0;
         }
-        const BlockManager::Options blockman_opts{
+        BlockManager::Options blockman_opts{
             .chainparams = chainman_opts.chainparams,
             .blocks_dir = m_args.GetBlocksDirPath(),
             .notifications = chainman_opts.notifications,
@@ -327,6 +328,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
                 .wipe_data = m_args.GetBoolArg("-reindex", false),
             },
         };
+        Assert(node::ApplyArgsManOptions(*m_node.args, blockman_opts));
         m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
     };
     m_make_chainman();

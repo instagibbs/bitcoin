@@ -18,6 +18,7 @@ namespace {
 
 constexpr int MAX_TXHASHES = 16;
 constexpr int MAX_PEERS = 16;
+constexpr uint64_t PREFERRED_MASK{uint64_t{1} << 63};
 
 //! Randomly generated txhashes used in this test (length is MAX_TXHASHES).
 uint256 TXHASHES[MAX_TXHASHES];
@@ -192,12 +193,18 @@ public:
         // already, create a new CANDIDATE; otherwise do nothing.
         Announcement& ann = m_announcements[txhash][peer];
         if (ann.m_state == State::NOTHING) {
+            const uint64_t nonpreferred_priority{m_tracker.ComputePriority(TXHASHES[txhash], peer, /*preferred=*/false)};
+            const uint64_t preferred_priority{m_tracker.ComputePriority(TXHASHES[txhash], peer, /*preferred=*/true)};
+            assert((nonpreferred_priority & PREFERRED_MASK) == 0);
+            assert((preferred_priority & PREFERRED_MASK) != 0);
+            assert((preferred_priority & ~PREFERRED_MASK) == nonpreferred_priority);
+
             ann.m_preferred = preferred;
             ann.m_state = State::CANDIDATE;
             ann.m_time = reqtime;
             ann.m_is_wtxid = is_wtxid;
             ann.m_sequence = m_current_sequence++;
-            ann.m_priority = m_tracker.ComputePriority(TXHASHES[txhash], peer, ann.m_preferred);
+            ann.m_priority = ann.m_preferred ? preferred_priority : nonpreferred_priority;
 
             // Add event so that AdvanceToEvent can quickly jump to the point where its reqtime passes.
             if (reqtime > m_now) m_events.push(reqtime);
@@ -276,6 +283,7 @@ public:
         const auto actual = m_tracker.GetRequestable(peer, m_now, &expired);
         std::sort(expired.begin(), expired.end());
         assert(expired == expected_expired);
+        assert(m_tracker.GetRequestable(peer, m_now, /*expired=*/nullptr) == actual);
 
         m_tracker.PostGetRequestableSanityCheck(m_now);
         assert(result.size() == actual.size());
@@ -304,12 +312,17 @@ public:
                         expected_announcers[peer] = true;
                     }
                 }
-                std::vector<NodeId> candidate_peers;
+                constexpr NodeId SENTINEL{-1};
+                std::vector<NodeId> candidate_peers{SENTINEL};
                 m_tracker.GetCandidatePeers(TXHASHES[txhash], candidate_peers);
-                assert(expected_announcers.count() == candidate_peers.size());
-                for (const auto& peer : candidate_peers) {
-                    assert(expected_announcers[peer]);
+                assert(candidate_peers.front() == SENTINEL);
+                assert(expected_announcers.count() + 1 == candidate_peers.size());
+                std::bitset<MAX_PEERS> actual_announcers;
+                for (size_t pos = 1; pos < candidate_peers.size(); ++pos) {
+                    assert(candidate_peers[pos] >= 0 && candidate_peers[pos] < MAX_PEERS);
+                    actual_announcers[candidate_peers[pos]] = true;
                 }
+                assert(actual_announcers == expected_announcers);
             }
             assert(m_tracker.Count(peer) == tracked);
             assert(m_tracker.CountInFlight(peer) == inflight);

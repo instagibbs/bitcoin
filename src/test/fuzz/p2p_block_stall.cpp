@@ -4,6 +4,7 @@
 
 #include <addrman.h>
 #include <chain.h>
+#include <kernel/types.h>
 #include <net.h>
 #include <netmessagemaker.h>
 #include <net_processing.h>
@@ -40,6 +41,13 @@ constexpr size_t BLOCK_DOWNLOAD_WINDOW{1024};
 constexpr size_t MAX_BLOCKS_IN_TRANSIT_PER_PEER{16};
 constexpr auto BLOCK_STALLING_TIMEOUT_DEFAULT{2s};
 constexpr auto BLOCK_STALLING_TIMEOUT_MAX{64s};
+
+enum class BlockConnectedMode : uint8_t {
+    NONE,
+    ACTIVE,
+    HISTORICAL,
+    IBD,
+};
 
 constexpr std::array CONNECTION_TYPES{
     ConnectionType::INBOUND,
@@ -201,6 +209,10 @@ FUZZ_TARGET(p2p_block_stall, .init = ::initialize)
     const ConnectionType first_connection_type{PickValue(fuzzed_data_provider, CONNECTION_TYPES)};
     const size_t rounds{test_stalling_window ? fuzzed_data_provider.ConsumeIntegralInRange<size_t>(1, 6) : 1};
     const size_t peer_count{test_stalling_window ? rounds + 1 : fuzzed_data_provider.ConsumeIntegralInRange<size_t>(1, 4) + 1};
+    const BlockConnectedMode block_connected_mode{
+        test_stalling_window ?
+            static_cast<BlockConnectedMode>(fuzzed_data_provider.ConsumeIntegralInRange<uint8_t>(0, 3)) :
+            BlockConnectedMode::NONE};
 
     std::vector<CNode*> peers;
     std::vector<bool> finalized(peer_count, false);
@@ -250,6 +262,7 @@ FUZZ_TARGET(p2p_block_stall, .init = ::initialize)
 
     if (test_stalling_window) {
         auto stalling_timeout{BLOCK_STALLING_TIMEOUT_DEFAULT};
+        size_t block_connected_calls{0};
         for (size_t round{0}; round < rounds; ++round) {
             CNode& staller{*peers[round]};
             CNode& waiter{*peers[round + 1]};
@@ -288,7 +301,28 @@ FUZZ_TARGET(p2p_block_stall, .init = ::initialize)
             assert(staller.fDisconnect);
             assert(captured_getdata == 0);
             stalling_timeout = std::min(2 * stalling_timeout, BLOCK_STALLING_TIMEOUT_MAX);
+
+            if (block_connected_mode != BlockConnectedMode::NONE && round + 1 < rounds) {
+                kernel::ChainstateRole role;
+                role.historical = block_connected_mode == BlockConnectedMode::HISTORICAL;
+                assert(chainman.IsInitialBlockDownload());
+                if (block_connected_mode == BlockConnectedMode::ACTIVE) {
+                    chainman.JumpOutOfIbd();
+                }
+                ValidationInterfaceTest::BlockConnected(
+                    role, *peerman, g_blocks->front(), g_block_indexes.front());
+                ++block_connected_calls;
+                if (block_connected_mode == BlockConnectedMode::ACTIVE) {
+                    chainman.ResetIbd();
+                }
+                assert(chainman.IsInitialBlockDownload());
+                stalling_timeout = std::max(
+                    std::chrono::duration_cast<std::chrono::seconds>(stalling_timeout * 0.85),
+                    BLOCK_STALLING_TIMEOUT_DEFAULT);
+            }
         }
+        assert(block_connected_calls ==
+               (block_connected_mode == BlockConnectedMode::NONE ? 0 : rounds - 1));
 
         CNode& final_staller{*peers[rounds - 1]};
         CNode& final_waiter{*peers[rounds]};

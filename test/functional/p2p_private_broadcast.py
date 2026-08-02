@@ -70,16 +70,17 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
 
         def find_connection_type_in_debug_log(to_addr, to_port):
             """
-            Scan the debug log of tx_originator for a connection attempt to to_addr:to_port.
-            Return the connection type (outbound-full-relay, private-broadcast, etc) or
-            None if there is no connection attempt to to_addr:to_port.
+            Scan the debug log of tx_originator for connection attempts to to_addr:to_port.
+            Return the connection type of the most recent attempt (outbound-full-relay,
+            private-broadcast, etc) or None if there is none.
             """
+            conn_type = None
             with open(self.tx_originator_debug_log_path, mode="r", encoding="utf-8") as debug_log:
-                for line in debug_log.readlines():
+                for line in debug_log:
                     match = re.match(f".*trying v. connection \\((.+)\\) to \\[?{to_addr}]?:{to_port},.*", line)
                     if match:
-                        return match.group(1)
-            return None
+                        conn_type = match.group(1)
+            return conn_type
 
         def destinations_factory(requested_to_addr, requested_to_port):
             """

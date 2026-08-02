@@ -271,6 +271,7 @@ void utxo_snapshot_persistence_fuzz(FuzzBufferType buffer)
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
     FakeNodeClock clock{ConsumeTime(provider, /*min=*/1296688602)};
     const bool corrupt_background{provider.ConsumeBool()};
+    const size_t expected_snapshot_download_completed_calls{corrupt_background ? 0U : 1U};
     const size_t restart_height{
         provider.ConsumeIntegralInRange<size_t>(0, g_chain->size() - 1)};
 
@@ -288,6 +289,18 @@ void utxo_snapshot_persistence_fuzz(FuzzBufferType buffer)
     setup.m_node.notifications->m_shutdown_on_fatal_error = false;
     auto& chainman{*Assert(setup.m_node.chainman)};
     const auto& params{chainman.GetParams()};
+    size_t snapshot_download_completed_calls{0};
+    const auto install_snapshot_completion_callback = [&](ChainstateManager& manager) {
+        manager.snapshot_download_completed = [&, expected_manager = &manager] {
+            AssertLockNotHeld(::cs_main);
+            Assert(setup.m_node.chainman.get() == expected_manager);
+            Assert(++snapshot_download_completed_calls == 1);
+            Assert(WITH_LOCK(
+                expected_manager->GetMutex(),
+                return expected_manager->HistoricalChainstate()) == nullptr);
+        };
+    };
+    install_snapshot_completion_callback(chainman);
 
     for (const auto& block : *g_chain) {
         BlockValidationState state;
@@ -399,6 +412,7 @@ void utxo_snapshot_persistence_fuzz(FuzzBufferType buffer)
     };
 
     process_blocks(/*begin=*/0, restart_height);
+    Assert(snapshot_download_completed_calls == 0);
     restart();
     {
         auto& restarted{*Assert(setup.m_node.chainman)};
@@ -423,7 +437,9 @@ void utxo_snapshot_persistence_fuzz(FuzzBufferType buffer)
     Assert(!fs::exists(invalid_dir));
     Assert(!fs::exists(delete_dir));
 
+    install_snapshot_completion_callback(*Assert(setup.m_node.chainman));
     process_blocks(restart_height, g_chain->size());
+    Assert(snapshot_download_completed_calls == expected_snapshot_download_completed_calls);
     {
         auto& completed{*Assert(setup.m_node.chainman)};
         LOCK(completed.GetMutex());
@@ -494,6 +510,7 @@ void utxo_snapshot_persistence_fuzz(FuzzBufferType buffer)
     Assert(final_stats.hashBlock == metadata.m_base_blockhash);
     Assert((final_stats.hashSerialized == expected_stats.hashSerialized) !=
            corrupt_background);
+    Assert(snapshot_download_completed_calls == expected_snapshot_download_completed_calls);
     Assert(fs::exists(default_dir));
     Assert(!fs::exists(snapshot_dir));
     Assert(fs::exists(invalid_dir) == corrupt_background);

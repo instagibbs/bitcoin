@@ -349,6 +349,18 @@ FUZZ_TARGET(p2p_block_stall, .init = ::initialize)
         }
         AssertInFlight(GetStats(*peerman, target.GetId()), /*first_height=*/1, MAX_BLOCKS_IN_TRANSIT_PER_PEER);
 
+        // A header for the next unrequested block must not let direct fetch
+        // exceed this peer's in-flight limit or disturb existing ownership.
+        captured_getdata = 0;
+        ProcessMessage(
+            connman, target,
+            NetMsg::Make(
+                NetMsgType::HEADERS,
+                TX_WITH_WITNESS(std::vector<CBlock>{
+                    CBlock{g_block_indexes[MAX_BLOCKS_IN_TRANSIT_PER_PEER]->GetBlockHeader()}})));
+        assert(captured_getdata == 0);
+        AssertInFlight(GetStats(*peerman, target.GetId()), /*first_height=*/1, MAX_BLOCKS_IN_TRANSIT_PER_PEER);
+
         const auto download_timeout{10min + 5min * (downloading_peers - 1)};
         captured_getdata = 0;
         clock += download_timeout - 1s;

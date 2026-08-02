@@ -67,8 +67,7 @@ void sanity_check_snapshot()
     Assert(AssumeutxoHash{stats.hashSerialized} == cp_au_data.hash_serialized);
 }
 
-template <bool INVALID>
-void initialize_chain()
+void initialize_snapshot_chain()
 {
     const auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
     static const auto chain{CreateBlockChain(2 * COINBASE_MATURITY, *params)};
@@ -77,6 +76,12 @@ void initialize_chain()
 
     // Make sure we can generate a valid snapshot.
     sanity_check_snapshot();
+}
+
+template <bool INVALID>
+void initialize_chain()
+{
+    initialize_snapshot_chain();
 
     static const auto setup{
         MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST,
@@ -88,7 +93,7 @@ void initialize_chain()
     };
     if constexpr (INVALID) {
         auto& chainman{*setup->m_node.chainman};
-        for (const auto& block : chain) {
+        for (const auto& block : *g_chain) {
             BlockValidationState dummy;
             bool processed{chainman.ProcessNewBlockHeaders({{*block}}, true, dummy)};
             Assert(processed);

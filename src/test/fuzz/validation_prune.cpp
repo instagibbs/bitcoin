@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <ranges>
 #include <set>
 #include <string>
@@ -162,11 +163,15 @@ FUZZ_TARGET(validation_prune)
     assert(!blockman.m_have_pruned);
 
     std::vector<CBlockIndex*> indexes;
+    std::vector<CBlockIndex*> main_indexes;
     std::vector<CBlockIndex*> header_indexes;
     std::vector<CBlockIndex*> unlinked_indexes;
+    std::vector<CBlock> main_blocks;
     std::vector<FlatFilePos> block_positions;
     indexes.reserve(CHAIN_HEIGHT);
+    main_indexes.reserve(CHAIN_HEIGHT);
     header_indexes.reserve(headers_ahead + SIDE_BLOCK_HEIGHTS.size());
+    main_blocks.reserve(CHAIN_HEIGHT);
     block_positions.reserve(CHAIN_HEIGHT);
 
     CBlockIndex* previous{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
@@ -198,6 +203,8 @@ FUZZ_TARGET(validation_prune)
             assert(index->nStatus & BLOCK_HAVE_UNDO);
         }
         indexes.push_back(index);
+        main_indexes.push_back(index);
+        main_blocks.push_back(block);
         block_positions.push_back(block_position);
         previous = index;
 
@@ -496,5 +503,157 @@ FUZZ_TARGET(validation_prune)
         const bool pruned{expected_pruned.contains(file)};
         assert(fs::is_regular_file(before.block_path) == !pruned);
         assert(fs::is_regular_file(before.undo_path) == !pruned);
+    }
+
+    // Exercise the production redownload boundary after the physical prune.
+    // An unsolicited body for a previously processed block must be ignored,
+    // while a requested copy must restore the exact block without changing the
+    // active chain or UTXO view.
+    std::vector<size_t> pruned_main_blocks;
+    for (size_t i{0}; i < main_indexes.size(); ++i) {
+        if (expected_pruned.contains(before_indexes.at(main_indexes[i]).file)) {
+            pruned_main_blocks.push_back(i);
+        }
+    }
+    if (!pruned_main_blocks.empty()) {
+        const size_t selected_pos{pruned_main_blocks.at(
+            provider.ConsumeIntegralInRange<size_t>(0, pruned_main_blocks.size() - 1))};
+        const CBlock& block{main_blocks.at(selected_pos)};
+        CBlockIndex* const index{main_indexes.at(selected_pos)};
+        const auto block_ref{std::make_shared<const CBlock>(block)};
+
+        const uint32_t status_before{WITH_LOCK(
+            ::cs_main, return index->nStatus)};
+        const int32_t sequence_before{index->nSequenceId};
+        const uint64_t chain_tx_count_before{index->m_chain_tx_count};
+        const uint64_t usage_before{WITH_LOCK(
+            ::cs_main, return blockman.CalculateCurrentUsage())};
+        const size_t candidates_before{WITH_LOCK(
+            ::cs_main, return chainstate.setBlockIndexCandidates.size())};
+        const size_t unlinked_before{WITH_LOCK(
+            ::cs_main, return blockman.m_blocks_unlinked.size())};
+        const size_t index_size_before{WITH_LOCK(
+            ::cs_main, return chainman.BlockIndex().size())};
+        const uint256 coins_before{WITH_LOCK(
+            ::cs_main, return chainstate.CoinsTip().GetBestBlock())};
+        CBlockIndex* const tip_before{WITH_LOCK(
+            ::cs_main, return chainstate.m_chain.Tip())};
+        CBlockIndex* const best_header_before{WITH_LOCK(
+            ::cs_main, return chainman.m_best_header)};
+
+        BlockValidationState unsolicited_state;
+        CBlockIndex* unsolicited_index{nullptr};
+        bool unsolicited_new{true};
+        {
+            LOCK(::cs_main);
+            assert(blockman.IsBlockPruned(*index));
+            assert(index->nTx == block.vtx.size());
+            assert(index->HaveNumChainTxs());
+            assert(chainstate.m_chain.Contains(*index));
+            assert(index != tip_before);
+            assert(chainman.AcceptBlock(
+                block_ref,
+                unsolicited_state,
+                &unsolicited_index,
+                /*fRequested=*/false,
+                /*dbp=*/nullptr,
+                &unsolicited_new,
+                /*min_pow_checked=*/true));
+            assert(unsolicited_state.IsValid());
+            assert(unsolicited_index == index);
+            assert(!unsolicited_new);
+            assert(index->nStatus == status_before);
+            assert(index->nFile == 0);
+            assert(index->nDataPos == 0);
+            assert(index->nUndoPos == 0);
+            assert(index->nSequenceId == sequence_before);
+            assert(index->m_chain_tx_count == chain_tx_count_before);
+            assert(blockman.IsBlockPruned(*index));
+            assert(blockman.CalculateCurrentUsage() == usage_before);
+            assert(chainstate.setBlockIndexCandidates.size() == candidates_before);
+            assert(blockman.m_blocks_unlinked.size() == unlinked_before);
+            assert(chainman.BlockIndex().size() == index_size_before);
+            assert(chainstate.CoinsTip().GetBestBlock() == coins_before);
+            assert(chainstate.m_chain.Tip() == tip_before);
+            assert(chainman.m_best_header == best_header_before);
+        }
+
+        BlockValidationState requested_state;
+        CBlockIndex* requested_index{nullptr};
+        bool requested_new{false};
+        {
+            LOCK(::cs_main);
+            assert(chainman.AcceptBlock(
+                block_ref,
+                requested_state,
+                &requested_index,
+                /*fRequested=*/true,
+                /*dbp=*/nullptr,
+                &requested_new,
+                /*min_pow_checked=*/true));
+            assert(requested_state.IsValid());
+            assert(requested_index == index);
+            assert(requested_new);
+            assert(index->nStatus & BLOCK_HAVE_DATA);
+            assert(!(index->nStatus & BLOCK_HAVE_UNDO));
+            assert((index->nStatus & BLOCK_VALID_MASK) ==
+                   (status_before & BLOCK_VALID_MASK));
+            assert(index->nDataPos > 0);
+            assert(index->nUndoPos == 0);
+            assert(index->nTx == block.vtx.size());
+            assert(index->m_chain_tx_count == chain_tx_count_before);
+            assert(index->nSequenceId > sequence_before);
+            assert(!blockman.IsBlockPruned(*index));
+            assert(chainstate.m_chain.Contains(*index));
+            assert(!chainstate.setBlockIndexCandidates.contains(index));
+            assert(chainstate.setBlockIndexCandidates.size() == candidates_before);
+            assert(blockman.m_blocks_unlinked.size() == unlinked_before);
+            assert(chainman.BlockIndex().size() == index_size_before);
+            assert(chainstate.CoinsTip().GetBestBlock() == coins_before);
+            assert(chainstate.m_chain.Tip() == tip_before);
+            assert(chainman.m_best_header == best_header_before);
+
+            CBlock stored;
+            assert(blockman.ReadBlock(stored, *index));
+            assert(stored.GetHash() == block.GetHash());
+            assert(stored.vtx.size() == block.vtx.size());
+            for (size_t tx_pos{0}; tx_pos < block.vtx.size(); ++tx_pos) {
+                assert(*stored.vtx[tx_pos] == *block.vtx[tx_pos]);
+            }
+        }
+
+        const int file_after{WITH_LOCK(::cs_main, return index->nFile)};
+        const unsigned int data_pos_after{WITH_LOCK(
+            ::cs_main, return index->nDataPos)};
+        const int32_t sequence_after{index->nSequenceId};
+        const uint64_t usage_after_readmission{WITH_LOCK(
+            ::cs_main, return blockman.CalculateCurrentUsage())};
+        BlockValidationState duplicate_state;
+        CBlockIndex* duplicate_index{nullptr};
+        bool duplicate_new{true};
+        {
+            LOCK(::cs_main);
+            assert(chainman.AcceptBlock(
+                block_ref,
+                duplicate_state,
+                &duplicate_index,
+                /*fRequested=*/false,
+                /*dbp=*/nullptr,
+                &duplicate_new,
+                /*min_pow_checked=*/true));
+            assert(duplicate_state.IsValid());
+            assert(duplicate_index == index);
+            assert(!duplicate_new);
+            assert(index->nFile == file_after);
+            assert(index->nDataPos == data_pos_after);
+            assert(index->nSequenceId == sequence_after);
+            assert(blockman.CalculateCurrentUsage() == usage_after_readmission);
+            assert(chainstate.setBlockIndexCandidates.size() == candidates_before);
+            assert(blockman.m_blocks_unlinked.size() == unlinked_before);
+            assert(chainman.BlockIndex().size() == index_size_before);
+            assert(chainstate.CoinsTip().GetBestBlock() == coins_before);
+            assert(chainstate.m_chain.Tip() == tip_before);
+            assert(chainman.m_best_header == best_header_before);
+        }
     }
 }

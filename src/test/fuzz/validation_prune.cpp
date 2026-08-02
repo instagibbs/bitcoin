@@ -73,7 +73,15 @@ CBlock MakeBlock(FuzzedDataProvider& provider, const CBlockIndex& previous, int 
 
     const size_t padding{padded ? BlockPadding(provider, height)
                                 : provider.ConsumeIntegralInRange<size_t>(0, 16)};
-    const uint8_t fill{provider.ConsumeIntegral<uint8_t>()};
+    // Keep large padding useful for block-file boundary coverage without
+    // manufacturing a block that normal validation would reject for excessive
+    // legacy sigops. The fuzzed prefix still explores arbitrary script bytes.
+    const uint8_t fill{provider.PickValueInArray<uint8_t>({
+        0x00, // OP_0
+        0x61, // OP_NOP
+        0x6a, // OP_RETURN
+        0x75, // OP_DROP
+    })};
     std::vector<uint8_t> bytes(padding, fill);
     const size_t prefix_size{std::min<size_t>(padding, 16)};
     const std::vector<uint8_t> prefix{provider.ConsumeBytes<uint8_t>(prefix_size)};
@@ -90,6 +98,10 @@ CBlock MakeBlock(FuzzedDataProvider& provider, const CBlockIndex& previous, int 
     while (!CheckProofOfWork(block.GetHash(), block.nBits, Params().GetConsensus())) {
         ++block.nNonce;
     }
+    CBlock checked_block{block};
+    BlockValidationState checked_state;
+    assert(CheckBlock(checked_block, checked_state, Params().GetConsensus()));
+    assert(checked_state.IsValid());
     return block;
 }
 
@@ -247,11 +259,14 @@ FUZZ_TARGET(validation_prune)
     {
         LOCK(::cs_main);
         chainstate.m_chain.SetTip(*previous);
+        chainstate.setBlockIndexCandidates.clear();
+        chainstate.setBlockIndexCandidates.insert(previous);
         chainman.m_best_header = best_header;
         assert(chainstate.m_chain.Height() == CHAIN_HEIGHT);
         assert(best_header->nHeight == CHAIN_HEIGHT + headers_ahead);
         assert(best_header->GetAncestor(CHAIN_HEIGHT) == previous);
         assert(blockman.m_blocks_unlinked.size() == unlinked_indexes.size());
+        chainman.CheckBlockIndex();
     }
     if (automatic) assert(chainman.IsInitialBlockDownload());
 

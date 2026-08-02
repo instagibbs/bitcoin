@@ -9,9 +9,11 @@
 #include <consensus/validation.h>
 #include <kernel/coinstats.h>
 #include <node/blockstorage.h>
+#include <node/kernel_notifications.h>
 #include <node/utxo_snapshot.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
+#include <script/script.h>
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
@@ -262,7 +264,243 @@ void utxo_snapshot_fuzz(FuzzBufferType buffer)
     }
 }
 
-// There are two fuzz targets:
+/** Exercise on-disk snapshot validation and recovery across node restarts. */
+void utxo_snapshot_persistence_fuzz(FuzzBufferType buffer)
+{
+    SeedRandomStateForTest(SeedRand::ZEROS);
+    FuzzedDataProvider provider{buffer.data(), buffer.size()};
+    FakeNodeClock clock{ConsumeTime(provider, /*min=*/1296688602)};
+    const bool corrupt_background{provider.ConsumeBool()};
+    const size_t restart_height{
+        provider.ConsumeIntegralInRange<size_t>(0, g_chain->size() - 1)};
+
+    ChainTestingSetup setup{
+        ChainType::REGTEST,
+        TestOpts{
+            .block_tree_db_in_memory = false,
+            .setup_net = false,
+            .setup_validation_interface = false,
+            .min_validation_cache = true,
+        },
+    };
+    setup.m_coins_db_in_memory = false;
+    setup.LoadVerifyActivateChainstate();
+    setup.m_node.notifications->m_shutdown_on_fatal_error = false;
+    auto& chainman{*Assert(setup.m_node.chainman)};
+    const auto& params{chainman.GetParams()};
+
+    for (const auto& block : *g_chain) {
+        BlockValidationState state;
+        const CBlockIndex* accepted{nullptr};
+        Assert(chainman.ProcessNewBlockHeaders(
+            {{*block}}, /*min_pow_checked=*/true, state, &accepted));
+        Assert(state.IsValid());
+        Assert(accepted);
+        Assert(accepted->GetBlockHash() == block->GetHash());
+    }
+
+    const fs::path snapshot_file{setup.m_args.GetDataDirNet() / "persistent_snapshot.dat"};
+    const SnapshotMetadata metadata{
+        params.MessageStart(), g_chain->back()->GetHash(), g_chain->size()};
+    {
+        AutoFile outfile{fsbridge::fopen(snapshot_file, "wb")};
+        Assert(!outfile.IsNull());
+        outfile << metadata;
+        int height{1};
+        for (const auto& block : *g_chain) {
+            const CTransactionRef& coinbase{block->vtx.front()};
+            outfile << coinbase->GetHash();
+            WriteCompactSize(outfile, 1);
+            WriteCompactSize(outfile, 0);
+            outfile << Coin{coinbase->vout.front(), height++, /*fCoinBaseIn=*/true};
+        }
+        Assert(outfile.fclose() == 0);
+    }
+    {
+        AutoFile infile{fsbridge::fopen(snapshot_file, "rb")};
+        Assert(!infile.IsNull());
+        SnapshotMetadata loaded{params.MessageStart()};
+        infile >> loaded;
+        Assert(loaded.m_base_blockhash == metadata.m_base_blockhash);
+        Assert(loaded.m_coins_count == metadata.m_coins_count);
+        Assert(chainman.ActivateSnapshot(infile, loaded, /*in_memory=*/false));
+        Assert(infile.fclose() == 0);
+    }
+
+    const fs::path default_dir{setup.m_args.GetDataDirNet() / "chainstate"};
+    const fs::path snapshot_dir{setup.m_args.GetDataDirNet() / "chainstate_snapshot"};
+    const fs::path invalid_dir{setup.m_args.GetDataDirNet() / "chainstate_snapshot_INVALID"};
+    const fs::path delete_dir{setup.m_args.GetDataDirNet() / "chainstate_todelete"};
+    Assert(fs::exists(default_dir));
+    Assert(fs::exists(snapshot_dir));
+    Assert(!fs::exists(invalid_dir));
+    Assert(!fs::exists(delete_dir));
+
+    kernel::CCoinsStats expected_stats;
+    {
+        LOCK(chainman.GetMutex());
+        Chainstate& snapshot{chainman.ActiveChainstate()};
+        Assert(chainman.m_chainstates.size() == 2);
+        Assert(snapshot.m_from_snapshot_blockhash == metadata.m_base_blockhash);
+        Assert(snapshot.m_assumeutxo == Assumeutxo::UNVALIDATED);
+        Assert(chainman.ActiveHeight() == static_cast<int>(g_chain->size()));
+        Assert(chainman.ActiveTip()->GetBlockHash() == metadata.m_base_blockhash);
+        Assert(Assert(chainman.HistoricalChainstate())->m_chain.Height() == 0);
+        snapshot.ForceFlushStateToDisk(/*wipe_cache=*/false);
+        expected_stats = *Assert(kernel::ComputeUTXOStats(
+            kernel::CoinStatsHashType::HASH_SERIALIZED,
+            snapshot.CoinsDB(),
+            chainman.m_blockman));
+    }
+    const auto assumeutxo_data{
+        *Assert(params.AssumeutxoForHeight(g_chain->size()))};
+    Assert(AssumeutxoHash{expected_stats.hashSerialized} == assumeutxo_data.hash_serialized);
+    Assert(expected_stats.coins_count == g_chain->size());
+    Assert(expected_stats.nHeight == static_cast<int>(g_chain->size()));
+    Assert(expected_stats.hashBlock == metadata.m_base_blockhash);
+
+    const COutPoint corruption_outpoint{Txid::FromUint256(uint256::ONE), 0};
+    if (corrupt_background) {
+        LOCK(chainman.GetMutex());
+        Chainstate& background{*Assert(chainman.HistoricalChainstate())};
+        Assert(background.CoinsTip().AccessCoin(corruption_outpoint).IsSpent());
+        background.CoinsTip().AddCoin(
+            corruption_outpoint,
+            Coin{CTxOut{COIN, CScript{} << OP_TRUE}, /*height=*/1, /*coinbase=*/false},
+            /*possible_overwrite=*/false);
+    }
+
+    const auto process_blocks = [&](size_t begin, size_t end) {
+        auto& current_chainman{*Assert(setup.m_node.chainman)};
+        for (size_t index{begin}; index < end; ++index) {
+            bool new_block{false};
+            Assert(current_chainman.ProcessNewBlock(
+                (*g_chain)[index],
+                /*force_processing=*/true,
+                /*min_pow_checked=*/true,
+                &new_block));
+            Assert(new_block);
+        }
+    };
+    const auto restart = [&] {
+        auto& old_chainman{*Assert(setup.m_node.chainman)};
+        {
+            LOCK(old_chainman.GetMutex());
+            for (const auto& chainstate : old_chainman.m_chainstates) {
+                if (chainstate->CanFlushToDisk()) {
+                    chainstate->ForceFlushStateToDisk(/*wipe_cache=*/false);
+                }
+            }
+        }
+        setup.m_node.chainman.reset();
+        setup.m_make_chainman();
+        setup.LoadVerifyActivateChainstate();
+        Assert(setup.m_node.chainman);
+    };
+
+    process_blocks(/*begin=*/0, restart_height);
+    restart();
+    {
+        auto& restarted{*Assert(setup.m_node.chainman)};
+        LOCK(restarted.GetMutex());
+        Assert(restarted.m_chainstates.size() == 2);
+        Assert(restarted.ActiveHeight() == static_cast<int>(g_chain->size()));
+        Assert(restarted.ActiveTip()->GetBlockHash() == metadata.m_base_blockhash);
+        Assert(restarted.CurrentChainstate().m_assumeutxo == Assumeutxo::UNVALIDATED);
+        Assert(restarted.CurrentChainstate().m_from_snapshot_blockhash ==
+               metadata.m_base_blockhash);
+        Chainstate& background{*Assert(restarted.HistoricalChainstate())};
+        Assert(background.m_chain.Height() == static_cast<int>(restart_height));
+        Assert(background.CoinsTip().GetBestBlock() ==
+               (restart_height == 0
+                    ? params.GetConsensus().hashGenesisBlock
+                    : (*g_chain)[restart_height - 1]->GetHash()));
+        Assert(background.CoinsTip().AccessCoin(corruption_outpoint).IsSpent() !=
+               corrupt_background);
+    }
+    Assert(fs::exists(default_dir));
+    Assert(fs::exists(snapshot_dir));
+    Assert(!fs::exists(invalid_dir));
+    Assert(!fs::exists(delete_dir));
+
+    process_blocks(restart_height, g_chain->size());
+    {
+        auto& completed{*Assert(setup.m_node.chainman)};
+        LOCK(completed.GetMutex());
+        Assert(completed.m_chainstates.size() == 2);
+        Assert(completed.ActiveHeight() == static_cast<int>(g_chain->size()));
+        Assert(completed.ActiveTip()->GetBlockHash() == metadata.m_base_blockhash);
+        Assert(!completed.HistoricalChainstate());
+        if (corrupt_background) {
+            Assert(!completed.CurrentChainstate().m_from_snapshot_blockhash);
+            bool found_invalid{false};
+            for (const auto& chainstate : completed.m_chainstates) {
+                if (chainstate->m_from_snapshot_blockhash) {
+                    Assert(chainstate->m_assumeutxo == Assumeutxo::INVALID);
+                    found_invalid = true;
+                }
+            }
+            Assert(found_invalid);
+        } else {
+            Assert(completed.CurrentChainstate().m_from_snapshot_blockhash ==
+                   metadata.m_base_blockhash);
+            Assert(completed.CurrentChainstate().m_assumeutxo == Assumeutxo::VALIDATED);
+        }
+    }
+    Assert(fs::exists(default_dir));
+    Assert(fs::exists(snapshot_dir) != corrupt_background);
+    Assert(fs::exists(invalid_dir) == corrupt_background);
+
+    restart();
+    auto& final_chainman{*Assert(setup.m_node.chainman)};
+    kernel::CCoinsStats final_stats;
+    {
+        LOCK(final_chainman.GetMutex());
+        Chainstate& final_chainstate{final_chainman.ActiveChainstate()};
+        Assert(final_chainman.m_chainstates.size() == 1);
+        Assert(!final_chainstate.m_from_snapshot_blockhash);
+        Assert(final_chainstate.m_assumeutxo == Assumeutxo::VALIDATED);
+        Assert(final_chainman.ActiveHeight() == static_cast<int>(g_chain->size()));
+        Assert(final_chainman.ActiveTip()->GetBlockHash() == metadata.m_base_blockhash);
+        Assert(final_chainstate.CoinsTip().GetBestBlock() == metadata.m_base_blockhash);
+        Assert(!final_chainman.HistoricalChainstate());
+        for (size_t index{0}; index < g_chain->size(); ++index) {
+            const CTransactionRef& coinbase{(*g_chain)[index]->vtx.front()};
+            const Coin& coin{final_chainstate.CoinsTip().AccessCoin(
+                COutPoint{coinbase->GetHash(), 0})};
+            Assert(!coin.IsSpent());
+            Assert(coin.IsCoinBase());
+            Assert(coin.nHeight == static_cast<int>(index + 1));
+            Assert(coin.out == coinbase->vout.front());
+        }
+        Assert(final_chainstate.CoinsTip().AccessCoin(corruption_outpoint).IsSpent() !=
+               corrupt_background);
+        final_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
+        final_stats = *Assert(kernel::ComputeUTXOStats(
+            kernel::CoinStatsHashType::HASH_SERIALIZED,
+            final_chainstate.CoinsDB(),
+            final_chainman.m_blockman));
+        Assert(final_chainman.BlockIndex().size() == g_chain->size() + 1);
+        final_chainman.CheckBlockIndex();
+    }
+    CAmount expected_supply{0};
+    for (int height{1}; height <= static_cast<int>(g_chain->size()); ++height) {
+        expected_supply += GetBlockSubsidy(height, params.GetConsensus());
+    }
+    Assert(*Assert(final_stats.total_amount) ==
+           expected_supply + (corrupt_background ? COIN : 0));
+    Assert(final_stats.coins_count == g_chain->size() + corrupt_background);
+    Assert(final_stats.nHeight == static_cast<int>(g_chain->size()));
+    Assert(final_stats.hashBlock == metadata.m_base_blockhash);
+    Assert((final_stats.hashSerialized == expected_stats.hashSerialized) !=
+           corrupt_background);
+    Assert(fs::exists(default_dir));
+    Assert(!fs::exists(snapshot_dir));
+    Assert(fs::exists(invalid_dir) == corrupt_background);
+    Assert(!fs::exists(delete_dir));
+}
+
+// There are three fuzz targets:
 //
 // The target 'utxo_snapshot', which allows valid snapshots, but is slow,
 // because it has to reset the chainstate manager on almost all fuzz inputs.
@@ -271,7 +509,11 @@ void utxo_snapshot_fuzz(FuzzBufferType buffer)
 //
 // The target 'utxo_snapshot_invalid', which is fast and does not require any
 // expensive state to be reset.
+//
+// The target 'utxo_snapshot_persistence', which exercises valid and corrupted
+// background validation across partial syncs and on-disk restarts.
 FUZZ_TARGET(utxo_snapshot /*valid*/, .init = initialize_chain<false>) { utxo_snapshot_fuzz<false>(buffer); }
 FUZZ_TARGET(utxo_snapshot_invalid, .init = initialize_chain<true>) { utxo_snapshot_fuzz<true>(buffer); }
+FUZZ_TARGET(utxo_snapshot_persistence, .init = initialize_snapshot_chain) { utxo_snapshot_persistence_fuzz(buffer); }
 
 } // namespace

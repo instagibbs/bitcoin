@@ -138,6 +138,7 @@ add_executable(fuzz
   txrequest.cpp
   utxo_snapshot.cpp
   utxo_total_supply.cpp
+  validation_flush.cpp
   validation_load_mempool.cpp
   vecdeque.cpp
   versionbits.cpp

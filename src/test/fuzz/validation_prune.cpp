@@ -114,14 +114,28 @@ FUZZ_TARGET(validation_prune)
     SeedRandomStateForTest(SeedRand::ZEROS);
     FuzzedDataProvider provider{buffer.data(), buffer.size()};
 
+    const bool automatic{provider.ConsumeBool()};
     const int manual_height{provider.ConsumeIntegralInRange<int>(1, CHAIN_HEIGHT)};
     const bool use_prune_lock{provider.ConsumeBool()};
     const bool unbounded_prune_lock{provider.ConsumeBool()};
     const int prune_lock_height{provider.ConsumeIntegralInRange<int>(1, CHAIN_HEIGHT + 50)};
+    const unsigned int closed_block_accounting{automatic
+            ? provider.ConsumeIntegralInRange<unsigned int>(32_MiB, node::MAX_BLOCKFILE_SIZE)
+            : 0};
+    const unsigned int closed_undo_accounting{automatic
+            ? provider.ConsumeIntegralInRange<unsigned int>(1_MiB, 8_MiB)
+            : 0};
+    const int headers_ahead{automatic
+            ? provider.ConsumeIntegralInRange<int>(0, 32)
+            : 0};
     FakeNodeClock clock{std::chrono::seconds{1'700'000'000}};
 
     TestOpts opts;
-    opts.extra_args = {"-fastprune=1", "-maxmempool=0", "-prune=1"};
+    opts.extra_args = {
+        "-fastprune=1",
+        "-maxmempool=0",
+        automatic ? "-prune=550" : "-prune=1",
+    };
     opts.min_validation_cache = true;
     opts.setup_net = false;
     opts.setup_validation_interface = false;
@@ -130,13 +144,17 @@ FUZZ_TARGET(validation_prune)
     auto& chainstate{chainman.ActiveChainstate()};
     auto& blockman{chainman.m_blockman};
     assert(blockman.IsPruneMode());
-    assert(blockman.GetPruneTarget() == node::BlockManager::PRUNE_TARGET_MANUAL);
+    assert(blockman.GetPruneTarget() == (automatic
+            ? MIN_DISK_SPACE_FOR_BLOCK_FILES
+            : node::BlockManager::PRUNE_TARGET_MANUAL));
     assert(!blockman.m_have_pruned);
 
     std::vector<CBlockIndex*> indexes;
+    std::vector<CBlockIndex*> header_indexes;
     std::vector<CBlockIndex*> unlinked_indexes;
     std::vector<FlatFilePos> block_positions;
     indexes.reserve(CHAIN_HEIGHT);
+    header_indexes.reserve(headers_ahead + SIDE_BLOCK_HEIGHTS.size());
     block_positions.reserve(CHAIN_HEIGHT);
 
     CBlockIndex* previous{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
@@ -184,6 +202,7 @@ FUZZ_TARGET(validation_prune)
                 assert(side_parent->nTx == 0);
                 assert(!(side_parent->nStatus & BLOCK_HAVE_DATA));
             }
+            header_indexes.push_back(side_parent);
 
             for (const uint8_t branch_id : {uint8_t{2}, uint8_t{3}}) {
                 const CBlock side_block{MakeBlock(
@@ -212,14 +231,29 @@ FUZZ_TARGET(validation_prune)
         }
     }
 
+    for (int offset{1}; offset <= headers_ahead; ++offset) {
+        const CBlock header{MakeBlock(
+            provider, *best_header, CHAIN_HEIGHT + offset, /*padded=*/false, /*branch_id=*/4)};
+        LOCK(::cs_main);
+        CBlockIndex* const index{blockman.AddToBlockIndex(header, best_header)};
+        assert(index && index == best_header);
+        assert(index->nHeight == CHAIN_HEIGHT + offset);
+        assert(index->nTx == 0);
+        assert(index->nFile == 0);
+        assert(!(index->nStatus & (BLOCK_HAVE_DATA | BLOCK_HAVE_UNDO)));
+        header_indexes.push_back(index);
+    }
+
     {
         LOCK(::cs_main);
         chainstate.m_chain.SetTip(*previous);
         chainman.m_best_header = best_header;
         assert(chainstate.m_chain.Height() == CHAIN_HEIGHT);
-        assert(best_header == previous);
+        assert(best_header->nHeight == CHAIN_HEIGHT + headers_ahead);
+        assert(best_header->GetAncestor(CHAIN_HEIGHT) == previous);
         assert(blockman.m_blocks_unlinked.size() == unlinked_indexes.size());
     }
+    if (automatic) assert(chainman.IsInitialBlockDownload());
 
     if (use_prune_lock) {
         LOCK(::cs_main);
@@ -255,8 +289,25 @@ FUZZ_TARGET(validation_prune)
                 file_it->second.undo_index = index;
             }
         }
+        for (CBlockIndex* const index : header_indexes) {
+            before_indexes.emplace(index, IndexState{
+                .status = index->nStatus,
+                .file = index->nFile,
+                .data_pos = index->nDataPos,
+                .undo_pos = index->nUndoPos,
+            });
+        }
+        assert(before_indexes.size() == indexes.size() + header_indexes.size());
         assert(max_file > 0);
         for (auto& [file, state] : before_files) {
+            if (automatic && file < max_file) {
+                // Reach the production automatic-pruning threshold without allocating
+                // hundreds of MiB. Only accounting for already-closed files is scaled;
+                // serialized records and the live file cursor remain untouched.
+                auto& info{*Assert(blockman.GetBlockFileInfo(file))};
+                info.nSize = std::max(info.nSize, closed_block_accounting);
+                info.nUndoSize = std::max(info.nUndoSize, closed_undo_accounting);
+            }
             state.info = *Assert(blockman.GetBlockFileInfo(file));
             state.block_path = blockman.GetBlockPosFilename(FlatFilePos{file, 0});
             state.undo_path = state.block_path.parent_path();
@@ -268,6 +319,8 @@ FUZZ_TARGET(validation_prune)
             assert(fs::is_regular_file(state.undo_path));
             expected_usage += state.info.nSize + state.info.nUndoSize;
         }
+        assert(before_files.size() == static_cast<size_t>(max_file + 1));
+        for (int file{0}; file <= max_file; ++file) assert(before_files.contains(file));
         assert(blockman.CalculateCurrentUsage() == expected_usage);
     }
 
@@ -276,27 +329,43 @@ FUZZ_TARGET(validation_prune)
         const int lock_height{prune_lock_height - PRUNE_LOCK_BUFFER - 1};
         last_prune = std::max(1, std::min(last_prune, lock_height));
     }
+    const int requested_height{automatic ? CHAIN_HEIGHT : manual_height};
     const int prune_limit{std::min({
-        manual_height,
+        requested_height,
         last_prune,
         CHAIN_HEIGHT - static_cast<int>(MIN_BLOCKS_TO_KEEP),
     })};
+    const uint64_t base_automatic_buffer{
+        node::BLOCKFILE_CHUNK_SIZE + node::UNDOFILE_CHUNK_SIZE};
+    const uint64_t prune_target{blockman.GetPruneTarget()};
+    const bool automatic_scan{!automatic ||
+        expected_usage + base_automatic_buffer >= prune_target};
+    const uint64_t automatic_buffer{base_automatic_buffer +
+        (automatic_scan ? static_cast<uint64_t>(headers_ahead) * 1'000'000 : 0)};
     std::set<int> expected_pruned;
-    for (const auto& [file, state] : before_files) {
-        if (file < max_file && state.info.nHeightLast <= static_cast<unsigned int>(prune_limit)) {
-            expected_pruned.insert(file);
-            expected_usage -= state.info.nSize + state.info.nUndoSize;
+    if (automatic_scan) {
+        for (const auto& [file, state] : before_files) {
+            if (file >= max_file) continue;
+            if (automatic && expected_usage + automatic_buffer < prune_target) break;
+            if (state.info.nHeightLast <= static_cast<unsigned int>(prune_limit)) {
+                expected_pruned.insert(file);
+                expected_usage -= state.info.nSize + state.info.nUndoSize;
+            }
         }
     }
     const uint256 expected_coins_db_best{
         expected_pruned.empty() ? coins_db_best : coins_best};
 
-    PruneBlockFilesManual(chainstate, manual_height);
+    if (automatic) {
+        chainstate.PruneAndFlush();
+    } else {
+        PruneBlockFilesManual(chainstate, manual_height);
+    }
 
     {
         LOCK(::cs_main);
         assert(chainstate.m_chain.Tip() == previous);
-        assert(chainman.m_best_header == previous);
+        assert(chainman.m_best_header == best_header);
         assert(chainstate.CoinsTip().GetBestBlock() == coins_best);
         assert(chainstate.CoinsDB().GetBestBlock() == expected_coins_db_best);
         assert(chainstate.CoinsDB().GetHeadBlocks().empty());
@@ -310,7 +379,8 @@ FUZZ_TARGET(validation_prune)
         }
 
         for (const auto& [index, before] : before_indexes) {
-            const bool pruned{expected_pruned.contains(before.file)};
+            const bool pruned{(before.status & BLOCK_HAVE_DATA) &&
+                expected_pruned.contains(before.file)};
             if (pruned) {
                 assert(!(index->nStatus & BLOCK_HAVE_DATA));
                 assert(!(index->nStatus & BLOCK_HAVE_UNDO));
@@ -365,10 +435,51 @@ FUZZ_TARGET(validation_prune)
         assert(!fs::exists(before_files.at(file).undo_path));
     }
 
-    // Repeating a lower request cannot prune another file or perturb persisted state.
+    // Repeating the same automatic check, or a lower manual request, cannot prune
+    // another file or perturb any in-memory, persisted, or physical state.
     const uint64_t usage_after{WITH_LOCK(::cs_main, return blockman.CalculateCurrentUsage())};
-    PruneBlockFilesManual(chainstate, 1);
-    assert(WITH_LOCK(::cs_main, return blockman.CalculateCurrentUsage()) == usage_after);
-    assert(WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetBestBlock()) == coins_best);
-    assert(WITH_LOCK(::cs_main, return chainstate.CoinsDB().GetBestBlock()) == expected_coins_db_best);
+    if (automatic) {
+        BlockValidationState state;
+        assert(chainstate.FlushStateToDisk(state, FlushStateMode::NONE));
+        assert(state.IsValid());
+    } else {
+        PruneBlockFilesManual(chainstate, 1);
+    }
+    {
+        LOCK(::cs_main);
+        assert(blockman.CalculateCurrentUsage() == usage_after);
+        assert(chainstate.m_chain.Tip() == previous);
+        assert(chainman.m_best_header == best_header);
+        assert(chainstate.CoinsTip().GetBestBlock() == coins_best);
+        assert(chainstate.CoinsDB().GetBestBlock() == expected_coins_db_best);
+        assert(chainstate.CoinsDB().GetHeadBlocks().empty());
+        assert(blockman.m_have_pruned == !expected_pruned.empty());
+
+        for (const auto& [index, before] : before_indexes) {
+            const bool pruned{(before.status & BLOCK_HAVE_DATA) &&
+                expected_pruned.contains(before.file)};
+            if (pruned) {
+                assert(!(index->nStatus & BLOCK_HAVE_DATA));
+                assert(!(index->nStatus & BLOCK_HAVE_UNDO));
+                assert(index->nFile == 0);
+                assert(index->nDataPos == 0);
+                assert(index->nUndoPos == 0);
+            } else {
+                assert(index->nStatus == before.status);
+                assert(index->nFile == before.file);
+                assert(index->nDataPos == before.data_pos);
+                assert(index->nUndoPos == before.undo_pos);
+            }
+        }
+        for (const auto& [file, before] : before_files) {
+            const bool pruned{expected_pruned.contains(file)};
+            const kernel::CBlockFileInfo& after{*Assert(blockman.GetBlockFileInfo(file))};
+            assert(SameFileInfo(after, pruned ? kernel::CBlockFileInfo{} : before.info));
+        }
+    }
+    for (const auto& [file, before] : before_files) {
+        const bool pruned{expected_pruned.contains(file)};
+        assert(fs::is_regular_file(before.block_path) == !pruned);
+        assert(fs::is_regular_file(before.undo_path) == !pruned);
+    }
 }

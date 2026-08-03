@@ -104,6 +104,7 @@ class Socks5Configuration():
         # and it decides where the connection is redirected to. It is passed:
         # - the address the client requested to connect to
         # - the port the client requested to connect to
+        # - the client's socket address as seen by the proxy, formatted as host:port
         # It is supposed to return an object like:
         # {
         #     "actual_to_addr": "127.0.0.1"
@@ -202,10 +203,11 @@ class Socks5Connection():
 
             requested_to_addr = addr.decode("utf-8")
             requested_to = format_addr_port(requested_to_addr, port)
+            proxy_client = format_sock(self.conn, local=False)
 
             if self.serv.is_running():
                 if self.serv.conf.destinations_factory is not None:
-                    dest = self.serv.conf.destinations_factory(requested_to_addr, port)
+                    dest = self.serv.conf.destinations_factory(requested_to_addr, port, proxy_client)
                     if dest is not None:
                         logger.debug(f"Serving connection to {requested_to}, will redirect it to "
                                     f"{dest['actual_to_addr']}:{dest['actual_to_port']} instead")

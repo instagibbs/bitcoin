@@ -238,6 +238,12 @@ FUZZ_TARGET(wallet_fund_transaction, .init = initialize_setup)
         } else {
             const COutPoint outpoint{Txid::FromUint256(ConsumeUInt256(fuzzed_data_provider)), fuzzed_data_provider.ConsumeIntegral<uint32_t>()};
             if (outpoint.IsNull() || wallet_coins.contains(outpoint)) return;
+            // Chain lookups cannot supply a different transaction for a txid
+            // that is already present in the wallet.
+            if (WITH_LOCK(fuzzed_wallet.wallet->cs_wallet,
+                    return fuzzed_wallet.wallet->mapWallet.contains(outpoint.hash))) {
+                return;
+            }
             CAmount value{ConsumeMoney(fuzzed_data_provider)};
             all_values += value;
             if (all_values > MAX_MONEY) return;
@@ -284,6 +290,7 @@ FUZZ_TARGET(wallet_fund_transaction, .init = initialize_setup)
     assert(result->tx->nLockTime == tx.nLockTime);
     assert(result->tx->vin.size() >= tx.vin.size());
     assert(MoneyRange(result->fee));
+    assert(result->fee <= fuzzed_wallet.wallet->m_default_max_tx_fee);
     assert(!result->change_pos || *result->change_pos < result->tx->vout.size());
     for (size_t input_index{0}; input_index < tx.vin.size(); ++input_index) {
         assert(result->tx->vin[input_index].prevout == tx.vin[input_index].prevout);

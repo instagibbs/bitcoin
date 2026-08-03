@@ -112,10 +112,12 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
         LOCK(NetEventsInterface::g_msgproc_mutex);
 
         std::vector<CNode*> peers;
+        std::vector<NodeId> peer_ids;
         const auto num_peers_to_add = fuzzed_data_provider.ConsumeIntegralInRange(1, 3);
         for (int i = 0; i < num_peers_to_add; ++i) {
             peers.push_back(ConsumeNodeAsUniquePtr(fuzzed_data_provider, steady_clock, i).release());
             CNode& p2p_node = *peers.back();
+            peer_ids.push_back(p2p_node.GetId());
 
             FillNode(fuzzed_data_provider, connman, p2p_node);
 
@@ -123,7 +125,13 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
         }
 
         LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 30) {
-            const std::string random_message_type{fuzzed_data_provider.ConsumeBytesAsString(CMessageHeader::MESSAGE_TYPE_SIZE).c_str()};
+            std::string random_message_type{fuzzed_data_provider.ConsumeBytesAsString(CMessageHeader::MESSAGE_TYPE_SIZE).c_str()};
+            // Preserve arbitrary message types while making useful protocol
+            // sequences reachable from compact, mutation-friendly inputs.
+            if (random_message_type.size() == 1) {
+                random_message_type = ALL_NET_MESSAGE_TYPES[
+                    static_cast<unsigned char>(random_message_type.front()) % ALL_NET_MESSAGE_TYPES.size()];
+            }
 
             clock.set(ConsumeTime(fuzzed_data_provider));
 
@@ -150,6 +158,11 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
         node.validation_signals->SyncWithValidationInterfaceQueue();
         node.validation_signals->UnregisterValidationInterface(node.peerman.get());
         node.connman->StopNodes();
+        Assert(connman.TestNodes().empty());
+        for (const NodeId peer_id : peer_ids) {
+            CNodeStateStats stats;
+            Assert(!node.peerman->GetNodeStateStats(peer_id, stats));
+        }
     }
 
     chainman.CheckBlockIndex();

@@ -14,6 +14,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <node/protocol_version.h>
+#include <primitives/transaction.h>
 #include <serialize.h>
 #include <span.h>
 #include <streams.h>
@@ -1653,6 +1654,79 @@ BOOST_AUTO_TEST_CASE(private_broadcast_version_does_not_update_addrman_services)
 
     BOOST_CHECK_EQUAL(m_node.addrman->Select().first.nServices, NODE_NONE);
     m_node.peerman->FinalizeNode(node);
+}
+
+BOOST_AUTO_TEST_CASE(abort_received_private_broadcast_keeps_other_connection_demand)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    auto& peerman{*m_node.peerman};
+    static_cast<TestChainstateManager&>(*m_node.chainman).JumpOutOfIbd();
+
+    in_addr peer_addr;
+    peer_addr.s_addr = htonl(0x01020304);
+    CNode peer{/*id=*/0,
+               /*sock=*/nullptr,
+               /*addrIn=*/CAddress{CService{peer_addr, 8333}, ServiceFlags(NODE_NETWORK | NODE_WITNESS)},
+               /*nKeyedNetGroupIn=*/0,
+               /*nLocalHostNonceIn=*/0,
+               /*addrBindIn=*/CService{},
+               /*addrNameIn=*/"",
+               /*conn_type_in=*/ConnectionType::INBOUND,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer,
+                      /*successfully_connected=*/true,
+                      /*remote_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                      /*local_services=*/ServiceFlags(NODE_NETWORK | NODE_WITNESS),
+                      /*version=*/PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.FlushSendBuffer(peer);
+
+    const auto make_tx{[](uint32_t seq) {
+        CMutableTransaction tx;
+        tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+        tx.vin[0].nSequence = seq;
+        tx.vout.emplace_back(/*nValue=*/0, CScript{});
+        return MakeTransactionRef(tx);
+    }};
+    const auto received_tx{make_tx(1)};
+    const auto active_tx{make_tx(2)};
+
+    const size_t base{connman.m_private_broadcast.NumToOpen()};
+    BOOST_REQUIRE_EQUAL(peerman.InitiateTxBroadcastPrivate(received_tx), node::TransactionError::OK);
+    BOOST_CHECK_EQUAL(connman.m_private_broadcast.NumToOpen(), base + NUM_PRIVATE_BROADCAST_PER_TX);
+
+    // Receiving the transaction back from the network with no peer acknowledgments
+    // cancels all of its connection demand. The transaction stays tracked.
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(peer, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*received_tx))));
+    peer.fPauseSend = false;
+    connman.ProcessMessagesOnce(peer);
+    BOOST_CHECK_EQUAL(connman.m_private_broadcast.NumToOpen(), base);
+    {
+        const auto info{peerman.GetPrivateBroadcastInfo()};
+        BOOST_REQUIRE_EQUAL(info.size(), 1);
+        BOOST_CHECK(info[0].received_by_us.has_value());
+    }
+
+    BOOST_REQUIRE_EQUAL(peerman.InitiateTxBroadcastPrivate(active_tx), node::TransactionError::OK);
+    BOOST_CHECK_EQUAL(connman.m_private_broadcast.NumToOpen(), base + NUM_PRIVATE_BROADCAST_PER_TX);
+
+    // Aborting the already-received transaction must not cancel connection demand a
+    // second time, which would starve the still-active transaction.
+    const auto removed_received{peerman.AbortPrivateBroadcast(received_tx->GetHash().ToUint256())};
+    BOOST_REQUIRE_EQUAL(removed_received.size(), 1);
+    BOOST_CHECK_EQUAL(removed_received[0], received_tx);
+    BOOST_CHECK_EQUAL(connman.m_private_broadcast.NumToOpen(), base + NUM_PRIVATE_BROADCAST_PER_TX);
+
+    // Aborting the active transaction does cancel its demand.
+    const auto removed_active{peerman.AbortPrivateBroadcast(active_tx->GetHash().ToUint256())};
+    BOOST_REQUIRE_EQUAL(removed_active.size(), 1);
+    BOOST_CHECK_EQUAL(connman.m_private_broadcast.NumToOpen(), base);
+    BOOST_CHECK(peerman.GetPrivateBroadcastInfo().empty());
+
+    peerman.FinalizeNode(peer);
 }
 
 BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)

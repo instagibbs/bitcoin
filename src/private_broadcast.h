@@ -103,14 +103,24 @@ public:
     [[nodiscard]] AddResult Add(const CTransactionRef& tx)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /// State of a transaction at the time it was removed by Remove().
+    struct RemovedTx {
+        /// Number of recipients that confirmed reception (by PONG).
+        size_t num_confirmed;
+        /// Whether the transaction had already been received back from the
+        /// network (see MarkReceived()). If so, the caller already accounted
+        /// for the end of its broadcast when MarkReceived() returned.
+        bool received_by_us;
+    };
+
     /**
      * Forget a transaction.
      * @param[in] tx Transaction to forget.
-     * @retval !nullopt The number of times the transaction was sent and confirmed
-     * by a recipient (if the transaction existed and was removed).
+     * @retval !nullopt The state of the transaction at removal (if the
+     * transaction existed and was removed).
      * @retval nullopt The transaction was not in the storage.
      */
-    std::optional<size_t> Remove(const CTransactionRef& tx)
+    std::optional<RemovedTx> Remove(const CTransactionRef& tx)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /**

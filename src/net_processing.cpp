@@ -199,8 +199,6 @@ static constexpr double MAX_ADDR_RATE_PER_SECOND{0.1};
  *  based increments won't go above this, but the MAX_ADDR_TO_SEND increment following GETADDR
  *  is exempt from this limit). */
 static constexpr size_t MAX_ADDR_PROCESSING_TOKEN_BUCKET{MAX_ADDR_TO_SEND};
-/** For private broadcast, send a transaction to this many peers. */
-static constexpr size_t NUM_PRIVATE_BROADCAST_PER_TX{3};
 /** Private broadcast connections must complete within this time. Disconnect the peer if it takes longer. */
 static constexpr auto PRIVATE_BROADCAST_MAX_CONNECTION_LIFETIME{3min};
 
@@ -1988,10 +1986,12 @@ std::vector<CTransactionRef> PeerManagerImpl::AbortPrivateBroadcast(const uint25
     for (const auto& tx_info : snapshot) {
         const CTransactionRef& tx{tx_info.tx};
         if (tx->GetHash().ToUint256() != id && tx->GetWitnessHash().ToUint256() != id) continue;
-        if (const auto peer_acks{m_tx_for_private_broadcast.Remove(tx)}) {
+        if (const auto removed{m_tx_for_private_broadcast.Remove(tx)}) {
             removed_txs.push_back(tx);
-            if (NUM_PRIVATE_BROADCAST_PER_TX > *peer_acks) {
-                connections_cancelled += (NUM_PRIVATE_BROADCAST_PER_TX - *peer_acks);
+            // If the transaction was already received back from the network, the
+            // unneeded connections were already cancelled when MarkReceived() returned.
+            if (!removed->received_by_us && NUM_PRIVATE_BROADCAST_PER_TX > removed->num_confirmed) {
+                connections_cancelled += (NUM_PRIVATE_BROADCAST_PER_TX - removed->num_confirmed);
             }
         }
     }

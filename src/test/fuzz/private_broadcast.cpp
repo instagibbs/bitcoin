@@ -57,10 +57,21 @@ FUZZ_TARGET(private_broadcast)
     // Trimmed when Remove() is called or a transaction is reset by Add().
     std::unordered_set<NodeId> nodes_that_confirmed_reception;
 
+    // Transactions passed to MarkReceived(). Trimmed when Remove() is called or
+    // a transaction is reset by Add().
+    std::unordered_set<CTransactionRef, CTransactionRefHash, CTransactionRefComp> received_by_us;
+
     NodeId next_nodeid{0}; // Generate unique node ids.
 
-    const auto is_pending{[max_send_attempts](const auto& entry) {
-        return entry.second < max_send_attempts;
+    const auto is_pending{[max_send_attempts, &received_by_us](const auto& entry) {
+        return entry.second < max_send_attempts && !received_by_us.contains(entry.first);
+    }};
+
+    // How many of the nodes a transaction was sent to have confirmed reception.
+    const auto count_confirmed{[&nodes_sent_to, &nodes_that_confirmed_reception](const CTransactionRef& tx) {
+        return static_cast<size_t>(std::ranges::count_if(nodes_sent_to, [&](const auto& sent) {
+            return CTransactionRefComp{}(sent.second, tx) && nodes_that_confirmed_reception.contains(sent.first);
+        }));
     }};
 
     // Forget the sends recorded for a transaction that is no longer tracked or whose state
@@ -107,6 +118,7 @@ FUZZ_TARGET(private_broadcast)
                         Assert(res == PrivateBroadcast::AddResult::Added);
                         tx_it->second = 0;
                         forget_sends(tx);
+                        received_by_us.erase(tx);
                     }
                 } else if (transactions.size() >= cap) {
                     if (std::ranges::all_of(transactions, is_pending)) {
@@ -123,6 +135,7 @@ FUZZ_TARGET(private_broadcast)
                         Assert(!is_pending(*evicted)); // pending transactions are never evicted
 
                         forget_sends(evicted->first);
+                        received_by_us.erase(evicted->first);
                         transactions.erase(evicted);
                         transactions.emplace(tx, 0);
                     }
@@ -139,13 +152,36 @@ FUZZ_TARGET(private_broadcast)
                 const CTransactionRef& tx{transactions_it->first};
 
                 const size_t num_nodes_that_confirmed_tx{forget_sends(tx)};
+                const bool was_received{received_by_us.erase(tx) > 0};
 
-                const auto opt_num_confirmed{pb.Remove(tx)};
+                const auto removed{pb.Remove(tx)};
 
-                Assert(opt_num_confirmed.has_value());
-                Assert(opt_num_confirmed.value() == num_nodes_that_confirmed_tx);
+                Assert(removed.has_value());
+                Assert(removed->num_confirmed == num_nodes_that_confirmed_tx);
+                Assert(removed->received_by_us == was_received);
                 Assert(!pb.Remove(tx).has_value());
                 transactions.erase(transactions_it);
+            },
+            [&] { // MarkReceived()
+                CTransactionRef tx;
+                if (transactions.empty() || fdp.ConsumeBool()) {
+                    tx = MakeTransactionRef(ConsumeTransaction(fdp, std::nullopt));
+                } else {
+                    tx = PickIterator(fdp, transactions)->first;
+                }
+                const CService received_from{ConsumeService(fdp)};
+
+                const auto opt_num_confirmed{pb.MarkReceived(tx, received_from)};
+
+                if (!transactions.contains(tx) || received_by_us.contains(tx)) {
+                    // Unknown or already received: no-op, so the caller does not account twice.
+                    Assert(!opt_num_confirmed.has_value());
+                } else {
+                    Assert(opt_num_confirmed.has_value());
+                    Assert(opt_num_confirmed.value() == count_confirmed(tx));
+                    received_by_us.emplace(tx);
+                    Assert(!pb.MarkReceived(tx, received_from).has_value());
+                }
             },
             [&] { // PickTxForSend()
                 // Only give pristine node ids to PickTxForSend() as required.
@@ -239,6 +275,7 @@ FUZZ_TARGET(private_broadcast)
                     Assert(it != transactions.end());
                     Assert(info.peers.size() == it->second); // exactly the sends we recorded
                     Assert(info.attempts_remaining == max_send_attempts - it->second);
+                    Assert(info.received_by_us.has_value() == received_by_us.contains(info.tx));
                 }
             },
             [&] {

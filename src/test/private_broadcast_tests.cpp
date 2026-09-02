@@ -149,9 +149,19 @@ BOOST_AUTO_TEST_CASE(basic)
 
     BOOST_CHECK_EQUAL(pb.GetStale().size(), 2);
 
-    BOOST_CHECK_EQUAL(pb.Remove(tx_for_recipient1).value(), 1);
+    {
+        const auto removed{pb.Remove(tx_for_recipient1)};
+        BOOST_REQUIRE(removed.has_value());
+        BOOST_CHECK_EQUAL(removed->num_confirmed, 1);
+        BOOST_CHECK(!removed->received_by_us);
+    }
     BOOST_CHECK(!pb.Remove(tx_for_recipient1).has_value());
-    BOOST_CHECK_EQUAL(pb.Remove(tx_for_recipient2).value(), 0);
+    {
+        const auto removed{pb.Remove(tx_for_recipient2)};
+        BOOST_REQUIRE(removed.has_value());
+        BOOST_CHECK_EQUAL(removed->num_confirmed, 0);
+        BOOST_CHECK(!removed->received_by_us);
+    }
     BOOST_CHECK(!pb.Remove(tx_for_recipient2).has_value());
 
     BOOST_CHECK_EQUAL(pb.GetBroadcastInfo().size(), 0);
@@ -253,7 +263,7 @@ BOOST_AUTO_TEST_CASE(reset_with_equivalent_transaction_reference)
     BOOST_REQUIRE_EQUAL(info.size(), 1);
     BOOST_CHECK(info[0].tx->GetWitnessHash() == tx->GetWitnessHash());
     BOOST_CHECK(info[0].peers.empty());
-    BOOST_CHECK_EQUAL(pb.Remove(equivalent_tx).value(), 0);
+    BOOST_CHECK_EQUAL(pb.Remove(equivalent_tx)->num_confirmed, 0);
 }
 
 BOOST_AUTO_TEST_CASE(rejection_at_cap)
@@ -413,6 +423,31 @@ BOOST_AUTO_TEST_CASE(mark_received)
     // The re-added tx should NOT be immediately stale despite the elapsed time,
     // because time_added was reset.
     BOOST_CHECK_EQUAL(pb.GetStale().size(), 0);
+
+    // Removing a transaction that was received back reports so, keeping the confirmed
+    // count, so that the caller does not cancel connections a second time.
+    BOOST_REQUIRE(pb.PickTxForSend(/*will_send_to_nodeid=*/4, /*will_send_to_address=*/addr1).has_value());
+    pb.NodeConfirmedReception(4);
+    BOOST_CHECK_EQUAL(pb.MarkReceived(tx, received_from).value(), 1);
+    {
+        const auto removed{pb.Remove(tx)};
+        BOOST_REQUIRE(removed.has_value());
+        BOOST_CHECK_EQUAL(removed->num_confirmed, 1);
+        BOOST_CHECK(removed->received_by_us);
+    }
+    BOOST_CHECK(!pb.Remove(tx).has_value());
+    BOOST_CHECK_EQUAL(pb.GetBroadcastInfo().size(), 0);
+
+    // A re-added transaction is no longer marked received, so removing it reports that.
+    BOOST_REQUIRE_EQUAL(pb.Add(tx), PrivateBroadcast::AddResult::Added);
+    BOOST_REQUIRE(pb.MarkReceived(tx, received_from).has_value());
+    BOOST_REQUIRE_EQUAL(pb.Add(tx), PrivateBroadcast::AddResult::Added);
+    {
+        const auto removed{pb.Remove(tx)};
+        BOOST_REQUIRE(removed.has_value());
+        BOOST_CHECK_EQUAL(removed->num_confirmed, 0);
+        BOOST_CHECK(!removed->received_by_us);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

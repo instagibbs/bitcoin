@@ -48,6 +48,8 @@ inline constexpr bool DEFAULT_PEERBLOOMFILTERS = false;
 inline constexpr bool DEFAULT_PEERBLOCKFILTERS = false;
 /** Maximum number of outstanding CMPCTBLOCK requests for the same block. */
 inline constexpr unsigned int MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK = 3;
+/** For private broadcast, send a transaction to this many peers. */
+inline constexpr size_t NUM_PRIVATE_BROADCAST_PER_TX{3};
 /** Number of headers sent in one getheaders result. We rely on the assumption that if a peer sends
  *  less than this number, we reached its tip. Changing this value is a protocol upgrade. */
 inline constexpr unsigned int MAX_HEADERS_RESULTS = 2000;

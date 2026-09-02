@@ -38,14 +38,14 @@ PrivateBroadcast::AddResult PrivateBroadcast::Add(const CTransactionRef& tx)
     return AddResult::Added;
 }
 
-std::optional<size_t> PrivateBroadcast::Remove(const CTransactionRef& tx)
+std::optional<PrivateBroadcast::RemovedTx> PrivateBroadcast::Remove(const CTransactionRef& tx)
     EXCLUSIVE_LOCKS_REQUIRED(!m_mutex)
 {
     LOCK(m_mutex);
     const auto handle{m_transactions.extract(tx)};
     if (handle) {
         const auto p{DerivePriority(handle.mapped().send_statuses)};
-        return p.num_confirmed;
+        return RemovedTx{.num_confirmed = p.num_confirmed, .received_by_us = handle.mapped().received_by_us.has_value()};
     }
     return std::nullopt;
 }

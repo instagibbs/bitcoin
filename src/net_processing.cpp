@@ -1990,7 +1990,8 @@ std::vector<CTransactionRef> PeerManagerImpl::AbortPrivateBroadcast(const uint25
         if (tx->GetHash().ToUint256() != id && tx->GetWitnessHash().ToUint256() != id) continue;
         if (const auto peer_acks{m_tx_for_private_broadcast.Remove(tx)}) {
             removed_txs.push_back(tx);
-            if (NUM_PRIVATE_BROADCAST_PER_TX > *peer_acks) {
+            // Connections for a tx already received back were cancelled in MarkReceived().
+            if (!tx_info.received_by_us && NUM_PRIVATE_BROADCAST_PER_TX > *peer_acks) {
                 connections_cancelled += (NUM_PRIVATE_BROADCAST_PER_TX - *peer_acks);
             }
         }

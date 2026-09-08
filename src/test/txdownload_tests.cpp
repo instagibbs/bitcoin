@@ -339,4 +339,39 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(package_candidate_metadata, TestChain100Setup)
+{
+    FastRandomContext rng{true};
+    node::TxDownloadManagerImpl manager{{*Assert(m_node.mempool), rng, true}};
+    const auto parent{CreatePlaceholderTx(true)};
+    manager.RecentRejectsReconsiderableFilter().insert(parent->GetWitnessHash().ToUint256());
+
+    std::array<CTransactionRef, 3> children;
+    for (size_t i{0}; i < children.size(); ++i) {
+        CMutableTransaction child;
+        child.vin.emplace_back(parent->GetHash(), 0);
+        child.vin[0].scriptWitness.stack.push_back({1});
+        child.vout.emplace_back(CENT, CScript());
+        child.nLockTime = i;
+        children[i] = MakeTransactionRef(child);
+        BOOST_REQUIRE(manager.m_orphanage->AddTx(children[i], 0));
+    }
+
+    // Preserve newest-first selection and the same-peer restriction.
+    auto selected{manager.Find1P1CPackage(parent, 0)};
+    BOOST_REQUIRE(selected);
+    BOOST_CHECK(selected->m_txns.back()->GetWitnessHash() == children[2]->GetWitnessHash());
+    BOOST_CHECK(!manager.Find1P1CPackage(parent, 1));
+
+    // Skip a package-rejected child and a txid-rejected child using cached IDs.
+    manager.MempoolRejectedPackage({parent, children[2]});
+    manager.RecentRejectsFilter().insert(children[1]->GetHash().ToUint256());
+    selected = manager.Find1P1CPackage(parent, 0);
+    BOOST_REQUIRE(selected);
+    BOOST_CHECK(selected->m_txns.back()->GetWitnessHash() == children[0]->GetWitnessHash());
+
+    manager.MempoolRejectedPackage({parent, children[0]});
+    BOOST_CHECK(!manager.Find1P1CPackage(parent, 0));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

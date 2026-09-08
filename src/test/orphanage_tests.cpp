@@ -73,22 +73,23 @@ static bool SameTx(const CTransactionRef& lhs, const CTransactionRef& rhs)
     return lhs && rhs && lhs->GetWitnessHash() == rhs->GetWitnessHash();
 }
 
-static bool SameTxns(const std::vector<CTransactionRef>& expected, const std::vector<CTransactionRef>& actual)
+static bool SameTxns(const std::vector<CTransactionRef>& expected, const std::vector<node::TxOrphanage::OrphanId>& actual)
 {
     if (expected.size() != actual.size()) return false;
     for (size_t i{0}; i < expected.size(); ++i) {
-        if (!SameTx(expected.at(i), actual.at(i))) return false;
+        if (expected.at(i)->GetHash() != actual.at(i).txid ||
+            expected.at(i)->GetWitnessHash() != actual.at(i).wtxid) return false;
     }
     return true;
 }
 
-static bool EqualTxns(const std::set<CTransactionRef>& set_txns, const std::vector<CTransactionRef>& vec_txns)
+static bool EqualTxns(const std::set<CTransactionRef>& set_txns, const std::vector<node::TxOrphanage::OrphanId>& vec_txns)
 {
     if (vec_txns.size() != set_txns.size()) return false;
-    std::set<Wtxid> expected_wtxids;
-    for (const auto& tx : set_txns) expected_wtxids.insert(tx->GetWitnessHash());
+    std::set<std::pair<Txid, Wtxid>> expected_ids;
+    for (const auto& tx : set_txns) expected_ids.emplace(tx->GetHash(), tx->GetWitnessHash());
     for (const auto& tx : vec_txns) {
-        if (!expected_wtxids.contains(tx->GetWitnessHash())) return false;
+        if (expected_ids.erase({tx.txid, tx.wtxid}) != 1) return false;
     }
     return true;
 }
@@ -711,11 +712,12 @@ BOOST_AUTO_TEST_CASE(witness_heavy_orphan_tx)
     FastRandomContext det_rand{true};
 
     // A transaction whose witness is a stack of many 1-byte elements is of standard weight (and its witness
-    // standardness cannot be checked, since its inputs are missing). Deserialized, it would use ~28 times more
+    // full standardness cannot be checked, since its inputs are missing). Deserialized, it would use ~28 times more
     // memory than its weight suggests, as every element is an individually heap-allocated vector. Since orphans
     // are stored in serialized form, its memory usage is bounded by the weight that is accounted for it.
+    const auto parent{MakeTransactionSpending({}, det_rand)};
     CMutableTransaction mtx;
-    mtx.vin.emplace_back(Txid::FromUint256(det_rand.rand256()), 0);
+    mtx.vin.emplace_back(parent->GetHash(), 0);
     mtx.vout.resize(1);
     mtx.vin[0].scriptWitness.stack.assign(199'000, std::vector<unsigned char>{1});
     const auto ptx{MakeTransactionRef(mtx)};
@@ -731,6 +733,13 @@ BOOST_AUTO_TEST_CASE(witness_heavy_orphan_tx)
     BOOST_CHECK(orphanage->HaveTx(ptx->GetWitnessHash()));
     BOOST_CHECK_EQUAL(orphanage->UsageByPeer(0), weight);
     BOOST_CHECK_EQUAL(orphanage->UsageByPeer(0), node::GetOrphanUsage(ptx));
+
+    // Candidate enumeration exposes only cached IDs, even for a witness-heavy child.
+    const auto children{orphanage->GetChildrenFromSamePeer(parent, 0)};
+    BOOST_REQUIRE_EQUAL(children.size(), 1);
+    BOOST_CHECK(children[0].txid == ptx->GetHash());
+    BOOST_CHECK(children[0].wtxid == ptx->GetWitnessHash());
+    BOOST_CHECK(orphanage->GetChildrenFromSamePeer(parent, 1).empty());
 
     // It fits within the peer's reservation alongside normal orphans, which are left in place.
     std::vector<CTransactionRef> normal_txns;

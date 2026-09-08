@@ -13,6 +13,7 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
+#include <utility>
 
 /** IsTopoSortedPackage where a set of txids has been pre-populated. The set is assumed to be correct and
  * is mutated within this function (even if return value is false). */
@@ -154,6 +155,12 @@ uint256 GetPackageHash(const std::vector<CTransactionRef>& transactions)
     std::vector<Wtxid> wtxids_copy;
     std::transform(transactions.cbegin(), transactions.cend(), std::back_inserter(wtxids_copy),
         [](const auto& tx){ return tx->GetWitnessHash(); });
+
+    return GetPackageHashFromWtxids(std::move(wtxids_copy));
+}
+
+uint256 GetPackageHashFromWtxids(std::vector<Wtxid> wtxids_copy)
+{
 
     // Sort in ascending order
     std::sort(wtxids_copy.begin(), wtxids_copy.end(), [](const auto& lhs, const auto& rhs) {

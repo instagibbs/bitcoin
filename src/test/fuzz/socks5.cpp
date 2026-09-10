@@ -49,5 +49,15 @@ FUZZ_TARGET(socks5, .init = initialize_socks5)
     auto str_dest = fuzzed_data_provider.ConsumeRandomLengthString(512);
     auto port = fuzzed_data_provider.ConsumeIntegral<uint16_t>();
     auto* auth = fuzzed_data_provider.ConsumeBool() ? &proxy_credentials : nullptr;
-    (void)Socks5(str_dest, port, auth, fuzzed_sock);
+    // An absolute exchange deadline: none, already past, or ahead (the per-stage timeout then
+    // still applies; the fuzzed socket answers immediately, so this never waits).
+    Socks5Deadline deadline;
+    if (fuzzed_data_provider.ConsumeBool()) {
+        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds{fuzzed_data_provider.ConsumeIntegralInRange<int>(-1000, 10000)};
+    }
+    if (fuzzed_data_provider.ConsumeBool()) {
+        (void)Socks5Resolve(str_dest, proxy_credentials, fuzzed_sock, deadline);
+    } else {
+        (void)Socks5(str_dest, port, auth, fuzzed_sock, /*require_auth=*/auth != nullptr && fuzzed_data_provider.ConsumeBool(), deadline);
+    }
 }

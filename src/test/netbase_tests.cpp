@@ -11,6 +11,7 @@
 #include <serialize.h>
 #include <streams.h>
 #include <test/util/common.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
@@ -655,6 +656,65 @@ BOOST_AUTO_TEST_CASE(asmap_test_vectors)
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("dff5:8021:61d:b17d:406d:7888:fdac:4a20", false)), 969411);
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("e888:6791:2960:d723:bcfd:47e1:2d8c:599f", false)), 824019);
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("ffff:d499:8c4b:4941:bc81:d5b9:b51e:85a8", false)), 824019);
+}
+
+BOOST_AUTO_TEST_CASE(socks5_resolve)
+{
+    // Other suites may leave the shared SOCKS interrupt triggered; InterruptibleRecv checks it.
+    g_socks5_interrupt.reset();
+    const ProxyCredentials creds{"user", "pass"};
+    // Method selection reply choosing username/password, then a successful auth reply.
+    const std::string auth_ok("\x05\x02\x01\x00", 4);
+    // Method selection reply choosing no authentication.
+    const std::string noauth("\x05\x00", 2);
+    const std::string ipv4_reply("\x05\x00\x00\x01\x01\x02\x03\x04\x00\x00", 10);
+
+    // IPv4 answer.
+    {
+        const auto addr{Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply})};
+        BOOST_REQUIRE(addr.has_value());
+        BOOST_CHECK_EQUAL(addr->ToStringAddr(), "1.2.3.4");
+    }
+    // IPv6 answer.
+    {
+        std::string reply("\x05\x00\x00\x04", 4);
+        reply += std::string("\x26\x06\x47\x00\x47\x00", 6) + std::string(8, '\0') + std::string("\x11\x11", 2);
+        reply += std::string("\x00\x00", 2);
+        const auto addr{Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + reply})};
+        BOOST_REQUIRE(addr.has_value());
+        BOOST_CHECK_EQUAL(addr->ToStringAddr(), "2606:4700:4700::1111");
+    }
+    // The proxy selected no authentication: no stream isolation, so RESOLVE refuses. A plain
+    // Socks5() still accepts that unless told to require authentication.
+    {
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{noauth + ipv4_reply}));
+        BOOST_CHECK(Socks5("seed.example.", 8333, &creds, StaticContentsSock{noauth + ipv4_reply}));
+        BOOST_CHECK(!Socks5("seed.example.", 8333, &creds, StaticContentsSock{noauth + ipv4_reply}, /*require_auth=*/true));
+        BOOST_CHECK(Socks5("seed.example.", 8333, &creds, StaticContentsSock{auth_ok + ipv4_reply}, /*require_auth=*/true));
+    }
+    // Error reply.
+    {
+        const std::string reply("\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00", 10);
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + reply}));
+    }
+    // A domain name is not a numeric answer.
+    {
+        const std::string reply = std::string("\x05\x00\x00\x03\x03", 5) + "foo" + std::string("\x00\x00", 2);
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + reply}));
+        BOOST_CHECK(Socks5("foo", 8333, &creds, StaticContentsSock{auth_ok + reply}));
+    }
+    // Unspecified address and truncated replies.
+    {
+        const std::string zero("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00", 10);
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + zero}));
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply.substr(0, 6)}));
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok.substr(0, 2)}));
+    }
+    // An exchange deadline already past fails at the first stage, whatever the proxy would have said.
+    {
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply}, std::chrono::steady_clock::now() - std::chrono::seconds{1}));
+        BOOST_CHECK(Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply}, std::chrono::steady_clock::now() + std::chrono::seconds{10}).has_value());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -64,11 +64,11 @@ bool CachingTransactionSignatureChecker::VerifyECDSASignature(const std::vector<
 {
     uint256 entry;
     m_signature_cache.ComputeEntryECDSA(entry, sighash, vchSig, pubkey);
-    if (m_signature_cache.Get(entry, !store))
+    if (m_signature_cache.Get(entry, /*erase=*/m_cache_policy == CachePolicy::CONSUME))
         return true;
     if (!TransactionSignatureChecker::VerifyECDSASignature(vchSig, pubkey, sighash))
         return false;
-    if (store)
+    if (m_cache_policy == CachePolicy::STORE)
         m_signature_cache.Set(entry);
     return true;
 }
@@ -77,8 +77,8 @@ bool CachingTransactionSignatureChecker::VerifySchnorrSignature(std::span<const 
 {
     uint256 entry;
     m_signature_cache.ComputeEntrySchnorr(entry, sighash, sig, pubkey);
-    if (m_signature_cache.Get(entry, !store)) return true;
+    if (m_signature_cache.Get(entry, /*erase=*/m_cache_policy == CachePolicy::CONSUME)) return true;
     if (!TransactionSignatureChecker::VerifySchnorrSignature(sig, pubkey, sighash)) return false;
-    if (store) m_signature_cache.Set(entry);
+    if (m_cache_policy == CachePolicy::STORE) m_signature_cache.Set(entry);
     return true;
 }

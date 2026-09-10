@@ -16,8 +16,10 @@
 #include <util/strencodings.h>
 #include <util/translation.h>
 
-#include <string>
+#include <chrono>
 #include <numeric>
+#include <string>
+#include <thread>
 
 #include <boost/test/unit_test.hpp>
 
@@ -714,6 +716,54 @@ BOOST_AUTO_TEST_CASE(socks5_resolve)
     {
         BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply}, std::chrono::steady_clock::now() - std::chrono::seconds{1}));
         BOOST_CHECK(Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply}, std::chrono::steady_clock::now() + std::chrono::seconds{10}).has_value());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(socks5_exchange_deadline_is_cumulative)
+{
+    using namespace std::chrono_literals;
+    // A proxy that answers each SOCKS5 stage within its own timeout but is slow enough that the
+    // stages together run past the absolute exchange deadline: the exchange must fail, and no
+    // further stage is sent once the deadline has passed.
+    struct SlowSock : StaticContentsSock {
+        SlowSock(const std::string& contents, std::chrono::milliseconds step) : StaticContentsSock{contents}, m_step{step} {}
+        SlowSock& operator=(Sock&&) override { assert(false && "Move of Sock into SlowSock not allowed."); return *this; }
+        ssize_t Recv(void* buf, size_t len, int flags) const override
+        {
+            std::this_thread::sleep_for(m_step);
+            return StaticContentsSock::Recv(buf, len, flags);
+        }
+        ssize_t Send(const void*, size_t len, int) const override
+        {
+            std::this_thread::sleep_for(m_step);
+            ++m_sends;
+            return static_cast<ssize_t>(len);
+        }
+        const std::chrono::milliseconds m_step;
+        mutable int m_sends{0};
+    };
+    const ProxyCredentials creds{"user", "pass"};
+    const std::string auth_ok("\x05\x02\x01\x00", 4);
+    const std::string ipv4_reply("\x05\x00\x00\x01\x01\x02\x03\x04\x00\x00", 10);
+    const std::string canned{auth_ok + ipv4_reply};
+    const auto step{20ms}; // each stage is well within the 8 s (or larger) per-stage timeout
+
+    // With no deadline the slow exchange still completes: greeting, auth and request are all sent.
+    int sends_completing{0};
+    {
+        SlowSock sock{canned, step};
+        BOOST_CHECK(Socks5Resolve("seed.example.", creds, sock).has_value());
+        sends_completing = sock.m_sends;
+        BOOST_CHECK(sends_completing >= 3);
+    }
+    // A deadline shorter than the whole exchange but longer than any single stage: it fails, and
+    // strictly fewer sends happen because the exchange stops once the deadline has passed.
+    {
+        SlowSock sock{canned, step};
+        const auto deadline{std::chrono::steady_clock::now() + 50ms};
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, sock, deadline).has_value());
+        BOOST_CHECK(sock.m_sends >= 1);                  // the greeting still went out
+        BOOST_CHECK(sock.m_sends < sends_completing);    // but a later stage was cut at the deadline
     }
 }
 

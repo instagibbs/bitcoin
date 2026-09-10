@@ -83,6 +83,10 @@ add_executable(fuzz
   p2p_headers_presync.cpp
   p2p_private_broadcast.cpp
   p2p_transport_serialization.cpp
+  privbcast_attempt.cpp
+  privbcast_discovery.cpp
+  privbcast_input.cpp
+  privbcast_session.cpp
   pcp.cpp
   package_eval.cpp
   parse_hd_keypath.cpp
@@ -154,6 +158,7 @@ target_link_libraries(fuzz
   fuzzer_interface
   test_fuzz
   bitcoin_cli
+  bitcoin_privbcast
   bitcoin_common
   bitcoin_util
   minisketch

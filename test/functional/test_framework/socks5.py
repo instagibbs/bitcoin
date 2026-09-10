@@ -7,6 +7,7 @@
 import select
 import socket
 import threading
+import time
 import queue
 import logging
 
@@ -21,6 +22,7 @@ logger = logging.getLogger("TestFramework.socks5")
 # Protocol constants
 class Command:
     CONNECT = 0x01
+    RESOLVE = 0xf0  # Tor extension: https://spec.torproject.org/socks-extensions.html
 
 class AddressType:
     IPV4 = 0x01
@@ -100,6 +102,11 @@ class Socks5Configuration():
         self.unauth = False  # Support unauthenticated
         self.auth = False  # Support authentication
         self.keep_alive = False  # Do not automatically close connections
+        # Seconds to wait before answering a CONNECT request: a proxy that is slow to reach the
+        # destination (Tor building a circuit), for clients that must bound that wait.
+        self.connect_reply_delay = 0
+        # Seconds to wait before answering a RESOLVE request (a slow or stalled resolver).
+        self.resolve_reply_delay = 0
         # This function is called whenever a new connection arrives to the proxy
         # and it decides where the connection is redirected to. It is passed:
         # - the address the client requested to connect to
@@ -114,6 +121,9 @@ class Socks5Configuration():
         # If it returns an object then the connection is redirected to actual_to_addr:actual_to_port.
         # If it returns None, or destinations_factory itself is None then the connection is closed.
         self.destinations_factory = None
+        # Called for each Tor RESOLVE command with the requested hostname. It is supposed to
+        # return an IPv4 or IPv6 address string, or None to answer with an error.
+        self.resolve_factory = None
 
 class Socks5Command():
     """Information about an incoming socks5 command."""
@@ -176,11 +186,16 @@ class Socks5Connection():
                 # Send authentication response
                 self.conn.sendall(bytearray([0x01, 0x00]))
 
-            # Read connect request
-            ver, cmd, _, atyp = recvall(self.conn, 4)
+            # Read connect request. A client that hangs up here refused the authentication method
+            # we chose (RFC 1928 lets it), which is normal, not an error.
+            try:
+                ver, cmd, _, atyp = recvall(self.conn, 4)
+            except IOError:
+                logger.debug(f"{log_exception_prefix}client closed after method selection")
+                return
             if ver != 0x05:
                 raise IOError('Invalid socks version %i in connect request' % ver)
-            if cmd != Command.CONNECT:
+            if cmd not in (Command.CONNECT, Command.RESOLVE):
                 raise IOError('Unhandled command %i in connect request' % cmd)
 
             if atyp == AddressType.IPV4:
@@ -195,6 +210,34 @@ class Socks5Connection():
             port_hi,port_lo = recvall(self.conn, 2)
             port = (port_hi << 8) | port_lo
 
+            if cmd == Command.RESOLVE:
+                cmdin = Socks5Command(cmd, atyp, addr, port, username, password)
+                self.serv.queue.put(cmdin)
+                logger.debug('Proxy: %s', cmdin)
+                answer = None
+                if self.serv.conf.resolve_factory is not None:
+                    answer = self.serv.conf.resolve_factory(addr.decode("utf-8"))
+                # Stall before replying (not before the factory), so a client waiting on the count
+                # sees the query recorded while the reply is still withheld.
+                if self.serv.conf.resolve_reply_delay:
+                    time.sleep(self.serv.conf.resolve_reply_delay)
+                if answer is None:
+                    # REP 0x04: host unreachable
+                    self.conn.sendall(bytearray([0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]))
+                else:
+                    packed_v4 = None
+                    try:
+                        packed_v4 = socket.inet_pton(socket.AF_INET, answer)
+                    except OSError:
+                        pass
+                    if packed_v4 is not None:
+                        self.conn.sendall(bytearray([0x05, 0x00, 0x00, AddressType.IPV4]) + packed_v4 + bytearray([0, 0]))
+                    else:
+                        self.conn.sendall(bytearray([0x05, 0x00, 0x00, AddressType.IPV6]) + socket.inet_pton(socket.AF_INET6, answer) + bytearray([0, 0]))
+                return  # Disconnect happens in the "finally" block below.
+
+            if self.serv.conf.connect_reply_delay:
+                time.sleep(self.serv.conf.connect_reply_delay)
             # Reply SUCCESS before calling destinations_factory, so the client can finish
             # establishing the connection and register the peer; factories that consult
             # getpeerinfo depend on that order.
@@ -281,7 +324,9 @@ class Socks5Server():
         # When port=0, the OS assigns an available port. Update conf.addr
         # to reflect the actual bound address so callers can use it.
         self.conf.addr = self.s.getsockname()
-        self.s.listen(5)
+        # Clients such as bitcoin-privbcast open a few dozen isolated streams at once; a short
+        # backlog would make their connects time out before the accept loop gets to them.
+        self.s.listen(128)
         # Set to False when stop is initiated
         self._running = False
         self._running_lock = threading.Lock()
@@ -349,12 +394,15 @@ class Socks5Server():
                 else:
                     logger.warning(f"Stop(): Handler thread {i} didn't finish after force close")
 
-def start_socks5_server(destinations_factory):
+def start_socks5_server(destinations_factory, resolve_factory=None, connect_reply_delay=0, resolve_reply_delay=0, auth=True, unauth=True):
     config = Socks5Configuration()
     config.addr = ("127.0.0.1", 0) # Use port=0 to let the OS pick one. The actual port is later in server.conf.addr[1].
-    config.unauth = True
-    config.auth = True
+    config.unauth = unauth
+    config.auth = auth
     config.destinations_factory = destinations_factory
+    config.resolve_factory = resolve_factory
+    config.connect_reply_delay = connect_reply_delay
+    config.resolve_reply_delay = resolve_reply_delay
 
     server = Socks5Server(config)
     server.start()

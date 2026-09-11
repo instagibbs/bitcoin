@@ -66,11 +66,13 @@ void RunSession(Sock& sock, Transport& transport, Session& session, AttemptResul
  * dialled. The pre-announcement budget counts from `scheduled_start`, not from when the connection
  * opened, so a slow proxy cannot push a failure past the slot's next scheduled opportunity; an
  * announced attempt may live on to `hard_deadline` while that slot's backups are suppressed.
- * The transport is always BIP324 (v2); there is no v1 fallback.
+ * The transport is always BIP324 (v2); there is no v1 fallback. `parent`, when given, is the
+ * unconfirmed parent of `tx`, served once if the peer asks for it after `tx` (one parent, one child).
  */
 std::optional<AttemptResult> RunAttempt(const Connector& connect, const Candidate& candidate, const CTransactionRef& tx,
                                         Clock::time_point scheduled_start, Clock::time_point dial_deadline,
-                                        Clock::time_point hard_deadline, const std::function<bool()>& interrupted);
+                                        Clock::time_point hard_deadline, const std::function<bool()>& interrupted,
+                                        CTransactionRef parent = nullptr);
 
 } // namespace privbcast
 

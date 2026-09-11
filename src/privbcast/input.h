@@ -19,7 +19,7 @@
 
 namespace privbcast {
 
-/** Largest transaction hex accepted on stdin: a maximum-size transaction plus whitespace. */
+/** Largest input accepted on stdin: two maximum-size transactions in hex plus whitespace. */
 inline constexpr size_t MAX_STDIN_BYTES{2 * 4'000'000 + 4096};
 /** Port assumed when -tor gives a bare loopback address. */
 inline constexpr uint16_t TOR_SOCKS_PORT_DEFAULT{9050};
@@ -46,6 +46,20 @@ std::vector<CService> DecodeFixedSeeds(std::span<const uint8_t> data);
  * caller's preflight, not this tool's.
  */
 std::optional<CTransactionRef> ParseAndCheckTransaction(const std::string& hex, CAmount max_burn, std::string& error);
+
+/** What one job broadcasts: the announced transaction and, for a package, its unconfirmed parent. */
+struct Package {
+    CTransactionRef tx;
+    CTransactionRef parent; //!< null unless two transactions were given
+};
+
+/**
+ * One transaction, or a parent and its child in either order, separated by whitespace. Each gets
+ * the checks of ParseAndCheckTransaction; two must be exactly one spending an output of the other.
+ * Whether the child has other unconfirmed parents, or the parent needs the child at all, is the
+ * caller's package preflight, not this tool's.
+ */
+std::optional<Package> ParseAndCheckPackage(const std::string& text, CAmount max_burn, std::string& error);
 
 } // namespace privbcast
 

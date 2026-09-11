@@ -199,17 +199,21 @@ UniValue DiscoveryJson(const DiscoveryResult& discovery, bool addresses)
 UniValue BuildReport(const std::string& chain, const CTransactionRef& tx, const Schedule& schedule,
                      const DiscoveryResult& discovery, const std::vector<SlotRecord>& records,
                      uint32_t slots_completed, bool interrupted, SteadyClock::time_point ended,
-                     int& exit_code)
+                     int& exit_code, const CTransactionRef& parent)
 {
     const auto t0{schedule.t0};
     UniValue out{UniValue::VOBJ};
     out.pushKV("txid", tx->GetHash().ToString());
     out.pushKV("wtxid", tx->GetWitnessHash().ToString());
+    if (parent) {
+        out.pushKV("parent_txid", parent->GetHash().ToString());
+        out.pushKV("parent_wtxid", parent->GetWitnessHash().ToString());
+    }
     out.pushKV("chain", chain);
 
     out.pushKV("discovery", DiscoveryJson(discovery, /*addresses=*/false));
 
-    uint32_t connections{0}, handed{0}, written{0}, tx_written{0}, pongs{0};
+    uint32_t connections{0}, handed{0}, written{0}, tx_written{0}, parents_served{0}, pongs{0};
     UniValue slots{UniValue::VARR};
     for (uint32_t s = 0; s < records.size(); ++s) {
         const SlotRecord& rec{records[s]};
@@ -233,6 +237,7 @@ UniValue BuildReport(const std::string& chain, const CTransactionRef& tx, const 
             if (ev.inv_handed) ++handed;
             if (ev.inv_written) ++written;
             if (ev.tx_written) ++tx_written;
+            if (ev.parent_written) ++parents_served;
             if (ev.pong_received) ++pongs;
             UniValue ao{UniValue::VOBJ};
             ao.pushKV("endpoint", a.candidate.addr.ToStringAddrPort());
@@ -247,6 +252,9 @@ UniValue BuildReport(const std::string& chain, const CTransactionRef& tx, const 
             ao.pushKV("inv_written_ms", OptMs(ev.inv_written, t0));
             ao.pushKV("getdata_ms", OptMs(ev.getdata_received, t0));
             ao.pushKV("tx_written_ms", OptMs(ev.tx_written, t0));
+            ao.pushKV("parent_getdata_ms", OptMs(ev.parent_requested, t0));
+            ao.pushKV("parent_tx_written_ms", OptMs(ev.parent_written, t0));
+            ao.pushKV("parent_hold_expired_ms", OptMs(ev.hold_expired, t0));
             ao.pushKV("ping_written_ms", OptMs(ev.ping_written, t0));
             ao.pushKV("pong_ms", OptMs(ev.pong_received, t0));
             ao.pushKV("ended_ms", Ms(a.ended, t0));
@@ -265,6 +273,7 @@ UniValue BuildReport(const std::string& chain, const CTransactionRef& tx, const 
     summary.pushKV("announcements_handed", handed);
     summary.pushKV("announcements_written", written);
     summary.pushKV("tx_written", tx_written);
+    summary.pushKV("parents_served", parents_served);
     summary.pushKV("pongs", pongs);
     summary.pushKV("slots_completed", slots_completed);
     summary.pushKV("interrupted", interrupted);
@@ -283,7 +292,8 @@ JobReport RunJob(const JobConfig& cfg)
     FastRandomContext rng;
     const auto t0{SteadyClock::now()};
     const Schedule schedule{Schedule::Draw(t0, rng)};
-    LogInfo("job txid=%s wtxid=%s slots=%u\n", cfg.tx->GetHash().ToString(), cfg.tx->GetWitnessHash().ToString(), plan::SLOTS);
+    LogInfo("job txid=%s wtxid=%s%s slots=%u\n", cfg.tx->GetHash().ToString(), cfg.tx->GetWitnessHash().ToString(),
+            cfg.parent ? strprintf(" parent=%s", cfg.parent->GetHash().ToString()) : "", plan::SLOTS);
 
     // A signal only sets a flag; a slot thread blocked inside a SOCKS exchange would not see it
     // until that exchange returned. The watcher turns the flag into a SOCKS interrupt.
@@ -363,7 +373,7 @@ JobReport RunJob(const JobConfig& cfg)
                         // The attempt dials only if the job is not cancelled and the opportunity's grace
                         // has not passed, checked last thing before the connect; otherwise nothing was dialled.
                         auto res{RunAttempt(make_connector(*cand, socks_deadline), *cand, cfg.tx, start,
-                                            start + Scaled(plan::START_GRACE), schedule.AttemptDeadline(s, k), cfg.interrupted)};
+                                            start + Scaled(plan::START_GRACE), schedule.AttemptDeadline(s, k), cfg.interrupted, cfg.parent)};
                         if (!res) {
                             if (cfg.interrupted()) {
                                 rec.interrupted = true;
@@ -416,11 +426,11 @@ JobReport RunJob(const JobConfig& cfg)
 
     watcher_guard.Stop();
     int exit_code{2};
-    UniValue json{BuildReport(cfg.chain, cfg.tx, schedule, discovery, records, slots_completed, interrupted, SteadyClock::now(), exit_code)};
+    UniValue json{BuildReport(cfg.chain, cfg.tx, schedule, discovery, records, slots_completed, interrupted, SteadyClock::now(), exit_code, cfg.parent)};
     const UniValue& summary{json["summary"]};
-    LogInfo("job done: connections=%s announcements_written=%s tx_written=%s pongs=%s\n",
+    LogInfo("job done: connections=%s announcements_written=%s tx_written=%s%s pongs=%s\n",
             summary["connections"].getValStr(), summary["announcements_written"].getValStr(), summary["tx_written"].getValStr(),
-            summary["pongs"].getValStr());
+            cfg.parent ? strprintf(" parents_served=%s", summary["parents_served"].getValStr()) : "", summary["pongs"].getValStr());
     return JobReport{std::move(json), exit_code};
 }
 

@@ -84,6 +84,39 @@ privacy on top: the later slots open at random offsets within fixed windows, in 
 and at least five seconds apart, and there is no regular grid to recognise. The prompt trio is deliberately simultaneous, and
 backups can still cluster; bursts are not eliminated.
 
+## One parent, one child
+
+A transaction whose fee is too low to enter mempools on its own can be carried by a child
+that spends it, when the recipient evaluates the two together (Bitcoin Core 28 and later do
+this for exactly one parent and one child). Give the tool both transactions, in either order,
+and it works out which is which.
+
+- Only the child is announced. Announcing the parent would invite a request for it before
+  the child; a low-fee parent received alone is rejected, and the tool would then have to
+  serve it a second time, which it never does.
+- The child is served once, on request. The tool then holds for a fixed 30 s for the peer to
+  ask for the parent, which a recipient that lacks it does within a few seconds (after its
+  orphan-resolution delay and a Tor round trip). That request may batch the parent with the
+  child's other inputs, so the tool serves the parent and, like any node, answers the entries
+  it does not have with `notfound`; it never says that about its own two transactions. The parent is
+  served once, only if asked for after the child, and only if it is the parent given; then
+  PING as usual. If no request for the parent arrives within the hold, PING goes out anyway;
+  the tool cannot tell whether the peer already had the parent, was still waiting on a request
+  to another peer, or will not take the package.
+- One request window still bounds the whole exchange; the second request restarts nothing,
+  and the announcement point and the replacement rules are unchanged.
+- The tool cannot check that the child has no other unconfirmed parent, or that the child pays
+  enough for both, and there is no dry run for a package: `testmempoolaccept` checks each
+  transaction on its own and does not apply the child's fee to the parent, so it reports a
+  low-fee parent as "min relay fee not met" even when the package would be accepted, and
+  stops there without evaluating the child at all, so that rejection says nothing about the
+  child's validity. Work out the package feerate yourself. Nor can the tool see whether the
+  recipient accepted the package; a PONG means only that the recipient processed what we sent. A recipient older than
+  Core 28 asks for the parent, rejects it alone and keeps the child as an orphan only until we disconnect.
+- Serving a second transaction on request is something the node's own private broadcast never
+  does, so a recipient that asks for the parent knows it is talking to this tool. That the two
+  transactions belong together is already visible on the chain.
+
 ## What the tool deliberately does not do
 
 - Retry a slot after it has announced, however the peer behaved.
@@ -126,3 +159,8 @@ them where you would keep a wallet log.
   someone used the tool, not who.
 - Tor's own timing and reachability vary between users; the schedule fixes when the tool
   acts, not how fast the network answers.
+- In package mode, a recipient that already holds the child as an orphan learned from another
+  peer will not ask us for the parent, because we announce by txid, not wtxid; a parent it is
+  missing then stays unfilled from us. Covering that would need wtxid-relay announcement and
+  serving the parent to a peer that never took the child from us, so it is left as a known
+  limitation.

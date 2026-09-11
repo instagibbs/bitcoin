@@ -46,10 +46,18 @@ inline constexpr auto HANDSHAKE_TIMEOUT{45s};
 inline constexpr auto REQUEST_WINDOW{75s};
 /** After PING has been fully written, how long to wait for the PONG. */
 inline constexpr auto PONG_WAIT{10s};
+/**
+ * Package only: after the child has been fully written, how long to wait for the peer's request for
+ * the parent before PING goes out anyway. A recipient that lacks the parent asks after its
+ * orphan-resolution delay (non-preferred, txid-relay and overloaded delays, up to a few seconds
+ * each) plus a Tor round trip; this holds comfortably longer. One that already has it never asks.
+ */
+inline constexpr auto PARENT_HOLD{30s};
 /** Longest an attempt can run, from its scheduled start. */
 inline constexpr auto ATTEMPT_MAX{HANDSHAKE_TIMEOUT + REQUEST_WINDOW + PONG_WAIT};
 /** Raw transport bytes accepted per attempt before it is ended. */
 inline constexpr size_t MAX_RECV_BYTES{64 * 1024};
+static_assert(PARENT_HOLD + PONG_WAIT <= REQUEST_WINDOW); // a promptly written child gets its full hold and the reserved pong budget
 } // namespace wire
 
 enum class Outcome : uint8_t {
@@ -74,9 +82,12 @@ bool IsPostAnnouncement(Outcome outcome);
 /**
  * The per-connection state machine. Pure: it consumes complete messages, transport events and
  * clock ticks, and produces messages to send. It acts only on what the advertised profile makes
- * possible (VERSION, VERACK, one matching GETDATA, one matching PONG) and ignores everything
- * else. The attempt runner owns the socket, the transport and the byte cap, and reports back
- * when a message is handed to the transport and when it has been fully written.
+ * possible (VERSION, VERACK, one matching GETDATA per transaction it carries, one matching PONG)
+ * and ignores everything else. With a parent it announces the child only, serves it on request,
+ * then holds PARENT_HOLD for the peer's request for the parent before PING; the parent is served
+ * once, only after the child. The attempt runner owns the socket, the transport and the byte
+ * cap, and reports back when a message is handed to the transport and when it has been fully
+ * written.
  */
 class Session
 {
@@ -89,6 +100,9 @@ public:
         std::optional<SteadyClock::time_point> tx_written;
         std::optional<SteadyClock::time_point> ping_written;
         std::optional<SteadyClock::time_point> pong_received;
+        std::optional<SteadyClock::time_point> parent_requested; //!< package only: the peer asked for the parent
+        std::optional<SteadyClock::time_point> parent_written;   //!< package only: parent TX bytes fully written
+        std::optional<SteadyClock::time_point> hold_expired;     //!< package only: the hold ended with no parent request; PING sent without it
         uint32_t extra_requests{0}; //!< GETDATA messages received that were not the one served
     };
 
@@ -96,8 +110,9 @@ public:
      * @param[in] tx The transaction bound to this attempt.
      * @param[in] scheduled_start The opportunity's scheduled start; the handshake deadline counts from here.
      * @param[in] rng Source of the VERSION and PING nonces.
+     * @param[in] parent Optional unconfirmed parent of `tx`, served once if the peer asks for it after `tx`.
      */
-    Session(CTransactionRef tx, SteadyClock::time_point scheduled_start, FastRandomContext& rng);
+    Session(CTransactionRef tx, SteadyClock::time_point scheduled_start, FastRandomContext& rng, CTransactionRef parent = nullptr);
 
     /** Messages to send, in order. Draining transfers ownership. */
     std::vector<CSerializedNetMsg> TakeOutbound();
@@ -123,9 +138,11 @@ public:
     const Evidence& GetEvidence() const { return m_evidence; }
     uint64_t PingNonce() const { return m_ping_nonce; }
     SteadyClock::time_point Deadline() const { return m_deadline; }
+    /** Package only: when the wait for the parent request ends and PING goes out regardless. */
+    std::optional<SteadyClock::time_point> HoldEnd() const { return m_hold_end; }
 
 private:
-    enum class State { AWAIT_VERSION, AWAIT_VERACK, ANNOUNCED, TX_SENT, FINISHED };
+    enum class State { AWAIT_VERSION, AWAIT_VERACK, ANNOUNCED, PARENT_WAIT, TX_SENT, FINISHED };
 
     void Finish(Outcome outcome, std::string_view reason);
     void HandleVersion(DataStream& payload, SteadyClock::time_point now);
@@ -134,12 +151,14 @@ private:
     void HandlePong(DataStream& payload, SteadyClock::time_point now);
 
     const CTransactionRef m_tx;
+    const CTransactionRef m_parent; //!< null unless a package was given
     const uint64_t m_version_nonce;
     const uint64_t m_ping_nonce;
     State m_state{State::AWAIT_VERSION};
     Outcome m_outcome{Outcome::PENDING};
     std::string m_reason;
     SteadyClock::time_point m_deadline;
+    std::optional<SteadyClock::time_point> m_hold_end;
     std::vector<CSerializedNetMsg> m_outbound;
     Evidence m_evidence;
 };

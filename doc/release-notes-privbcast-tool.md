@@ -5,7 +5,9 @@ Tools and Utilities
   fixed number of peers over Tor without involving a running node. It resolves
   the release DNS seeds through the Tor proxy, connects to a bounded set of
   exit-path and onion peers on a schedule fixed when the job starts, serves the
-  transaction once per peer, and prints a JSON report. It shares no address
+  transaction once per peer, and prints a JSON report. Given a child and its
+  unconfirmed parent it announces the child and serves the parent to a peer that
+  asks for it, for one-parent-one-child package relay. It shares no address
   manager, ban list, connection table or caches with `bitcoind`, so nothing a
   recipient observes can be tied to the node. Check the transaction with
   `testmempoolaccept` first and watch for receipt with `getmempoolentry`; see

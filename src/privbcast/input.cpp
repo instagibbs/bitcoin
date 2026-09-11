@@ -10,6 +10,7 @@
 #include <core_io.h>
 #include <netaddress.h>
 #include <netbase.h>
+#include <policy/packages.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
@@ -20,6 +21,8 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
+#include <sstream>
 #include <utility>
 
 namespace privbcast {
@@ -131,6 +134,70 @@ std::optional<CTransactionRef> ParseAndCheckTransaction(const std::string& hex, 
         }
     }
     return tx;
+}
+
+std::optional<Package> ParseAndCheckPackage(const std::string& text, CAmount max_burn, std::string& error)
+{
+    std::vector<std::string> blobs;
+    std::istringstream in{text};
+    for (std::string blob; in >> blob;) blobs.push_back(std::move(blob));
+    if (blobs.empty()) {
+        error = "no transaction on stdin";
+        return std::nullopt;
+    }
+    if (blobs.size() > 2) {
+        error = "more than two transactions on stdin; give one, or a parent and its child";
+        return std::nullopt;
+    }
+    std::vector<CTransactionRef> txs;
+    for (const std::string& blob : blobs) {
+        const auto tx{ParseAndCheckTransaction(blob, max_burn, error)};
+        if (!tx) return std::nullopt;
+        txs.push_back(*tx);
+    }
+    if (txs.size() == 1) return Package{txs[0], nullptr};
+    if (txs[0]->GetHash() == txs[1]->GetHash()) {
+        error = "the same transaction was given twice";
+        return std::nullopt;
+    }
+    const auto spends = [](const CTransaction& a, const CTransaction& b) {
+        return std::any_of(a.vin.begin(), a.vin.end(), [&](const CTxIn& in) { return in.prevout.hash == b.GetHash(); });
+    };
+    const bool first_spends_second{spends(*txs[0], *txs[1])};
+    const bool second_spends_first{spends(*txs[1], *txs[0])};
+    if (first_spends_second == second_spends_first) {
+        error = first_spends_second ? "the two transactions spend each other" : "the two transactions are not a parent and its child";
+        return std::nullopt;
+    }
+    const CTransactionRef child{first_spends_second ? txs[0] : txs[1]};
+    const CTransactionRef parent{first_spends_second ? txs[1] : txs[0]};
+    // Stateless package sanity, as far as it can go without a UTXO set: the child must spend outputs the
+    // parent actually has, the two must not spend the same coin, and together they must fit the package
+    // weight limit. Whether the child pays enough for both is the caller's package preflight.
+    for (const CTxIn& in : child->vin) {
+        if (in.prevout.hash != parent->GetHash()) continue;
+        if (in.prevout.n >= parent->vout.size()) {
+            error = "the child spends an output the parent does not have";
+            return std::nullopt;
+        }
+        if (parent->vout[in.prevout.n].scriptPubKey.IsUnspendable()) {
+            error = "the child spends an unspendable output of the parent";
+            return std::nullopt;
+        }
+    }
+    std::set<COutPoint> parent_inputs;
+    for (const CTxIn& in : parent->vin) parent_inputs.insert(in.prevout);
+    for (const CTxIn& in : child->vin) {
+        if (parent_inputs.count(in.prevout) != 0) {
+            error = "the two transactions spend the same output";
+            return std::nullopt;
+        }
+    }
+    if (GetTransactionWeight(*parent) + GetTransactionWeight(*child) > int64_t{MAX_PACKAGE_WEIGHT}) {
+        error = "the two transactions exceed the package weight limit";
+        return std::nullopt;
+    }
+    return Package{child, parent};
 }
 
 } // namespace privbcast

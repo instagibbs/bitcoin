@@ -163,6 +163,8 @@ struct SlotRecord {
 
 struct JobConfig {
     CTransactionRef tx;
+    /** Optional unconfirmed parent of `tx`: never announced, served once when a peer asks for it after `tx`. */
+    CTransactionRef parent;
     Proxy tor;
     DiscoveryPlan discovery;
     std::string chain;
@@ -192,7 +194,7 @@ struct JobReport {
 UniValue BuildReport(const std::string& chain, const CTransactionRef& tx, const Schedule& schedule,
                      const DiscoveryResult& discovery, const std::vector<SlotRecord>& records,
                      uint32_t slots_completed, bool interrupted, SteadyClock::time_point ended,
-                     int& exit_code);
+                     int& exit_code, const CTransactionRef& parent = nullptr);
 
 JobReport RunJob(const JobConfig& cfg);
 

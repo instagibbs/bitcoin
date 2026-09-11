@@ -70,7 +70,7 @@ void SetupArgs(ArgsManager& argsman)
     argsman.AddArg("-timedivisor=<n>", "Regtest only: divide every plan duration by n so tests run quickly", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-fixedseed=<addr:port>", "Regtest only: bundled address to use instead of the release list; may be given more than once", ArgsManager::ALLOW_ANY | ArgsManager::DISALLOW_NEGATION, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-debug=<category>", "Output debug information to stderr (default: 0). Use -debug=1 for all categories.", ArgsManager::ALLOW_ANY, OptionsCategory::DEBUG_TEST);
-    argsman.AddCommand("send", "Read a final transaction in hex from stdin and announce it to a bounded set of peers through Tor");
+    argsman.AddCommand("send", "Read a final transaction in hex from stdin, or a parent and its child separated by whitespace, and announce it (the child) to a bounded set of peers through Tor; the parent is served to a peer that asks for it");
     argsman.AddCommand("discover", "Run discovery only and print the frozen candidate set");
 }
 
@@ -205,19 +205,19 @@ MAIN_FUNCTION
 
     // The transaction is read before the signal handlers are installed: an interrupt while
     // waiting for input simply terminates the process, nothing has happened yet.
-    CTransactionRef tx;
+    privbcast::Package package;
     if (cmd->command == "send") {
         std::string hex;
         if (!privbcast::ReadBounded(std::cin, privbcast::MAX_STDIN_BYTES, hex, error)) {
             tfm::format(std::cerr, "Error: %s\n", error);
             return EXIT_FAILURE;
         }
-        const auto parsed{privbcast::ParseAndCheckTransaction(hex, max_burn, error)};
+        const auto parsed{privbcast::ParseAndCheckPackage(hex, max_burn, error)};
         if (!parsed) {
             tfm::format(std::cerr, "Error: %s\n", error);
             return EXIT_FAILURE;
         }
-        tx = *parsed;
+        package = *parsed;
     }
 
 #ifndef WIN32
@@ -235,7 +235,8 @@ MAIN_FUNCTION
     }
 
     privbcast::JobConfig cfg;
-    cfg.tx = tx;
+    cfg.tx = package.tx;
+    cfg.parent = package.parent;
     cfg.tor = *tor;
     cfg.discovery = std::move(discovery);
     cfg.chain = Params().GetChainTypeString();

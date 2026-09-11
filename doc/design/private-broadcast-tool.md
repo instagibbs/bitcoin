@@ -2,34 +2,34 @@
 
 The goal is to broadcast a transaction without revealing the sender's IP address, onion
 address or long-term node identity. A job is one run of that broadcast. `bitcoin-privbcast`
-announces one final transaction to a bounded set of peers over Tor, makes at most 24
-connections to recipients on a schedule that ends within ten minutes, and keeps nothing but
-its report. The tool is a separate program from `bitcoind`.
+announces one final transaction, or one parent and its child, to a bounded set of peers over
+Tor, makes at most 24 connections to recipients on a schedule that ends within ten minutes,
+and keeps nothing but its report. The tool is a separate program from `bitcoind`.
 
 Two rules govern a job, and the rest of this document follows from them. A job touches no
 node state, so nothing a recipient sees at the P2P layer can be tied to the node. A job draws
 its schedule before its first connection, and nothing a peer does moves it. The tool does not
 promise delivery and does not do additional retries on its own.
 
-**Terms.** A *job* is one run of the broadcast: one transaction, from submission to
-report. A job has six *slots*, each a delivery target with its own times and its own
-peers: the times are drawn at job start, and the peers are assigned when discovery ends,
-before any recipient is contacted. A slot has up to four *opportunities*: a first
-peer at the slot's opening time and up to three backups at drawn intervals after it. An
-opportunity that is dialled is an *attempt*: one Tor stream, one BIP324 connection, one
-session of the fixed protocol profile on it. An opportunity with no peer left to assign is
-empty, and one the host could not dial within 5 s of its time is missed; neither is an
-attempt. A slot makes at most one announcement, and after it the slot's remaining
-opportunities lapse. So: job, slot, opportunity, attempt, and the report is shaped the
-same way, `slots[].attempts[]`.
+**Terms.** A *job* is one run of the broadcast: one transaction, or one parent and its
+child, from submission to report. A job has six *slots*, each a delivery target with its
+own times and its own peers: the times are drawn at job start, and the peers are assigned
+when discovery ends, before any recipient is contacted. A slot has up to four
+*opportunities*: a first peer at the slot's opening time and up to three backups at drawn
+intervals after it. An opportunity that is dialled is an *attempt*: one Tor stream, one
+BIP324 connection, one session of the fixed protocol profile on it. An opportunity with no
+peer left to assign is empty, and one the host could not dial within 5 s of its time is
+missed; neither is an attempt. A slot makes at most one announcement, and after it the
+slot's remaining opportunities lapse. So: job, slot, opportunity, attempt, and the report
+is shaped the same way, `slots[].attempts[]`.
 
 ## Who sees what
 
 Every party sees a Tor circuit rather than the sender.
 
-- A recipient sees an exit or an onion circuit, a constant wire profile, and the transaction.
-  The job has no IP address, onion address, peer set, address manager, mempool or validation
-  cache to leak.
+- A recipient sees an exit or an onion circuit, a constant wire profile, and the transaction
+  (a child and, on request, its parent). The job has no IP address, onion address, peer set,
+  address manager, mempool or validation cache to leak.
 - A Tor exit on an exit-path connection sees the recipient. The encrypted transport
   authenticates nobody, so the exit can also play the peer: see the transaction, and drop or
   alter that one connection. Onion connections do not pass through an exit.
@@ -77,10 +77,11 @@ marking the tool. The user agent is a constant that no node sends (see bitcoin/b
 The job requires a peer at protocol 70016 or later that offers `NODE_WITNESS`, accepts relay
 and sends WTXIDRELAY before its VERACK. It leaves any other peer before announcing anything.
 It ignores every other message, but ends the connection if the peer sends more than 64 KiB in
-all or a malformed message of a kind it acts on. A peer that declines the transaction, does
-not ask for it, or does not answer the PING sees nothing different from a peer that does
-everything promptly, except that the connection ends at its fixed deadline instead of
-earlier.
+all or a malformed message of a kind it acts on. In package mode, while it waits for the
+parent request, it also answers `notfound` for transactions it cannot supply (see "One
+parent, one child"). A peer that declines the transaction, does not ask for it, or does not
+answer the PING sees nothing different from a peer that does everything promptly, except that
+the connection ends at its fixed deadline instead of earlier.
 
 ## The schedule
 
@@ -123,11 +124,13 @@ scheduler jitter. The 50 s backup floor, the 310 s slot and the 568 s bound foll
 budgets, the discovery window and the latest late opening. The 15 s query deadline is
 measured: on one Tor client, RESOLVE bursts finished within 8 s nine times in ten, and 15 s
 kept the same candidates as 25 s. The 18 s discovery window adds a 3 s margin before delivery
-starts. The onion reachability under Limits comes from probing each release's fixed-seed
-list. Six slots, three of them prompt, three backups each, and the two windows are design
-choices: enough that losing a path or a few peers does not lose the job, few enough that a
-job stays small. None is a privacy parameter; changing one changes cost and robustness for
-every user of a release alike.
+starts. The 30 s parent hold is several times the roughly 4 s Core takes to ask an inbound
+peer for a missing parent: 2 s for a non-preferred peer and 2 s for a request by txid, plus a
+Tor round trip. The onion reachability under Limits comes from probing each release's
+fixed-seed list. Six slots, three of them prompt, three backups each, and the two windows are
+design choices: enough that losing a path or a few peers does not lose the job, few enough
+that a job stays small. None is a privacy parameter; changing one changes cost and robustness
+for every user of a release alike.
 
 The schedule makes no claim about hiding the user's address. That comes from the job having
 no node state and reaching everything through Tor. The schedule buys two things: delivery
@@ -136,12 +139,70 @@ is marginal and unpromised. The later slots open at random offsets within fixed 
 fixed order and at least 5 s apart, so there is no regular grid to recognize. The three
 prompt slots open together on purpose, and backups can still cluster, so bursts remain.
 
+## One parent, one child
+
+A transaction whose fee is too low to enter mempools on its own can be carried by a child
+that spends it, when the recipient evaluates the two together. Bitcoin Core 28 and later do
+this for exactly one parent and one child. Give the tool both transactions in either order;
+it works out which is which.
+
+- Only the child is announced. Announcing the parent would invite a request for it before
+  the child. A low-fee parent received alone is rejected, and the job does not serve a
+  transaction a second time.
+- The child is served once, on the exact single-entry request for it by wtxid. The job then
+  holds its PING for up to 30 s for the peer to ask for the parent. It always keeps the last
+  10 s of the request window for the PING, so a child requested late gets a shorter hold, or
+  none. A recipient that lacks the parent asks about 4 s later, because of Core's
+  orphan-resolution delays. That request may batch the parent with the child's other inputs,
+  so the job serves the parent and answers the entries it does not have with `notfound`, as a
+  node would, so the peer can ask elsewhere. It does so only while it holds the PING, or for
+  the parent-only request below, and never says `notfound` about its own two transactions.
+- The parent is served once, only if it is the parent given, and only on one of two requests:
+  - after the child was served and before the PING goes out, a request naming the parent by
+    txid as `MSG_WITNESS_TX`, which is how orphan resolution asks;
+  - before the child was served, a request naming the parent and not the child. A recipient
+    on Bitcoin Core 29 or later asks this way when it already holds the child as an orphan
+    learned from another peer: the job's wtxid announcement adds it as an announcer of that
+    orphan, so it asks the job only for the parent. The job cannot tell why a peer asks, and
+    answers any such request once.
+  Before the child has been served, a request that names both child and parent is ignored
+  outright, with no `notfound` either. The peer cannot have learned the child's inputs from
+  the job at that point, so the announcement did not cause that request. The connection
+  stays open, and a later request for the child alone is still answered. Once the parent is
+  served, PING goes out and nothing more is served on that connection.
+- If no request for the parent arrives within the hold, PING goes out anyway. The job cannot
+  tell whether the peer already had the parent, was still waiting on a request to another
+  peer, or will not take the package.
+- One request window still bounds the requests: the second one restarts nothing, and the
+  announcement point and the replacement rules are unchanged. As with a single transaction,
+  the PONG wait may end up to 10 s after the window, within the attempt's 130 s.
+- Which recipients accept the package depends on the parent. Bitcoin Core 31 and later accept
+  a parent below the minimum relay feerate as part of a package whatever its version; Bitcoin
+  Core 28 to 30 only if it is TRUC (version 3); older recipients drop it. Whether the package
+  reaches miners depends on what they run.
+- The tool cannot check that the child has no other unconfirmed parent or that it pays enough
+  for both, and there is no dry run for a package. `testmempoolaccept` checks each
+  transaction on its own and does not apply the child's fee to the parent, so it rejects a
+  low-fee parent ("min relay fee not met", or "mempool min fee not met" when the node's
+  mempool minimum is higher) even when the package would be accepted, and it stops there
+  without evaluating the child. That rejection says nothing about the child's validity. Work
+  out the package feerate yourself. The tool also cannot see whether the recipient accepted
+  the package; a PONG means only that the recipient processed what it was sent. A recipient
+  older than Bitcoin Core 28 asks for the parent, rejects it alone and keeps the child as an
+  orphan only until the job disconnects.
+- A second transaction is served on request only in package mode, that is, when the tool is
+  given two transactions. A recipient that asks for the parent therefore learns the sender
+  used package mode. That the two transactions belong together is already visible on the
+  chain.
+
 ## Using it
 
 1. Check the transaction with `bitcoin-cli testmempoolaccept` first. The tool itself does
    only stateless sanity checks. The check leaves the node's validation and coins caches
    untouched, but reading the inputs warms the node's database and page caches like any
-   UTXO lookup. If that matters, run the check on a node that is not your public one.
+   UTXO lookup. If that matters, run the check on a node that is not your public one. For a
+   parent and child the check rejects a low-fee parent on its own; see "One parent, one
+   child".
 2. Feed the final hex on stdin: `bitcoin-privbcast send < tx.hex`. Tor is expected at
    127.0.0.1:9050; pass `-tor=` for another listener. The JSON report goes to stdout and
    progress lines go to stderr.

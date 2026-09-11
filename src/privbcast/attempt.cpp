@@ -183,14 +183,15 @@ void RunSession(Sock& sock, Transport& transport, Session& session, AttemptResul
 
 std::optional<AttemptResult> RunAttempt(const Connector& connect, const Candidate& candidate, const CTransactionRef& tx,
                                         Clock::time_point scheduled_start, Clock::time_point dial_deadline,
-                                        Clock::time_point hard_deadline, const std::function<bool()>& interrupted)
+                                        Clock::time_point hard_deadline, const std::function<bool()>& interrupted,
+                                        CTransactionRef parent)
 {
     AttemptResult result;
     result.candidate = candidate;
     result.scheduled_start = scheduled_start;
 
     FastRandomContext rng;
-    Session session{tx, scheduled_start, rng};
+    Session session{tx, scheduled_start, rng, std::move(parent)};
     const auto handshake_deadline{session.Deadline()};
 
     // Everything is prepared. The last step before the dial: not if the job is cancelled, not if

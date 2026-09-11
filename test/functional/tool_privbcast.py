@@ -13,6 +13,7 @@ regtest-only flags supply the seeds, the bundled onions and a time divisor.
 import base64
 import hashlib
 import json
+from decimal import Decimal
 import os
 import platform
 import signal
@@ -26,7 +27,10 @@ from test_framework.messages import (
     MSG_WTX,
     NODE_WITNESS,
     msg_getdata,
+    msg_notfound,
     msg_sendtxrcncl,
+    msg_tx,
+    tx_from_hex,
 )
 from test_framework.netutil import format_addr_port
 from test_framework.p2p import (
@@ -153,6 +157,14 @@ class ProbingRecipient(Recipient):
         self.send_without_ping(msg_sendtxrcncl())
 
 
+class ChildOnlyPeer(P2PInterface):
+    """Delivers a child to the node and answers the node's request for its parent with NOTFOUND,
+    so the node keeps the child as an orphan and turns to the next announcer for the parent."""
+
+    def on_getdata(self, message):
+        self.send_without_ping(msg_notfound(vec=message.inv))
+
+
 class ToolPrivbcast(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
@@ -246,8 +258,8 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(proc.returncode, expected_rc)
         return proc
 
-    def run_send(self, tx_hex, *extra, expected_rc=0):
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", *extra, "send", stdin=tx_hex, expected_rc=expected_rc)
+    def run_send(self, tx_hex, *extra, expected_rc=0, time_divisor=TIME_DIVISOR):
+        proc = self.run_tool(f"-timedivisor={time_divisor}", *extra, "send", stdin=tx_hex, expected_rc=expected_rc)
         return json.loads(proc.stdout), proc
 
     def start_send(self, tx_hex, *extra):
@@ -287,9 +299,10 @@ class ToolPrivbcast(BitcoinTestFramework):
 
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
-        self.generate(self.wallet, 110)  # >100 for COINBASE_MATURITY, plus several spendable UTXOs
+        self.generate(self.wallet, 120)  # >100 for COINBASE_MATURITY, plus a margin of spendable UTXOs for every scenario
         self.test_argument_errors()
         self.test_bounded_job()
+        self.test_concurrent_invocations()
         self.test_interrupt()
         self.test_interrupt_mid_delivery()
         self.test_stalled_stderr()
@@ -300,6 +313,8 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.test_slow_resolve()
         self.test_interrupt_blocked_resolve()
         self.test_node_recipient()
+        self.test_package_node_recipient()
+        self.test_package_existing_orphan()
         self.test_discover()
 
     def test_argument_errors(self):
@@ -310,6 +325,12 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert "decode failed" in proc.stderr
         proc = self.run_tool("send", stdin="", expected_rc=1)
         assert "no transaction" in proc.stderr
+        # Two transactions must be a parent and its child; the same one twice is refused too.
+        other_hex = self.wallet.create_self_transfer()["hex"]
+        proc = self.run_tool("send", stdin=f"{tx_hex}\n{other_hex}", expected_rc=1)
+        assert "not a parent and its child" in proc.stderr
+        proc = self.run_tool("send", stdin=f"{tx_hex} {tx_hex}", expected_rc=1)
+        assert "given twice" in proc.stderr
         # Regtest-only flags are refused elsewhere, before any network activity.
         proc = self.run_tool("-seed=a.seed.", "send", stdin=tx_hex, expected_rc=1, chain="-signet")
         assert "only accepted on regtest" in proc.stderr
@@ -520,6 +541,35 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(node.listbanned(), banned_before)
         self.stop_proxy()
 
+    def test_concurrent_invocations(self):
+        self.log.info("Two send jobs run at once through one proxy, each its own broadcast")
+        # The tool keeps no state between jobs and locks nothing, so two invocations sharing one
+        # Tor proxy each complete independently. Distinct seeds and recipients let the run assert
+        # that neither job saw the other's peer.
+        addr1, addr2 = "8.5.0.1", "8.5.0.2"
+        self.start_proxy({"a.seed.": [addr1], "b.seed.": [addr2]},
+                         {addr1: (Recipient, True), addr2: (Recipient, True)})
+        node = self.nodes[0]
+        peers_before = len(node.getpeerinfo())
+        tx1 = self.wallet.create_self_transfer()
+        tx2 = self.wallet.create_self_transfer()
+        assert tx1["txid"] != tx2["txid"]
+        proc1 = self.start_send(tx1["hex"], "-seed=a.seed.")
+        proc2 = self.start_send(tx2["hex"], "-seed=b.seed.")  # both processes now live at once
+        rc1, report1 = self.finish_send(proc1)
+        rc2, report2 = self.finish_send(proc2)
+        for rc, report, tx, mine, other in ((rc1, report1, tx1, addr1, addr2), (rc2, report2, tx2, addr2, addr1)):
+            assert_equal(rc, 0)
+            assert_equal(report["txid"], tx["txid"])  # each job broadcast its own transaction
+            assert_greater_than_or_equal(report["summary"]["pongs"], 1)
+            assert_greater_than(report["summary"]["announcements_written"], 0)
+            served = self.attempts_to(report, mine)
+            assert_greater_than(len(served), 0)
+            assert any(a["outcome"] == "pong_received" for a in served)
+            assert_equal(self.attempts_to(report, other), [])  # never touched the other job's recipient
+        assert_equal(len(node.getpeerinfo()), peers_before)  # neither job made the node a recipient
+        self.stop_proxy()
+
     def test_interrupt(self):
         self.log.info("SIGINT during discovery ends the job promptly with exit status 2 and a report")
         self.start_proxy({"a.seed.": ["8.0.0.1"]}, {"8.0.0.1": (Recipient, True)})
@@ -661,6 +711,62 @@ class ToolPrivbcast(BitcoinTestFramework):
         # No recipient misbehaved, so nothing gets banned.
         assert_equal(node.listbanned(), banned_before)
         self.stop_proxy()
+
+    def test_package_node_recipient(self):
+        self.log.info("A child with a low-fee parent: the node asks for the parent after the child and accepts both")
+        node = self.nodes[0]
+        node_addr = "3.3.3.4"
+        self.start_proxy({"c.seed.": [node_addr]}, {}, node_endpoints=(node_addr,))
+        # A zero-fee parent: below any relay floor on its own; the child pays for both.
+        parent = self.wallet.create_self_transfer(fee_rate=Decimal("0"))
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
+        alone = node.testmempoolaccept([parent["hex"]])[0]
+        assert_equal(alone["allowed"], False)
+        assert "min relay fee not met" in alone["reject-reason"]
+        # testmempoolaccept does not apply the child's fee to the parent (no package feerates in test
+        # accepts), so it cannot vouch for this package; the P2P 1p1c path below is the real check.
+        # Child first on stdin: the tool orders the two by who spends whom. The node asks for the parent
+        # 4 s after the child arrives (non-preferred plus txid-relay delay: the tool is a wtxid-relay
+        # peer), which the parent hold must outlast; at TIME_DIVISOR the hold would be only 3 s.
+        report, _ = self.run_send(child["hex"] + "\n" + parent["hex"], "-seed=c.seed.", time_divisor=5)
+        self.log.debug(json.dumps(report, indent=1))
+        assert_equal(report["txid"], child["txid"])
+        assert_equal(report["parent_txid"], parent["txid"])
+        served = [a for _, a in self.attempts(report) if a["parent_tx_written_ms"] is not None]
+        assert_greater_than(len(served), 0)
+        for a in served:
+            assert a["getdata_ms"] is not None and a["tx_written_ms"] is not None
+            assert_greater_than_or_equal(a["parent_getdata_ms"], a["getdata_ms"])  # asked for only after the child was requested
+            assert_equal(a["outcome"], "pong_received")
+        assert_greater_than(report["summary"]["parents_served"], 0)
+        self.wait_until(lambda: child["txid"] in node.getrawmempool() and parent["txid"] in node.getrawmempool())
+        self.stop_proxy()
+
+    def test_package_existing_orphan(self):
+        self.log.info("A node that already holds the child as an orphan asks the tool only for the parent")
+        node = self.nodes[0]
+        node_addr = "3.3.3.5"
+        parent = self.wallet.create_self_transfer(fee_rate=Decimal("0"))
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
+        # Another peer delivers the child first; the node orphans it and that peer cannot supply the parent.
+        other = node.add_p2p_connection(ChildOnlyPeer())
+        other.send_without_ping(msg_tx(tx_from_hex(child["hex"])))
+        self.wait_until(lambda: child["txid"] in node.getorphantxs())
+        other.wait_until(lambda: "notfound" in other.last_message or "getdata" in other.last_message)
+        self.start_proxy({"e.seed.": [node_addr]}, {}, node_endpoints=(node_addr,))
+        # Only a wtxid announcement adds the tool as an announcer of the existing orphan (BIP339). The
+        # node then asks for the parent, never the child, 4 s later; see test_package_node_recipient.
+        report, _ = self.run_send(child["hex"] + "\n" + parent["hex"], "-seed=e.seed.", time_divisor=5)
+        self.log.debug(json.dumps(report, indent=1))
+        served = [a for _, a in self.attempts(report) if a["parent_tx_written_ms"] is not None]
+        assert_greater_than(len(served), 0)
+        for a in served:
+            assert a["getdata_ms"] is None and a["tx_written_ms"] is None  # the child was never asked for
+            assert_greater_than_or_equal(a["parent_getdata_ms"], a["inv_handed_ms"])
+            assert_equal(a["outcome"], "pong_received")
+        self.wait_until(lambda: child["txid"] in node.getrawmempool() and parent["txid"] in node.getrawmempool())
+        self.stop_proxy()
+        node.disconnect_p2ps()
 
     def test_discover(self):
         self.log.info("discover resolves through the proxy and opens no connection")

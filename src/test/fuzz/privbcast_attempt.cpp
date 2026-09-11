@@ -26,6 +26,7 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <utility>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -51,6 +52,9 @@ CTransactionRef FallbackTx()
 /** Counters the fuzz body keeps; the socket dies inside RunAttempt. */
 struct PeerStats {
     size_t tx_seen{0};
+    bool child_seen{false};
+    bool parent_seen{false};
+    bool parent_asked{false}; //!< a request the tool may answer with the parent was sent: alone, or after the child was served
     size_t inv_seen{0};
     size_t messages_seen{0};
 };
@@ -66,8 +70,8 @@ struct PeerStats {
 class ScriptedPeerSock final : public ZeroSock
 {
 public:
-    ScriptedPeerSock(FuzzedDataProvider& fdp, std::unique_ptr<Transport> peer, CTransactionRef tx, PeerStats& stats)
-        : m_fdp{fdp}, m_peer{std::move(peer)}, m_tx{std::move(tx)}, m_stats{stats},
+    ScriptedPeerSock(FuzzedDataProvider& fdp, std::unique_ptr<Transport> peer, CTransactionRef tx, CTransactionRef parent, PeerStats& stats)
+        : m_fdp{fdp}, m_peer{std::move(peer)}, m_tx{std::move(tx)}, m_parent{std::move(parent)}, m_stats{stats},
           m_stall_after{m_fdp.ConsumeIntegralInRange<int>(0, 31) == 0 ? m_fdp.ConsumeIntegralInRange<int>(0, 8) : -1} {}
 
     ScriptedPeerSock& operator=(Sock&&) override
@@ -228,12 +232,25 @@ private:
             const int requests{m_fdp.ConsumeBool() ? 1 : m_fdp.ConsumeIntegralInRange<int>(0, 3)};
             for (int i = 0; i < requests; ++i) {
                 std::vector<CInv> inv;
-                switch (m_fdp.ConsumeIntegralInRange<int>(0, 7)) {
+                switch (m_fdp.ConsumeIntegralInRange<int>(0, 9)) {
                 case 0: case 1: case 2: inv.emplace_back(MSG_WTX, wtxid); break;
                 case 3: inv.emplace_back(MSG_TX, txid); break;
                 case 4: inv.emplace_back(MSG_WITNESS_TX, txid); break;
                 case 5: inv.emplace_back(MSG_WTX, wtxid); inv.emplace_back(MSG_WTX, wtxid); break;
                 case 6: inv.emplace_back(MSG_WITNESS_TX, ConsumeUInt256(m_fdp)); break;
+                case 7: // the parent alone: served, as to a peer holding the child
+                    if (m_parent) {
+                        inv.emplace_back(MSG_WITNESS_TX, m_parent->GetHash().ToUint256());
+                        m_stats.parent_asked = true;
+                    }
+                    break;
+                case 8: // the parent batched with the child it was never served: not a request our announcement made possible, ignored
+                    if (m_parent && !m_stats.child_seen) {
+                        inv.emplace_back(m_fdp.ConsumeBool() ? MSG_WTX : MSG_WITNESS_TX, m_fdp.ConsumeBool() ? wtxid : txid);
+                        inv.emplace_back(MSG_WITNESS_TX, m_parent->GetHash().ToUint256());
+                        if (m_fdp.ConsumeBool()) std::swap(inv[0], inv[1]);
+                    }
+                    break;
                 default: break; // empty GETDATA
                 }
                 auto gd{NetMsg::Make(NetMsgType::GETDATA, inv)};
@@ -244,15 +261,47 @@ private:
             if (m_fdp.ConsumeIntegralInRange<int>(0, 7) == 0) Reply(NetMsg::Make(NetMsgType::INV, std::vector<CInv>{CInv{MSG_WTX, wtxid}}));
         } else if (type == NetMsgType::TX) {
             {
-                // The served transaction is exactly ours, witness included.
+                // The served transaction is exactly ours, witness included: the announced one and then
+                // (package only) the parent, or the parent alone; each at most once, nothing else.
                 CMutableTransaction got;
                 DataStream ts{msg.m_recv};
                 ts >> TX_WITH_WITNESS(got);
                 const CTransaction gtx{got};
-                assert(gtx.GetHash() == m_tx->GetHash() && gtx.GetWitnessHash() == m_tx->GetWitnessHash());
+                const bool is_child{gtx.GetHash() == m_tx->GetHash() && gtx.GetWitnessHash() == m_tx->GetWitnessHash()};
+                assert(is_child || (m_parent && gtx.GetHash() == m_parent->GetHash() && gtx.GetWitnessHash() == m_parent->GetWitnessHash()));
+                if (is_child) {
+                    assert(!m_stats.child_seen && !m_stats.parent_seen);
+                    m_stats.child_seen = true;
+                } else {
+                    assert(!m_stats.parent_seen);
+                    assert(m_stats.parent_asked); // never in answer to a request naming the unserved child
+                    m_stats.parent_seen = true;
+                }
+                // A recipient that lacks the parent asks for it now, by txid, sometimes batched with
+                // unrelated inputs (an old confirmed coin the peer no longer recognises).
+                if (is_child && m_parent && m_fdp.ConsumeIntegralInRange<int>(0, 3) != 0) {
+                    std::vector<CInv> req;
+                    if (m_fdp.ConsumeBool()) req.emplace_back(MSG_WITNESS_TX, ConsumeUInt256(m_fdp));
+                    req.emplace_back(MSG_WITNESS_TX, m_parent->GetHash().ToUint256());
+                    if (m_fdp.ConsumeBool()) req.emplace_back(MSG_WITNESS_TX, ConsumeUInt256(m_fdp));
+                    if (m_fdp.ConsumeBool()) req.emplace_back(MSG_WTX, m_tx->GetWitnessHash().ToUint256()); // our child by wtxid: never notfound
+                    if (m_fdp.ConsumeBool()) req.emplace_back(MSG_BLOCK, ConsumeUInt256(m_fdp));           // not a transaction request: ignored
+                    m_stats.parent_asked = true;
+                    Reply(NetMsg::Make(NetMsgType::GETDATA, req));
+                }
             }
             if (m_fdp.ConsumeIntegralInRange<int>(0, 3) == 0) Reply(NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WTX, m_tx->GetWitnessHash().ToUint256()}}));
             if (m_fdp.ConsumeIntegralInRange<int>(0, 3) == 0) Reply(NetMsg::Make(NetMsgType::PONG, m_fdp.ConsumeIntegral<uint64_t>()));
+        } else if (type == NetMsgType::NOTFOUND) {
+            // We are never told we lack our own child or parent.
+            DataStream ns{msg.m_recv};
+            std::vector<CInv> nf;
+            ns >> nf;
+            for (const CInv& e : nf) {
+                assert(e.IsGenTxMsg());
+                assert(e.hash != m_tx->GetHash().ToUint256() && e.hash != m_tx->GetWitnessHash().ToUint256());
+                assert(!m_parent || (e.hash != m_parent->GetHash().ToUint256() && e.hash != m_parent->GetWitnessHash().ToUint256()));
+            }
         } else if (type == NetMsgType::PING) {
             uint64_t nonce{0};
             DataStream payload{msg.m_recv};
@@ -275,6 +324,7 @@ private:
     FuzzedDataProvider& m_fdp;
     const std::unique_ptr<Transport> m_peer;
     const CTransactionRef m_tx;
+    const CTransactionRef m_parent; //!< package only
     PeerStats& m_stats;
     mutable std::deque<uint8_t> m_to_tool;
     mutable std::deque<CSerializedNetMsg> m_pending;
@@ -306,6 +356,14 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
     if (fdp.ConsumeBool()) {
         if (const auto mtx{ConsumeDeserializable<CMutableTransaction>(fdp, TX_WITH_WITNESS)}) tx = MakeTransactionRef(*mtx);
     }
+    // A package: the announced transaction becomes the child of a parent we also carry.
+    CTransactionRef parent;
+    if (!tx->vin.empty() && fdp.ConsumeBool()) {
+        parent = FallbackTx();
+        CMutableTransaction child{*tx};
+        child.vin[0].prevout = COutPoint{parent->GetHash(), 0};
+        tx = MakeTransactionRef(child);
+    }
     const bool onion{fdp.ConsumeBool()};
     Candidate cand;
     cand.source = onion ? Source::BUNDLED : Source::DNS_SEED;
@@ -322,7 +380,7 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
         peer_transport = std::make_unique<V1Transport>(NodeId{1});
     }
     PeerStats stats;
-    auto sock{std::make_unique<ScriptedPeerSock>(fdp, std::move(peer_transport), tx, stats)};
+    auto sock{std::make_unique<ScriptedPeerSock>(fdp, std::move(peer_transport), tx, parent, stats)};
     if (peer_kind == 5) sock->SetGarbagePeer();
 
     const int connect_mode{fdp.ConsumeIntegralInRange<int>(0, 15)};
@@ -360,7 +418,7 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
 
     // The dial deadline: within grace of the scheduled start, or already passed.
     const auto dial_deadline{fdp.ConsumeBool() ? scheduled_start + Scaled(std::chrono::seconds{5}) : now - std::chrono::milliseconds{1}};
-    const auto maybe{RunAttempt(connect, cand, tx, scheduled_start, dial_deadline, hard_deadline, interrupted)};
+    const auto maybe{RunAttempt(connect, cand, tx, scheduled_start, dial_deadline, hard_deadline, interrupted, parent)};
     if (!maybe) {
         // Not dialled: the job was cancelled or the grace had passed. The connector never ran.
         assert(!connector_called && !connected && stats.messages_seen == 0);
@@ -376,13 +434,13 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
     if (res.connected) assert(*res.connected >= res.started && *res.connected <= res.ended);
     assert(res.bytes_recv <= wire::MAX_RECV_BYTES + 0x4000);
     // The tool announces and serves the transaction at most once each, whatever the peer asked for.
-    assert(stats.tx_seen <= 1);
+    assert(stats.tx_seen <= (parent ? 2U : 1U));
     assert(stats.inv_seen <= 1);
     const auto& ev{res.evidence};
     if (ev.inv_written) assert(ev.inv_handed && *ev.inv_handed <= *ev.inv_written);
     if (ev.getdata_received) assert(ev.inv_handed);
     if (ev.tx_written) assert(ev.getdata_received);
-    if (ev.ping_written) assert(ev.tx_written);
+    if (ev.ping_written) assert(ev.tx_written || ev.parent_written); // the child, or (package) the parent alone
     if (ev.pong_received) assert(ev.ping_written && res.outcome == Outcome::PONG_RECEIVED); // the session ignores a PONG before its PING is written
     if (res.outcome == Outcome::PONG_RECEIVED) assert(ev.pong_received);
     if (res.outcome == Outcome::TX_WRITTEN_NO_PONG) assert(ev.ping_written && !ev.pong_received);
@@ -394,4 +452,19 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
     if (ev.getdata_received && ev.tx_written) assert(*ev.getdata_received <= *ev.tx_written);
     if (ev.tx_written && ev.ping_written) assert(*ev.tx_written <= *ev.ping_written);
     if (ev.ping_written && ev.pong_received) assert(*ev.ping_written <= *ev.pong_received);
+    // Package: the parent is asked for after the child was served, or alone after our announcement;
+    // written only after asked, and only ever when there is one.
+    if (!parent) assert(!ev.parent_requested && !ev.parent_written);
+    if (ev.parent_requested) {
+        assert(ev.inv_handed && *ev.inv_handed <= *ev.parent_requested);
+        if (ev.getdata_received) assert(*ev.getdata_received <= *ev.parent_requested);
+    }
+    if (ev.parent_written) {
+        assert(ev.parent_requested);
+        if (ev.tx_written) {
+            assert(*ev.tx_written <= *ev.parent_written && stats.tx_seen == 2);
+        } else {
+            assert(!ev.getdata_received && stats.tx_seen == 1); // the parent alone
+        }
+    }
 }

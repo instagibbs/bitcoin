@@ -18,6 +18,7 @@
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 
+#include <algorithm>
 #include <cassert>
 #include <sstream>
 #include <string>
@@ -89,6 +90,52 @@ FUZZ_TARGET(privbcast_input, .init = initialize_privbcast_input)
     {
         const auto bytes{ConsumeRandomLengthByteVector(fdp, 256)};
         (void)DecodeFixedSeeds(bytes);
+    }
+
+    // Package parsing: one blob, or two that must be a parent and its child, in either order.
+    {
+        CMutableTransaction p;
+        p.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{7}), 0});
+        p.vout.emplace_back(1000, CScript{} << OP_TRUE);
+        p.vout.emplace_back(1000, CScript{} << OP_TRUE); // two outputs so the child may spend index 0 or 1
+        const CTransactionRef parent{MakeTransactionRef(p)};
+        CMutableTransaction c;
+        c.vin.emplace_back(COutPoint{parent->GetHash(), fdp.ConsumeBool() ? 0U : 1U});
+        c.vout.emplace_back(500, CScript{} << OP_TRUE);
+        const CTransactionRef child{MakeTransactionRef(c)};
+        const auto hex_of = [](const CTransaction& t) { DataStream ds; ds << TX_WITH_WITNESS(t); return HexStr(ds); };
+        std::vector<std::string> blobs;
+        const size_t n{fdp.ConsumeIntegralInRange<size_t>(0, 3)};
+        for (size_t i = 0; i < n; ++i) {
+            switch (fdp.ConsumeIntegralInRange<int>(0, 3)) {
+            case 0: blobs.push_back(hex_of(*parent)); break;
+            case 1: blobs.push_back(hex_of(*child)); break;
+            case 2: blobs.push_back(fdp.ConsumeRandomLengthString(200)); break;
+            default:
+                if (const auto mtx{ConsumeDeserializable<CMutableTransaction>(fdp, TX_WITH_WITNESS)}) blobs.push_back(hex_of(CTransaction{*mtx}));
+                break;
+            }
+        }
+        std::string text;
+        for (const auto& b : blobs) text += b + (fdp.ConsumeBool() ? " " : "\n");
+        const auto pkg{ParseAndCheckPackage(text, MAX_MONEY, error)};
+        if (pkg) {
+            assert(pkg->tx);
+            // Count what the parser saw: a fuzzed blob may be empty or contain whitespace itself.
+            size_t tokens{0};
+            {
+                std::istringstream count{text};
+                for (std::string t; count >> t;) ++tokens;
+            }
+            assert(tokens == (pkg->parent ? 2U : 1U));
+            if (pkg->parent) {
+                // Ordered by who spends whom, whatever the input order; never the same transaction twice.
+                assert(pkg->tx->GetHash() != pkg->parent->GetHash());
+                assert(std::any_of(pkg->tx->vin.begin(), pkg->tx->vin.end(), [&](const CTxIn& in) { return in.prevout.hash == pkg->parent->GetHash(); }));
+            }
+        } else {
+            assert(!error.empty());
+        }
     }
 
     // Transaction checks: whatever passes must satisfy every stated rule.

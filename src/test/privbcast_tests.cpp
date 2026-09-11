@@ -9,6 +9,7 @@
 #include <primitives/transaction.h>
 #include <privbcast/attempt.h>
 #include <privbcast/discovery.h>
+#include <core_io.h>
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
@@ -65,6 +66,16 @@ CTransactionRef MakeTx()
     return MakeTransactionRef(mtx);
 }
 
+/** A transaction spending output 0 of `parent`: the child of a one-parent-one-child package. */
+CTransactionRef MakeChildOf(const CTransactionRef& parent)
+{
+    CMutableTransaction mtx;
+    mtx.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+    mtx.vin[0].scriptWitness.stack.push_back({4, 5, 6});
+    mtx.vout.emplace_back(500, CScript{} << OP_TRUE);
+    return MakeTransactionRef(mtx);
+}
+
 CSerializedNetMsg PeerVersion(int version = 70016, uint64_t services = NODE_NETWORK | NODE_WITNESS, bool relay = true)
 {
     return NetMsg::Make(NetMsgType::VERSION, version, services, int64_t{0},
@@ -82,10 +93,15 @@ std::string Types(const std::vector<CSerializedNetMsg>& msgs)
 }
 
 struct Harness {
+    CTransactionRef parent; //!< set for a package: `tx` is then its child
     CTransactionRef tx{MakeTx()};
     FastRandomContext rng{/*fDeterministic=*/true};
     SteadyClock::time_point t0{SteadyClock::now()};
-    Session session{tx, t0, rng};
+    Session session{tx, t0, rng, parent};
+
+    Harness() = default;
+    /** A package: `tx` becomes a child spending the given parent. */
+    explicit Harness(CTransactionRef parent_) : parent{std::move(parent_)}, tx{MakeChildOf(parent)}, session{tx, t0, rng, parent} {}
 
     void Feed(const CSerializedNetMsg& msg, SteadyClock::time_point now)
     {
@@ -122,6 +138,10 @@ struct Harness {
     CSerializedNetMsg Request() const
     {
         return NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WITNESS_TX, tx->GetHash().ToUint256()}});
+    }
+    CSerializedNetMsg ParentRequest() const
+    {
+        return NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WITNESS_TX, parent->GetHash().ToUint256()}});
     }
 };
 
@@ -901,6 +921,284 @@ BOOST_AUTO_TEST_CASE(run_attempt_decisions)
         const auto res{RunAttempt(closed_peer, exit_path, tx, SteadyClock::now(), SteadyClock::now() + 10s, SteadyClock::now() + 10s, never).value()};
         BOOST_CHECK(res.outcome == Outcome::NOT_ANNOUNCED);
         BOOST_CHECK_EQUAL(res.reason, "peer closed");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(session_package_child_then_parent)
+{
+    // The peer asks for the child, then for the parent within the hold: each served once, PING after the parent.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        BOOST_CHECK(!h.session.HoldEnd());
+        h.Feed(h.Request(), h.t0 + 1s);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "tx"); // no PING yet: the hold is for the parent request
+        BOOST_CHECK(!h.session.HoldEnd()); // the hold starts once the child has been written
+        h.session.OnMessageHandedToTransport(NetMsgType::TX, h.t0 + 1s);
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 2s);
+        BOOST_REQUIRE(h.session.HoldEnd());
+        BOOST_CHECK(*h.session.HoldEnd() == h.t0 + 2s + wire::PARENT_HOLD);
+        BOOST_CHECK(h.session.GetEvidence().tx_written == h.t0 + 2s);
+        h.Feed(h.ParentRequest(), h.t0 + 5s);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "tx,ping");
+        BOOST_CHECK(h.session.GetEvidence().parent_requested == h.t0 + 5s);
+        h.session.OnMessageHandedToTransport(NetMsgType::TX, h.t0 + 5s);
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 6s);
+        BOOST_CHECK(h.session.GetEvidence().parent_written == h.t0 + 6s);
+        h.session.OnMessageHandedToTransport(NetMsgType::PING, h.t0 + 6s);
+        h.session.OnMessageWritten(NetMsgType::PING, h.t0 + 6s);
+        // Further requests for either transaction are counted, never served again.
+        h.Feed(h.ParentRequest(), h.t0 + 7s);
+        h.Feed(h.Request(), h.t0 + 7s);
+        BOOST_CHECK(h.session.TakeOutbound().empty());
+        BOOST_CHECK_EQUAL(h.session.GetEvidence().extra_requests, 2U);
+        h.Feed(NetMsg::Make(NetMsgType::PONG, h.session.PingNonce()), h.t0 + 8s);
+        BOOST_CHECK(h.session.GetOutcome() == Outcome::PONG_RECEIVED);
+    }
+    // The parent is never served before the child.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        h.Feed(h.ParentRequest(), h.t0 + 1s);
+        BOOST_CHECK(h.session.TakeOutbound().empty());
+        BOOST_CHECK_EQUAL(h.session.GetEvidence().extra_requests, 1U);
+        BOOST_CHECK(!h.session.GetEvidence().parent_requested);
+        h.Feed(h.Request(), h.t0 + 2s);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "tx");
+    }
+    // No request for the parent within the hold: PING at the hold's end, a late request not served, then PONG.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        h.Feed(h.Request(), h.t0 + 1s);
+        (void)h.session.TakeOutbound();
+        h.session.OnMessageHandedToTransport(NetMsgType::TX, h.t0 + 1s);
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 2s);
+        const auto hold_end{h.t0 + 2s + wire::PARENT_HOLD};
+        BOOST_CHECK(*h.session.HoldEnd() == hold_end);
+        h.session.OnTick(hold_end - 1ms);
+        BOOST_CHECK(h.session.TakeOutbound().empty());
+        h.session.OnTick(hold_end);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "ping");
+        BOOST_CHECK(h.session.GetEvidence().hold_expired == hold_end);
+        BOOST_CHECK(h.session.Deadline() == h.t0 + wire::REQUEST_WINDOW); // a prompt hold end never moves the window
+        h.session.OnMessageHandedToTransport(NetMsgType::PING, hold_end);
+        h.session.OnMessageWritten(NetMsgType::PING, hold_end);
+        h.Feed(h.ParentRequest(), hold_end + 1s); // in TX_SENT now: counted, never served
+        BOOST_CHECK(h.session.TakeOutbound().empty());
+        BOOST_CHECK_EQUAL(h.session.GetEvidence().extra_requests, 1U);
+        BOOST_CHECK(!h.session.GetEvidence().parent_requested);
+        h.Feed(NetMsg::Make(NetMsgType::PONG, h.session.PingNonce()), hold_end + 2s);
+        BOOST_CHECK(h.session.GetOutcome() == Outcome::PONG_RECEIVED);
+    }
+    // A late child: the capped hold is already over when the child is written, so the next tick sends
+    // the PING and gives it PONG_WAIT past the window's end; the attempt no longer fails with it unsent.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        const auto window_end{h.session.Deadline()};
+        h.Feed(h.Request(), window_end - 2s);
+        (void)h.session.TakeOutbound();
+        h.session.OnMessageHandedToTransport(NetMsgType::TX, window_end - 2s);
+        h.session.OnMessageWritten(NetMsgType::TX, window_end - 1s);
+        BOOST_CHECK(*h.session.HoldEnd() == window_end - wire::PONG_WAIT); // capped, already in the past
+        BOOST_CHECK(h.session.TakeOutbound().empty()); // the write's own tick ran before the hold was set
+        h.session.OnTick(window_end - 1s);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "ping");
+        BOOST_CHECK(h.session.GetEvidence().hold_expired == window_end - 1s);
+        BOOST_CHECK(h.session.Deadline() == window_end - 1s + wire::PONG_WAIT);
+        h.session.OnMessageHandedToTransport(NetMsgType::PING, window_end - 1s);
+        h.session.OnMessageWritten(NetMsgType::PING, window_end);
+        h.Feed(NetMsg::Make(NetMsgType::PONG, h.session.PingNonce()), window_end + 1s);
+        BOOST_CHECK(h.session.GetOutcome() == Outcome::PONG_RECEIVED);
+    }
+    // Ticks landing at and past the window's end after a late child: the PING queued by the first tick
+    // survives the runner's repeated deadline checks until it is written.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        const auto window_end{h.session.Deadline()};
+        h.Feed(h.Request(), window_end - 2s);
+        (void)h.session.TakeOutbound();
+        h.session.OnMessageWritten(NetMsgType::TX, window_end - 1s);
+        h.session.OnTick(window_end); // fires the hold and queues the PING
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "ping");
+        h.session.OnTick(window_end);      // the runner's next tick
+        h.session.OnTick(window_end + 1s); // and a later one, still before the PING is written
+        BOOST_CHECK(!h.session.Finished());
+        h.session.OnMessageHandedToTransport(NetMsgType::PING, window_end + 1s);
+        h.session.OnMessageWritten(NetMsgType::PING, window_end + 2s);
+        h.Feed(NetMsg::Make(NetMsgType::PONG, h.session.PingNonce()), window_end + 3s);
+        BOOST_CHECK(h.session.GetOutcome() == Outcome::PONG_RECEIVED);
+        // The pending PING is bounded: unwritten for PONG_WAIT after the hold fired, the attempt fails.
+        Harness g{MakeTx()};
+        g.Announce(g.t0);
+        const auto end{g.session.Deadline()};
+        g.Feed(g.Request(), end - 2s);
+        (void)g.session.TakeOutbound();
+        g.session.OnMessageWritten(NetMsgType::TX, end - 1s);
+        g.session.OnTick(end);
+        g.session.OnTick(end + wire::PONG_WAIT);
+        BOOST_CHECK(g.session.GetOutcome() == Outcome::POST_ANNOUNCEMENT_FAILURE);
+        BOOST_CHECK_EQUAL(g.session.Reason(), "ping not written in time");
+    }
+    // A child that is never written fails at the window's end, as a single transaction would.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        h.Feed(h.Request(), h.t0 + 1s);
+        h.session.OnTick(h.session.Deadline());
+        BOOST_CHECK(h.session.GetOutcome() == Outcome::POST_ANNOUNCEMENT_FAILURE);
+        BOOST_CHECK_EQUAL(h.session.Reason(), "tx not written in time");
+    }
+    // Without a parent nothing changes: TX and PING together, no hold.
+    {
+        Harness h;
+        h.Announce(h.t0);
+        h.Feed(h.Request(), h.t0 + 1s);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "tx,ping");
+        h.session.OnMessageHandedToTransport(NetMsgType::TX, h.t0 + 1s);
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 2s);
+        BOOST_CHECK(!h.session.HoldEnd());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(session_package_parent_request_batched)
+{
+    const uint256 junk1{uint256{101}};
+    const uint256 junk2{uint256{102}};
+    // The peer batches our parent with unrelated inputs: serve the parent once, NOTFOUND the rest, then PING.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        h.Feed(h.Request(), h.t0 + 1s);
+        (void)h.session.TakeOutbound();
+        h.session.OnMessageHandedToTransport(NetMsgType::TX, h.t0 + 1s);
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 2s);
+        // Our child by wtxid and a block request are in the batch too: neither is served nor NOTFOUND.
+        h.Feed(NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{
+                   CInv{MSG_WITNESS_TX, junk1}, CInv{MSG_WITNESS_TX, h.parent->GetHash().ToUint256()}, CInv{MSG_WTX, h.tx->GetWitnessHash().ToUint256()},
+                   CInv{MSG_WITNESS_TX, junk2}, CInv{MSG_BLOCK, junk1}}),
+               h.t0 + 3s);
+        auto out{h.session.TakeOutbound()};
+        BOOST_CHECK_EQUAL(Types(out), "tx,notfound,ping");
+        std::vector<CInv> nf;
+        DataStream{out[1].data} >> nf;
+        BOOST_REQUIRE_EQUAL(nf.size(), 2U); // exactly the two unrelated entries, in order
+        BOOST_CHECK(nf[0].type == MSG_WITNESS_TX && nf[0].hash == junk1);
+        BOOST_CHECK(nf[1].type == MSG_WITNESS_TX && nf[1].hash == junk2);
+        BOOST_CHECK(h.session.GetEvidence().parent_requested == h.t0 + 3s);
+        BOOST_CHECK_EQUAL(h.session.GetEvidence().extra_requests, 0U);
+    }
+    // A request with none of our transactions: NOTFOUND everything, serve nothing, keep waiting.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        h.Feed(h.Request(), h.t0 + 1s);
+        (void)h.session.TakeOutbound();
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 2s);
+        h.Feed(NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WITNESS_TX, junk1}, CInv{MSG_WITNESS_TX, junk2}}), h.t0 + 3s);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "notfound");
+        BOOST_CHECK(!h.session.GetEvidence().parent_requested);
+        // The hold still ends the wait with a PING; nothing was mis-served.
+        h.session.OnTick(h.t0 + 2s + wire::PARENT_HOLD);
+        BOOST_CHECK_EQUAL(Types(h.session.TakeOutbound()), "ping");
+    }
+    // A repeat request for the child, or the parent by the wrong type: our own transactions, never NOTFOUND, never re-served.
+    {
+        Harness h{MakeTx()};
+        h.Announce(h.t0);
+        h.Feed(h.Request(), h.t0 + 1s);
+        (void)h.session.TakeOutbound();
+        h.session.OnMessageWritten(NetMsgType::TX, h.t0 + 2s);
+        h.Feed(NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WITNESS_TX, h.tx->GetHash().ToUint256()}}), h.t0 + 3s);
+        h.Feed(NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_TX, h.parent->GetHash().ToUint256()}}), h.t0 + 3s);
+        BOOST_CHECK(h.session.TakeOutbound().empty());
+        BOOST_CHECK_EQUAL(h.session.GetEvidence().extra_requests, 2U);
+        BOOST_CHECK(!h.session.GetEvidence().parent_requested);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(input_package_ordering)
+{
+    std::string error;
+    const CTransactionRef parent{MakeTx()};
+    const CTransactionRef child{MakeChildOf(parent)};
+    const std::string parent_hex{EncodeHexTx(*parent)};
+    const std::string child_hex{EncodeHexTx(*child)};
+    // One transaction: no parent.
+    {
+        const auto pkg{ParseAndCheckPackage(parent_hex, 0, error)};
+        BOOST_REQUIRE(pkg);
+        BOOST_CHECK(pkg->tx->GetHash() == parent->GetHash());
+        BOOST_CHECK(!pkg->parent);
+    }
+    // Two, in either order and with any whitespace: ordered by who spends whom.
+    for (const std::string& text : {parent_hex + "\n" + child_hex, child_hex + " \t " + parent_hex + "\n"}) {
+        const auto pkg{ParseAndCheckPackage(text, 0, error)};
+        BOOST_REQUIRE_MESSAGE(pkg, error);
+        BOOST_CHECK(pkg->tx->GetHash() == child->GetHash());
+        BOOST_REQUIRE(pkg->parent);
+        BOOST_CHECK(pkg->parent->GetHash() == parent->GetHash());
+    }
+    // Refused: an unrelated pair, the same transaction twice, three transactions, a bad blob, nothing.
+    const CTransactionRef other{MakeChildOf(MakeChildOf(parent))}; // a grandchild: neither spends the other
+    BOOST_CHECK(!ParseAndCheckPackage(parent_hex + " " + EncodeHexTx(*other), 0, error));
+    BOOST_CHECK_EQUAL(error, "the two transactions are not a parent and its child");
+    BOOST_CHECK(!ParseAndCheckPackage(parent_hex + " " + parent_hex, 0, error));
+    BOOST_CHECK_EQUAL(error, "the same transaction was given twice");
+    BOOST_CHECK(!ParseAndCheckPackage(parent_hex + " " + child_hex + " " + EncodeHexTx(*other), 0, error));
+    BOOST_CHECK_EQUAL(error, "more than two transactions on stdin; give one, or a parent and its child");
+    BOOST_CHECK(!ParseAndCheckPackage(parent_hex + " zz", 0, error));
+    BOOST_CHECK_EQUAL(error, "transaction decode failed");
+    BOOST_CHECK(!ParseAndCheckPackage("   ", 0, error));
+    BOOST_CHECK_EQUAL(error, "no transaction on stdin");
+    // The child must spend outputs the parent actually has.
+    {
+        CMutableTransaction bad;
+        bad.vin.emplace_back(COutPoint{parent->GetHash(), 5}); // parent has a single output
+        bad.vin[0].scriptWitness.stack.push_back({7});
+        bad.vout.emplace_back(400, CScript{} << OP_TRUE);
+        BOOST_CHECK(!ParseAndCheckPackage(parent_hex + " " + EncodeHexTx(CTransaction{bad}), 0, error));
+        BOOST_CHECK_EQUAL(error, "the child spends an output the parent does not have");
+    }
+    // The two must not spend the same coin.
+    {
+        CMutableTransaction conflict;
+        conflict.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+        conflict.vin.emplace_back(parent->vin[0].prevout); // the parent's own input
+        conflict.vout.emplace_back(300, CScript{} << OP_TRUE);
+        BOOST_CHECK(!ParseAndCheckPackage(parent_hex + " " + EncodeHexTx(CTransaction{conflict}), 0, error));
+        BOOST_CHECK_EQUAL(error, "the two transactions spend the same output");
+    }
+    // The child must not spend an unspendable output of the parent.
+    {
+        CMutableTransaction burn{*parent};
+        burn.vout.emplace_back(0, CScript{} << OP_RETURN);
+        const CTransactionRef burn_parent{MakeTransactionRef(burn)};
+        CMutableTransaction spend;
+        spend.vin.emplace_back(COutPoint{burn_parent->GetHash(), 1});
+        spend.vout.emplace_back(300, CScript{} << OP_TRUE);
+        BOOST_CHECK(!ParseAndCheckPackage(EncodeHexTx(*burn_parent) + " " + EncodeHexTx(CTransaction{spend}), 0, error));
+        BOOST_CHECK_EQUAL(error, "the child spends an unspendable output of the parent");
+    }
+    // Each transaction standard on its own, together over the package weight limit.
+    {
+        CMutableTransaction big;
+        big.vin.emplace_back(COutPoint{Txid::FromUint256(uint256{9}), 0});
+        big.vout.emplace_back(1000, CScript{} << OP_TRUE);
+        const std::vector<unsigned char> nops(99'900, OP_NOP);
+        big.vout.emplace_back(0, CScript(nops.begin(), nops.end())); // zero value: no burn to account for
+        const CTransactionRef big_parent{MakeTransactionRef(big)};
+        BOOST_CHECK(GetTransactionWeight(*big_parent) <= MAX_STANDARD_TX_WEIGHT);
+        CMutableTransaction kid;
+        kid.vin.emplace_back(COutPoint{big_parent->GetHash(), 0});
+        const std::vector<unsigned char> pad(1200, OP_NOP);
+        kid.vout.emplace_back(500, CScript(pad.begin(), pad.end()));
+        const CTransactionRef big_child{MakeTransactionRef(kid)};
+        BOOST_CHECK(GetTransactionWeight(*big_parent) + GetTransactionWeight(*big_child) > int64_t{MAX_PACKAGE_WEIGHT});
+        BOOST_CHECK(!ParseAndCheckPackage(EncodeHexTx(*big_parent) + " " + EncodeHexTx(*big_child), 0, error));
+        BOOST_CHECK_EQUAL(error, "the two transactions exceed the package weight limit");
     }
 }
 

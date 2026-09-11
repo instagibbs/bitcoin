@@ -53,7 +53,7 @@ bool IsActedType(const std::string& type)
  * the privacy property. Only the two random nonces vary, so VERSION is checked field by field
  * (its nonce is not exposed) and the rest are rebuilt from constants and compared as bytes.
  */
-void CheckEmitted(const CSerializedNetMsg& msg, const uint256& txid, const CTransactionRef& tx, uint64_t ping_nonce)
+void CheckEmitted(const CSerializedNetMsg& msg, const uint256& txid, const CTransactionRef& parent, const CTransactionRef& tx, uint64_t ping_nonce)
 {
     if (msg.m_type == NetMsgType::VERSION) {
         DataStream s{msg.data};
@@ -87,6 +87,17 @@ void CheckEmitted(const CSerializedNetMsg& msg, const uint256& txid, const CTran
         assert(msg.data == NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*tx)).data);
     } else if (msg.m_type == NetMsgType::PING) {
         assert(msg.data == NetMsg::Make(NetMsgType::PING, ping_nonce).data);
+    } else if (msg.m_type == NetMsgType::NOTFOUND) {
+        // We only ever tell a peer we lack a transaction that is neither our child nor our parent.
+        DataStream s{msg.data};
+        std::vector<CInv> inv;
+        s >> inv;
+        assert(!inv.empty());
+        for (const CInv& e : inv) {
+            assert(e.IsGenTxMsg()); // only transaction requests are answered at all
+            assert(e.hash != txid && e.hash != tx->GetWitnessHash().ToUint256());
+            assert(!parent || (e.hash != parent->GetHash().ToUint256() && e.hash != parent->GetWitnessHash().ToUint256()));
+        }
     } else {
         assert(false); // the session never emits any other type
     }
@@ -101,6 +112,8 @@ void CheckDeadline(const Session& session, SteadyClock::time_point scheduled_sta
         expected = *ev.ping_written + Scaled(wire::PONG_WAIT);
     } else if (ev.inv_handed) {
         expected = *ev.inv_handed + Scaled(wire::REQUEST_WINDOW);
+        // A hold that ran out gives the PING PONG_WAIT to be written, never shortening the window.
+        if (ev.hold_expired) expected = std::max(expected, *ev.hold_expired + Scaled(wire::PONG_WAIT));
     } else {
         expected = scheduled_start + Scaled(wire::HANDSHAKE_TIMEOUT);
     }
@@ -112,7 +125,8 @@ bool EvidenceEqual(const Session::Evidence& a, const Session::Evidence& b)
     return a.version_received == b.version_received && a.inv_handed == b.inv_handed &&
            a.inv_written == b.inv_written && a.getdata_received == b.getdata_received &&
            a.tx_written == b.tx_written && a.ping_written == b.ping_written &&
-           a.pong_received == b.pong_received && a.extra_requests == b.extra_requests;
+           a.pong_received == b.pong_received && a.parent_requested == b.parent_requested &&
+           a.parent_written == b.parent_written && a.hold_expired == b.hold_expired && a.extra_requests == b.extra_requests;
 }
 
 void initialize_privbcast_session()
@@ -133,16 +147,25 @@ FUZZ_TARGET(privbcast_session, .init = initialize_privbcast_session)
     // twins. Every meaningful event is applied to both; only `twin` additionally receives traffic the
     // session must ignore. If ignored traffic ever changed anything a recipient can see, the twins'
     // outbound bytes, deadline, outcome or evidence would diverge and one of the asserts below fires.
+    // A package: the announced transaction becomes the child of a parent we also carry.
+    CTransactionRef parent;
+    if (!tx->vin.empty() && fdp.ConsumeBool()) {
+        parent = FallbackTx();
+        CMutableTransaction child{*tx};
+        child.vin[0].prevout = COutPoint{parent->GetHash(), 0};
+        tx = MakeTransactionRef(child);
+    }
     FastRandomContext rng_a{/*fDeterministic=*/true};
     FastRandomContext rng_b{/*fDeterministic=*/true};
     const auto start{SteadyClock::time_point{std::chrono::seconds{fdp.ConsumeIntegral<uint32_t>()}}};
     auto now{start};
-    Session real{tx, start, rng_a};
-    Session twin{tx, start, rng_b};
+    Session real{tx, start, rng_a, parent};
+    Session twin{tx, start, rng_b, parent};
     assert(real.PingNonce() == twin.PingNonce());
     const uint64_t our_nonce{real.PingNonce()};
     const auto txid{tx->GetHash().ToUint256()};
     const auto wtxid{tx->GetWitnessHash().ToUint256()};
+    const uint256 parent_txid{parent ? parent->GetHash().ToUint256() : uint256{}};
 
     // Outbound is asserted identical between the twins, so one set of transport bookkeeping serves both.
     std::vector<std::string> queued;
@@ -157,8 +180,14 @@ FUZZ_TARGET(privbcast_session, .init = initialize_privbcast_session)
         for (size_t i = 0; i < a.size(); ++i) {
             assert(a[i].m_type == b[i].m_type);
             assert(a[i].data == b[i].data); // ignored traffic to the twin changed nothing on the wire
-            CheckEmitted(a[i], txid, tx, our_nonce);
-            if (a[i].m_type == NetMsgType::TX) ++tx_messages;
+            if (a[i].m_type == NetMsgType::TX) {
+                // The announced transaction first, then (package only) the parent, byte-exact; never anything else.
+                ++tx_messages;
+                assert(tx_messages <= (parent ? 2U : 1U));
+                assert(a[i].data == NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(tx_messages == 1 ? *tx : *parent)).data);
+            } else {
+                CheckEmitted(a[i], txid, parent, tx, our_nonce);
+            }
             if (a[i].m_type == NetMsgType::INV) ++inv_messages;
             queued.push_back(a[i].m_type);
         }
@@ -168,8 +197,8 @@ FUZZ_TARGET(privbcast_session, .init = initialize_privbcast_session)
         assert(real.Announced() == twin.Announced());
         assert(EvidenceEqual(real.GetEvidence(), twin.GetEvidence()));
         CheckDeadline(real, start);
-        // Serve once, announce once.
-        assert(tx_messages <= 1);
+        // Serve each transaction once, announce once.
+        assert(tx_messages <= (parent ? 2U : 1U));
         assert(inv_messages <= 1);
         if (real.Finished()) {
             assert(real.GetOutcome() != Outcome::PENDING);
@@ -184,7 +213,14 @@ FUZZ_TARGET(privbcast_session, .init = initialize_privbcast_session)
         if (ev.tx_written) assert(ev.getdata_received);
         if (ev.ping_written) assert(ev.getdata_received);
         if (ev.pong_received) assert(ev.getdata_received && real.GetOutcome() == Outcome::PONG_RECEIVED);
-        if (tx_messages == 1) assert(ev.getdata_received);
+        if (tx_messages >= 1) assert(ev.getdata_received);
+        if (tx_messages == 2) assert(ev.parent_requested);
+        // Package evidence: the parent is asked for only after the child was requested, written only after asked.
+        if (ev.parent_requested) assert(parent && ev.getdata_received && *ev.getdata_received <= *ev.parent_requested);
+        if (ev.parent_written) assert(ev.parent_requested && ev.tx_written);
+        if (!parent) assert(!real.HoldEnd() && !ev.parent_requested && !ev.parent_written);
+        // The hold runs from the child's write, reserving the last PONG_WAIT of the request window.
+        if (parent && ev.tx_written && !ev.parent_requested && !ev.hold_expired && !ev.ping_written) assert(real.HoldEnd() == std::min(*ev.tx_written + Scaled(wire::PARENT_HOLD), real.Deadline() - Scaled(wire::PONG_WAIT)));
         assert(!OutcomeName(real.GetOutcome()).empty()); // every outcome has a stable name
     };
 
@@ -229,7 +265,7 @@ FUZZ_TARGET(privbcast_session, .init = initialize_privbcast_session)
                 const size_t n{fdp.ConsumeIntegralInRange<size_t>(0, 3)};
                 for (size_t i = 0; i < n; ++i) {
                     const uint32_t type{fdp.PickValueInArray<uint32_t>({MSG_TX, MSG_WITNESS_TX, MSG_WTX, MSG_BLOCK, MSG_WITNESS_TX, fdp.ConsumeIntegral<uint32_t>()})};
-                    const uint256 hash{fdp.ConsumeBool() ? txid : fdp.ConsumeBool() ? wtxid : ConsumeUInt256(fdp)};
+                    const uint256 hash{fdp.ConsumeBool() ? txid : fdp.ConsumeBool() ? wtxid : (parent && fdp.ConsumeBool()) ? parent_txid : (parent && fdp.ConsumeBool()) ? parent->GetWitnessHash().ToUint256() : ConsumeUInt256(fdp)};
                     inv.emplace_back(type, hash);
                 }
                 auto msg{NetMsg::Make(NetMsgType::GETDATA, inv)};
@@ -284,6 +320,10 @@ FUZZ_TARGET(privbcast_session, .init = initialize_privbcast_session)
                 const bool emitted{std::find(queued.begin(), queued.end(), type) != queued.end() ||
                                    std::find(handed.begin(), handed.end(), type) != handed.end()};
                 if (!emitted && type != NetMsgType::INV && type != NetMsgType::TX && type != NetMsgType::PING) {
+                    // Every callback carries the clock; take its effect (a hold running out records evidence)
+                    // before the snapshot, so the callback itself must be the no-op.
+                    real.OnTick(now);
+                    twin.OnTick(now);
                     const auto br{real.GetEvidence()};
                     const auto bt{twin.GetEvidence()};
                     real.OnMessageHandedToTransport(type, now);

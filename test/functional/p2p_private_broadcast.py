@@ -12,6 +12,7 @@ covered by tool_privbcast.py; this test covers the node side: queueing, concurre
 abort, the report, and that the node's own mempool only learns the transaction from the network.
 """
 import base64
+from decimal import Decimal
 import hashlib
 import threading
 
@@ -210,6 +211,47 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_equal(job["announced"], True)
         assert_equal(job["report"]["summary"]["interrupted"], False)
         assert_greater_than_or_equal(job["report"]["summary"]["announcements_written"], 1)
+
+        self.log.info("submitpackage with a low-fee parent and its child queues one job that serves the parent on request")
+        # The recipient asks for a missing parent after its orphan-resolution delays; with the plan scaled by
+        # TIME_DIVISOR the parent hold is 3 s, shorter than the extra delay a node applies while it has
+        # wtxid-relay peers. Take the ordinary node0-node1 link away for this part so node1 asks promptly.
+        # And let node1 be reached through one endpoint only: with several connections from the same job,
+        # node1 may ask a connection that has not served the child for the parent, which the protocol
+        # does not answer (one parent, one child, on one connection).
+        self.disconnect_nodes(0, 1)
+        with self.lock:
+            self.exit_path_active = [self.exit_path[0]]
+        parent = self.wallet.create_self_transfer(fee_rate=Decimal("0"))
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
+        res = self.nodes[0].submitpackage([parent["hex"], child["hex"]])
+        assert_equal(res["package_msg"], "parent-reconsiderable")
+        assert "min relay fee not met" in res["tx-results"][parent["wtxid"]]["error"]
+        assert_equal(res["tx-results"][child["wtxid"]]["error"], "package-not-validated")
+        job_id = res["private_broadcast_job"]
+        assert_equal(self.jobs()[job_id]["parent_txid"], parent["txid"])
+        assert parent["txid"] not in self.nodes[0].getrawmempool()
+        job = self.wait_for_state(job_id, "done")
+        assert_greater_than_or_equal(job["report"]["summary"]["parents_served"], 1)
+        self.wait_until(lambda: child["txid"] in self.nodes[1].getrawmempool() and parent["txid"] in self.nodes[1].getrawmempool())
+        assert child["txid"] not in self.nodes[0].getrawmempool()
+        # node1 does not announce transactions it already had when a peer connects, so node0 is not
+        # expected to learn these two; receipt-back was covered above.
+        self.connect_nodes(0, 1)
+        with self.lock:
+            self.exit_path_active = list(self.exit_path)
+
+        self.log.info("Under -privatebroadcast a package is at most one parent and its child, and a valid single transaction also works")
+        p1 = self.wallet.create_self_transfer()
+        p2 = self.wallet.create_self_transfer()
+        c = self.wallet.create_self_transfer_multi(utxos_to_spend=[p1["new_utxo"], p2["new_utxo"]])
+        assert_raises_rpc_error(-8, "one parent and its child", self.nodes[0].submitpackage, [p1["hex"], p2["hex"], c["hex"]])
+        single = self.wallet.create_self_transfer()
+        res = self.nodes[0].submitpackage([single["hex"]])
+        assert_equal(res["package_msg"], "success")
+        assert "fees" in res["tx-results"][single["wtxid"]]
+        assert single["txid"] not in self.nodes[0].getrawmempool()
+        self.wait_for_state(res["private_broadcast_job"], "done")
 
         self.log.info("Disabling networking aborts running and queued jobs for good; re-enabling admits new ones")
         txs = [self.wallet.create_self_transfer() for _ in range(MAX_CONCURRENT_JOBS + 1)]

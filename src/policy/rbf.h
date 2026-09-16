@@ -17,6 +17,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 class CFeeRate;
 class uint256;
@@ -69,6 +70,36 @@ RBFTransactionState IsRBFOptInEmptyMempool(const CTransaction& tx);
 std::optional<std::string> GetEntriesForConflicts(const CTransaction& tx, CTxMemPool& pool,
                                                   const CTxMemPool::setEntries& iters_conflicting,
                                                   CTxMemPool::setEntries& all_conflicts)
+    EXCLUSIVE_LOCKS_REQUIRED(pool.cs);
+
+/** Choose which transactions to evict so that replacement fits within cluster limits.
+ *
+ * The replacement and its in-mempool ancestors are pinned. Every other transaction remaining
+ * (after removals) in the parents' clusters that stays connected to the pinned set is a candidate.
+ * Candidates are grouped into chunks of their own linearization, then kept greedily in decreasing
+ * feerate order while they fit the remaining count and weight budget, provided their parents are
+ * kept or pinned. Everything not kept is returned for eviction. Material that the removals
+ * disconnect from the pinned set is neither budgeted nor evicted.
+ *
+ * The kept set is ancestor-closed, so the returned set is descendant-closed and the replacement's
+ * resulting cluster is a subset of the pinned and kept transactions, which fit by construction.
+ *
+ * @param[in]  ancestors  In-mempool ancestors of replacement (main graph).
+ * @param[in]  removals   Transactions already staged for removal (direct conflicts and their
+ *                        descendants); excluded from candidates and never returned.
+ * @param[in]  max_count  Cluster count limit.
+ * @param[in]  max_weight Cluster sigop-adjusted weight limit, in weight units.
+ * @return the entries to evict, or nullopt if the pinned set alone exceeds a limit or overlaps
+ *         removals. Does not check the cluster work bound, fees, or the feerate diagram. The main
+ *         graph must not be oversized.
+ */
+std::optional<CTxMemPool::setEntries> GetEntriesForSiblingEviction(const CTxMemPool& pool,
+                                                                  const CTxMemPoolEntry& replacement,
+                                                                  const std::vector<CTxMemPoolEntry::CTxMemPoolEntryRef>& parents,
+                                                                  const CTxMemPool::setEntries& ancestors,
+                                                                  const CTxMemPool::setEntries& removals,
+                                                                  int64_t max_count,
+                                                                  int64_t max_weight)
     EXCLUSIVE_LOCKS_REQUIRED(pool.cs);
 
 /** Check the intersection between two sets of transactions (a set of mempool entries and a set of

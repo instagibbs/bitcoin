@@ -471,7 +471,7 @@ public:
          * any transaction spending the same inputs as a transaction in the mempool is considered
          * a conflict. */
         const bool m_allow_replacement;
-        /** When true, allow sibling eviction. This only occurs in single transaction package settings. */
+        /** Allow sibling eviction during single-transaction admission, including individual transactions within packages. */
         const bool m_allow_sibling_eviction;
         /** Used to skip the LimitMempoolSize() call within AcceptSingleTransaction(). This should be used when multiple
          * AcceptSubPackage calls are expected and the mempool will be trimmed at the end of AcceptPackage(). */
@@ -669,8 +669,9 @@ private:
     // only tests that are fast should be done here (to avoid CPU DoS).
     bool PreChecks(ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
-    // Run checks for mempool replace-by-fee, only used in AcceptSingleTransaction.
-    bool ReplacementChecks(Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
+    // Run checks for mempool replace-by-fee, including sibling eviction when cluster limits
+    // would otherwise be exceeded. Only used in AcceptSingleTransaction.
+    bool ReplacementChecks(const ATMPArgs& args, Workspace& ws) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_pool.cs);
 
     bool PackageRBFChecks(const std::vector<CTransactionRef>& txns,
                           std::vector<Workspace>& workspaces,
@@ -958,15 +959,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                 // Potential sibling eviction. Add the sibling to our list of mempool conflicts to be
                 // included in RBF checks.
                 ws.m_conflicts.insert(err->second->GetHash());
-                // Adding the sibling to m_iters_conflicting here means that it doesn't count towards
-                // RBF Carve Out above. This is correct, since removing to-be-replaced transactions from
-                // the descendant count is done separately in SingleTRUCChecks for TRUC transactions.
                 ws.m_iters_conflicting.insert(m_pool.GetIter(err->second->GetHash()).value());
                 ws.m_sibling_eviction = true;
                 // The sibling will be treated as part of the to-be-replaced set in ReplacementChecks.
-                // Note that we are not checking whether it opts in to replaceability via BIP125 or TRUC
-                // (which is normally done in PreChecks). However, the only way a TRUC transaction can
-                // have a non-TRUC and non-BIP125 descendant is due to a reorg.
             } else {
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "TRUC-violation", err->first);
             }
@@ -978,7 +973,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     return true;
 }
 
-bool MemPoolAccept::ReplacementChecks(Workspace& ws)
+bool MemPoolAccept::ReplacementChecks(const ATMPArgs& args, Workspace& ws)
 {
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
@@ -1002,21 +997,66 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
         m_subpackage.m_conflicting_size += it->GetTxSize();
     }
 
-    if (const auto err_string{PaysForRBF(m_subpackage.m_conflicting_fees, ws.m_modified_fees, ws.m_vsize,
-                                         m_pool.m_opts.incremental_relay_feerate, hash)}) {
-        // Result may change in a package context
-        return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
-                             strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
-    }
+    const auto pays_for_replacement = [&]() EXCLUSIVE_LOCKS_REQUIRED(m_pool.cs) {
+        if (!m_subpackage.m_rbf) return true;
+        if (const auto err_string{PaysForRBF(m_subpackage.m_conflicting_fees, ws.m_modified_fees, ws.m_vsize,
+                                             m_pool.m_opts.incremental_relay_feerate, hash)}) {
+            // Result may change in a package context
+            return state.Invalid(TxValidationResult::TX_RECONSIDERABLE,
+                                 strprintf("insufficient fee%s", ws.m_sibling_eviction ? " (including sibling eviction)" : ""), *err_string);
+        }
+        return true;
+    };
+    if (!pays_for_replacement()) return false;
 
     // Add all the to-be-removed transactions to the changeset.
     for (auto it : all_conflicts) {
         m_subpackage.m_changeset->StageRemoval(it);
     }
 
-    // Run cluster size limit checks and fail if we exceed them.
+    // Try ordinary admission first. For non-TRUC transactions, only consider sibling eviction
+    // when cluster limits would otherwise prevent acceptance, including after direct RBF.
     if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        if (!args.m_allow_sibling_eviction || args.m_bypass_limits || tx.version == TRUC_VERSION) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        }
+        // Bound the work before traversing anything. The direct conflicts' clusters were already
+        // traversed above; the parents' clusters are traversed below.
+        CTxMemPool::setEntries affected{ws.m_iters_conflicting};
+        for (const auto& parent : ws.m_parents) affected.insert(*m_pool.GetIter(parent.get().GetTx().GetHash()));
+        if (const auto num_clusters{m_pool.GetUniqueClusterCount(affected)}; num_clusters > MAX_REPLACEMENT_CANDIDATES) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY,
+                                 "too many potential replacements (including sibling eviction)",
+                                 strprintf("too many affected clusters (%u > %u)", num_clusters, MAX_REPLACEMENT_CANDIDATES));
+        }
+        // The staging graph is oversized here; the selector only queries the main graph. The
+        // ancestor set is cached by the changeset and reused for the disjointness check later.
+        const auto evictions{GetEntriesForSiblingEviction(m_pool, *ws.m_tx_handle, ws.m_parents,
+                                                          m_subpackage.m_changeset->CalculateMemPoolAncestors(ws.m_tx_handle),
+                                                          m_subpackage.m_changeset->GetRemovals(),
+                                                          m_pool.m_opts.limits.cluster_count,
+                                                          m_pool.m_opts.limits.cluster_size_vbytes * WITNESS_SCALE_FACTOR)};
+        if (!evictions) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        }
+        for (const auto it : *evictions) {
+            ws.m_sibling_eviction = true;
+            m_subpackage.m_rbf = true;
+            m_subpackage.m_conflicting_fees += it->GetModifiedFee();
+            m_subpackage.m_conflicting_size += it->GetTxSize();
+        }
+        // Reject unaffordable evictions before mutating the staging graph further.
+        if (!pays_for_replacement()) return false;
+        for (const auto it : *evictions) {
+            ws.m_conflicts.insert(it->GetTx().GetHash());
+            ws.m_iters_conflicting.insert(it);
+            m_subpackage.m_changeset->StageRemoval(it);
+        }
+        // The resulting cluster is a subset of the pinned and kept transactions, which fit by
+        // construction. Keep the check rather than trusting the accounting.
+        if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
+            return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
+        }
     }
 
     if (const auto err_string{ImprovesFeerateDiagram(*m_subpackage.m_changeset)}) {
@@ -1326,17 +1366,11 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransactionInternal(const CTransa
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 
-    if (m_subpackage.m_rbf && !ReplacementChecks(ws)) {
+    if ((m_subpackage.m_rbf || !m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) && !ReplacementChecks(args, ws)) {
         if (ws.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
             // Failed for incentives-based fee reasons. Provide the effective feerate and which tx was included.
             return MempoolAcceptResult::FeeFailure(ws.m_state, CFeeRate(ws.m_modified_fees, ws.m_vsize), single_wtxid);
         }
-        return MempoolAcceptResult::Failure(ws.m_state);
-    }
-
-    // Check if the transaction would exceed the cluster size limit.
-    if (!m_subpackage.m_changeset->CheckMemPoolPolicyLimits()) {
-        ws.m_state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "too-large-cluster", "");
         return MempoolAcceptResult::Failure(ws.m_state);
     }
 

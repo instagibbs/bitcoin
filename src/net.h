@@ -72,8 +72,6 @@ inline constexpr int MAX_ADDNODE_CONNECTIONS = 8;
 inline constexpr int MAX_BLOCK_RELAY_ONLY_CONNECTIONS = 2;
 /** Maximum number of feeler connections */
 inline constexpr int MAX_FEELER_CONNECTIONS = 1;
-/** Maximum number of private broadcast connections */
-inline constexpr size_t MAX_PRIVATE_BROADCAST_CONNECTIONS{64};
 /** -listen default */
 inline constexpr bool DEFAULT_LISTEN = true;
 /** The maximum number of peer connections to maintain. */
@@ -86,8 +84,6 @@ inline const std::string DEFAULT_MAX_UPLOAD_TARGET{"0M"};
 inline constexpr bool DEFAULT_BLOCKSONLY = false;
 /** -peertimeout default */
 inline constexpr int64_t DEFAULT_PEER_CONNECT_TIMEOUT = 60;
-/** Default for -privatebroadcast. */
-inline constexpr bool DEFAULT_PRIVATE_BROADCAST{false};
 /** Number of file descriptors required for message capture **/
 inline constexpr int NUM_FDS_MESSAGE_CAPTURE = 1;
 /** Interval for ASMap Health Check **/
@@ -322,7 +318,6 @@ public:
             case ConnectionType::MANUAL:
             case ConnectionType::ADDR_FETCH:
             case ConnectionType::FEELER:
-            case ConnectionType::PRIVATE_BROADCAST:
                 return false;
         } // no default case, so the compiler can warn about missing cases
 
@@ -344,7 +339,6 @@ public:
         case ConnectionType::FEELER:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
-        case ConnectionType::PRIVATE_BROADCAST:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
         case ConnectionType::MANUAL:
@@ -366,18 +360,6 @@ public:
         return m_conn_type == ConnectionType::ADDR_FETCH;
     }
 
-    bool IsPrivateBroadcastConn() const
-    {
-        return m_conn_type == ConnectionType::PRIVATE_BROADCAST;
-    }
-
-    /** Protocol version advertised in our VERSION message.
-     *  Private broadcast connections use a fixed version to maximise anonymity. */
-    int AdvertisedVersion() const
-    {
-        return IsPrivateBroadcastConn() ? WTXID_RELAY_VERSION : PROTOCOL_VERSION;
-    }
-
     bool IsInboundConn() const {
         return m_conn_type == ConnectionType::INBOUND;
     }
@@ -391,7 +373,6 @@ public:
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:
             case ConnectionType::ADDR_FETCH:
-            case ConnectionType::PRIVATE_BROADCAST:
                 return true;
         } // no default case, so the compiler can warn about missing cases
 
@@ -743,72 +724,6 @@ public:
                                const std::optional<Proxy>& proxy_override)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
-    /// Group of private broadcast related members.
-    class PrivateBroadcast
-    {
-    public:
-        /**
-         * Remember if we ever established at least one outbound connection to a
-         * Tor peer, including sending and receiving P2P messages. If this is
-         * true then the Tor proxy indeed works and is a proxy to the Tor network,
-         * not a misconfigured ordinary SOCKS5 proxy as -proxy or -onion. If that
-         * is the case, then we assume that connecting to an IPv4 or IPv6 address
-         * via that proxy will be done through the Tor network and a Tor exit node.
-         */
-        std::atomic_bool m_outbound_tor_ok_at_least_once{false};
-
-        /**
-         * Semaphore used to guard against opening too many connections.
-         * Opening private broadcast connections will be paused if this is equal to 0.
-         */
-        std::counting_semaphore<> m_sem_conn_max{MAX_PRIVATE_BROADCAST_CONNECTIONS};
-
-        /**
-         * Choose a network to open a connection to.
-         * @param[out] proxy Optional proxy to override the normal proxy selection.
-         * Will be set if !std::nullopt is returned. Could be set to `std::nullopt`
-         * if there is no need to override the proxy that would be used for connecting
-         * to the returned network.
-         * @retval std::nullopt No network could be selected.
-         * @retval !std::nullopt The network was selected and `proxy` is set (maybe to `std::nullopt`).
-         */
-        std::optional<Network> PickNetwork(std::optional<Proxy>& proxy) const;
-
-        /// Get the pending number of connections to open.
-        size_t NumToOpen() const;
-
-        /**
-         * Increment the number of new connections of type `ConnectionType::PRIVATE_BROADCAST`
-         * to be opened by `CConnman::ThreadPrivateBroadcast()`.
-         * @param[in] n Increment by this number.
-         */
-        void NumToOpenAdd(size_t n);
-
-        /**
-         * Decrement the number of new connections of type `ConnectionType::PRIVATE_BROADCAST`
-         * to be opened by `CConnman::ThreadPrivateBroadcast()`.
-         * @param[in] n Decrement by this number.
-         * @return The number of connections that remain to be opened after the operation.
-         */
-        size_t NumToOpenSub(size_t n);
-
-        /// Wait for the number of needed connections to become greater than 0.
-        void NumToOpenWait() const;
-
-    protected:
-        /**
-         * Check if private broadcast can be done to IPv4 or IPv6 peers and if so via which proxy.
-         * If private broadcast connections should not be opened to IPv4 or IPv6, then this will
-         * return an empty optional.
-         */
-        std::optional<Proxy> ProxyForIPv4or6() const;
-
-        /// Number of `ConnectionType::PRIVATE_BROADCAST` connections to open.
-        std::atomic_size_t m_num_to_open{0};
-
-        friend struct ConnmanTestMsg;
-    } m_private_broadcast;
-
     bool CheckIncomingNonce(uint64_t nonce) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
     void ASMapHealthCheck();
 
@@ -1013,7 +928,6 @@ private:
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !mutexMsgProc);
     /// \anchor i2paccept
     void ThreadI2PAcceptIncoming() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
-    void ThreadPrivateBroadcast() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
     void AcceptConnection(const ListenSocket& hListenSocket) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     /**
@@ -1315,7 +1229,6 @@ private:
     std::thread threadOpenConnections;
     std::thread threadMessageHandler;
     std::thread threadI2PAcceptIncoming;
-    std::thread threadPrivateBroadcast;
 
     /** flag for deciding to connect to an extra outbound peer,
      *  in excess of m_max_outbound_full_relay

@@ -254,6 +254,8 @@ class Socks5Connection():
                         self.conn.sendall(bytearray([0x05, 0x00, 0x00, AddressType.IPV6]) + socket.inet_pton(socket.AF_INET6, answer) + bytearray([0, 0]))
                 return  # Disconnect happens in the "finally" block below.
 
+            with self.serv.connects_lock:
+                self.serv.connects_received += 1
             if self.serv.conf.connect_reply_delay:
                 time.sleep(self.serv.conf.connect_reply_delay)
             # Reply SUCCESS before calling destinations_factory, so the client can finish
@@ -350,6 +352,9 @@ class Socks5Server():
         self._running_lock = threading.Lock()
         self.thread = None
         self.queue = queue.Queue() # report connections and exceptions to client
+        # CONNECT requests read so far, counted before any reply delay, so a client can see one held.
+        self.connects_received = 0
+        self.connects_lock = threading.Lock()
         self.keep_alive = conf.keep_alive
         # Store the background handlers, needed for clean shutdown
         # Append-only array, completed handlers are set to None

@@ -141,7 +141,7 @@ CTxMemPool::setEntries CTxMemPool::CalculateMemPoolAncestors(const CTxMemPoolEnt
     }
 
     // If we didn't get anything back, the transaction is not in the graph.
-    // Find each parent and call GetAncestors on each.
+    // Find the parents and query the union of their ancestors.
     setEntries staged_parents;
     const CTransaction &tx = entry.GetTx();
 
@@ -153,11 +153,13 @@ CTxMemPool::setEntries CTxMemPool::CalculateMemPoolAncestors(const CTxMemPoolEnt
         }
     }
 
-    for (const auto& parent : staged_parents) {
-        auto parent_ancestors = m_txgraph->GetAncestors(*parent, TxGraph::Level::MAIN);
-        for (auto ancestor : parent_ancestors) {
-            ret.insert(mapTx.iterator_to(static_cast<const CTxMemPoolEntry&>(*ancestor)));
-        }
+    // Query the union once, avoiding repeated ancestor traversals when several parents belong
+    // to the same cluster (including during generalized sibling eviction).
+    std::vector<const TxGraph::Ref*> parent_refs;
+    parent_refs.reserve(staged_parents.size());
+    for (const auto parent : staged_parents) parent_refs.push_back(&*parent);
+    for (const auto ancestor : m_txgraph->GetAncestorsUnion(parent_refs, TxGraph::Level::MAIN)) {
+        ret.insert(mapTx.iterator_to(static_cast<const CTxMemPoolEntry&>(*ancestor)));
     }
 
     return ret;

@@ -913,7 +913,8 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
                                           const Socks5Params& params)
 {
     // first connect to proxy server
-    auto sock = proxy.Connect(params.connect_timeout.value_or(std::chrono::milliseconds{nConnectTimeout}));
+    // The process-wide default is read only when no explicit timeout was given.
+    auto sock = params.connect_timeout ? proxy.Connect(*params.connect_timeout) : proxy.Connect();
     if (!sock) {
         proxy_connection_failed = true;
         return {};
@@ -935,7 +936,7 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
 
 std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name, const Socks5Params& params)
 {
-    auto sock = proxy.Connect(params.connect_timeout.value_or(std::chrono::milliseconds{nConnectTimeout}));
+    auto sock = params.connect_timeout ? proxy.Connect(*params.connect_timeout) : proxy.Connect();
     if (!sock) return std::nullopt;
     const ProxyCredentials auth{params.auth ? *params.auth : TorStreamIsolationCredentials().Generate()};
     return Socks5Resolve(name, auth, *sock, params);

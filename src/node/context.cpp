@@ -12,6 +12,7 @@
 #include <key.h>
 #include <net.h>
 #include <net_processing.h>
+#include <node/privbcast_manager.h>
 #include <netgroup.h>
 #include <node/kernel_notifications.h>
 #include <node/warnings.h>

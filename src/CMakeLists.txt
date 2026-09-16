@@ -237,6 +237,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/mini_miner.cpp
   node/minisketchwrapper.cpp
   node/peerman_args.cpp
+  node/privbcast_manager.cpp
   node/psbt.cpp
   node/timeoffsets.cpp
   node/transaction.cpp
@@ -255,7 +256,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   policy/rbf.cpp
   policy/settings.cpp
   policy/truc_policy.cpp
-  private_broadcast.cpp
   rest.cpp
   rpc/blockchain.cpp
   rpc/external_signer.cpp
@@ -287,6 +287,7 @@ target_link_libraries(bitcoin_node
   PRIVATE
     core_interface
     bitcoin_common
+    bitcoin_privbcast
     bitcoin_util
     $<TARGET_NAME_IF_EXISTS:bitcoin_zmq>
     leveldb

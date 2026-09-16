@@ -1625,36 +1625,6 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
     }
 }
 
-BOOST_AUTO_TEST_CASE(private_broadcast_version_does_not_update_addrman_services)
-{
-    LOCK(NetEventsInterface::g_msgproc_mutex);
-
-    const CNetAddr source{LookupHost("2.3.4.5", /*fAllowLookup=*/false).value()};
-    const CAddress addr{Lookup("1.2.3.4", 8333, /*fAllowLookup=*/false).value(), NODE_NONE};
-    BOOST_REQUIRE(m_node.addrman->Add({addr}, source));
-    CNode node{/*id=*/0,
-               /*sock=*/nullptr,
-               /*addrIn=*/addr,
-               /*nKeyedNetGroupIn=*/0,
-               /*nLocalHostNonceIn=*/0,
-               /*addrBindIn=*/CService{},
-               /*addrNameIn=*/"",
-               /*conn_type_in=*/ConnectionType::PRIVATE_BROADCAST,
-               /*inbound_onion=*/false,
-               /*network_key=*/0};
-
-    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
-    connman.Handshake(node,
-                      /*successfully_connected=*/false,
-                      /*remote_services=*/NODE_NETWORK,
-                      /*local_services=*/NODE_NONE,
-                      /*version=*/PROTOCOL_VERSION,
-                      /*relay_txs=*/true);
-
-    BOOST_CHECK_EQUAL(m_node.addrman->Select().first.nServices, NODE_NONE);
-    m_node.peerman->FinalizeNode(node);
-}
-
 BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)
 {
     // Test that `-externalip` addresses bypass `-onlynet`, but score alone does

@@ -1,13 +1,7 @@
 P2P and network changes
 -----------------------
 
-- Each transaction sent via private broadcast (`-privatebroadcast`) is limited
-  to 1,000 send attempts. After reaching the limit, broadcasting stops; call
-  `sendrawtransaction` again to retry. Transactions that reach the limit remain
-  available through `getprivatebroadcastinfo` and `abortprivatebroadcast`. (#35680)
-
-Updated RPCs
-------------
-
-- `getprivatebroadcastinfo` now reports an `attempts_remaining` field for each
-  transaction. (#35680)
+- Each transaction sent via private broadcast (`-privatebroadcast`) is one
+  bounded job with a fixed number of connection attempts. After it ends,
+  broadcasting stops; call `sendrawtransaction` again to run another job. Finished
+  jobs remain available through `getprivatebroadcastinfo`. (#35680)

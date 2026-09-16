@@ -58,8 +58,6 @@ bool ReadBounded(std::istream& in, size_t max_bytes, std::string& out, std::stri
     return true;
 }
 
-namespace {
-
 bool IsLoopback(const CNetAddr& addr)
 {
     const auto bytes{addr.GetAddrBytes()};
@@ -71,8 +69,6 @@ bool IsLoopback(const CNetAddr& addr)
     }
     return false;
 }
-
-} // namespace
 
 std::optional<Proxy> ParseTor(const std::string& str, std::string& error)
 {

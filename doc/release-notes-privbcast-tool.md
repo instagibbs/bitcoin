@@ -15,8 +15,29 @@ Tools and Utilities
   `BUILD_PRIVBCAST` CMake option is enabled, which follows `BUILD_TESTS` by
   default. (TODO: PR number)
 
+P2P and network changes
+-----------------------
+
+- `-privatebroadcast` now runs the same bounded, fixed-schedule jobs as
+  `bitcoin-privbcast`, inside the node: each transaction submitted with
+  `sendrawtransaction` becomes one job that announces it to a few peers found
+  through the release DNS seeds (resolved through Tor) and the fixed onion
+  seeds, over the node's Tor SOCKS5 proxy, and then stops. The node no longer
+  opens `private-broadcast` connections through its connection manager, does
+  not pick recipients from its address manager, does not reattempt until the
+  transaction is seen back, and no longer uses I2P for private broadcast; a
+  Tor SOCKS5 proxy on the local host is required. `-connect` is no longer
+  incompatible with `-privatebroadcast`. Jobs run at most two at a time, with a
+  bounded queue. (TODO: PR number)
+
 Updated RPCs
 ------------
+
+- `getprivatebroadcastinfo` now lists private broadcast jobs (`jobs`), each
+  with an `id`, `state` (queued, running, done, aborted), timestamps, whether
+  the node's own mempool has since seen the transaction, and the finished
+  job's full report. `abortprivatebroadcast` takes a job `id` instead of a
+  transaction hash. (TODO: PR number)
 
 - `testmempoolaccept` leaves the node's validation caches and its coins cache
   exactly as it found them: the coins fetched for the check are uncached again,

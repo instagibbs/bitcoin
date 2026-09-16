@@ -36,6 +36,8 @@ bool ReadBounded(std::istream& in, size_t max_bytes, std::string& out, std::stri
  * and isolation credentials in plaintext before Tor.
  */
 std::optional<Proxy> ParseTor(const std::string& str, std::string& error);
+/** Whether `addr` is 127.0.0.0/8 or ::1: the only SOCKS listener addresses accepted, since anything else carries destinations and credentials off-host. */
+bool IsLoopback(const CNetAddr& addr);
 
 /** Decode the release fixed-seed list (BIP155-serialized endpoints). */
 std::vector<CService> DecodeFixedSeeds(std::span<const uint8_t> data);

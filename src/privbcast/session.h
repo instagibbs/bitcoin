@@ -36,10 +36,8 @@ inline constexpr int MIN_PEER_PROTOCOL_VERSION{WTXID_RELAY_VERSION};
 /** Service bits we advertise: only what BIP144 needs to send witness data. */
 inline constexpr uint64_t SERVICES{NODE_WITNESS};
 /**
- * Fixed and never versioned; the same string the node's own private broadcast sends. That alone does not
- * make the two indistinguishable (the node advertises no services, speaks v1 or v2 and announces by txid;
- * this tool advertises NODE_WITNESS, is v2 only and requires BIP339 wtxid relay): being recognised as the
- * tool is accepted.
+ * Fixed and never versioned. The node's -privatebroadcast runs this same code, so every user of a
+ * release presents one profile; being recognised as it is accepted.
  */
 inline constexpr std::string_view USER_AGENT{"/pynode:0.0.1/"};
 /** Maximum user agent length accepted from the peer, as in net.h. */

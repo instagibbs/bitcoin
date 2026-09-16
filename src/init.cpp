@@ -49,6 +49,8 @@
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netbase.h>
+#include <privbcast/discovery.h>
+#include <privbcast/input.h>
 #include <netgroup.h>
 #include <node/block_template_manager.h>
 #include <node/blockmanager_args.h>
@@ -64,6 +66,7 @@
 #include <node/mempool_persist_args.h>
 #include <node/mining_args.h>
 #include <node/peerman_args.h>
+#include <node/privbcast_manager.h>
 #include <policy/feerate.h>
 #include <policy/fees/block_policy_estimator.h>
 #include <policy/fees/estimator_args.h>
@@ -300,6 +303,7 @@ void Interrupt(NodeContext& node)
     InterruptMapPort();
     if (node.connman)
         node.connman->Interrupt();
+    if (node.privbcast) node.privbcast->Interrupt();
     for (auto* index : node.indexes) {
         index->Interrupt();
     }
@@ -337,6 +341,10 @@ void Shutdown(NodeContext& node)
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
     if (node.peerman && node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.peerman.get());
+    if (node.privbcast) {
+        if (node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.privbcast.get());
+        node.privbcast->Stop(); // joins the job workers; they read connman's network-active flag, so before connman goes
+    }
     if (node.connman) node.connman->Stop();
 
     if (node.tor_controller) {
@@ -353,6 +361,7 @@ void Shutdown(NodeContext& node)
     // After the threads that potentially access these pointers have been stopped,
     // destruct and reset all to nullptr.
     node.peerman.reset();
+    node.privbcast.reset();
     node.connman.reset();
     node.banman.reset();
     node.addrman.reset();
@@ -583,8 +592,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-listenonion", strprintf("Automatically create Tor onion service (default: %d)", DEFAULT_LISTEN_ONION), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxconnections=<n>", strprintf("Maintain at most <n> automatic connections to peers (default: %u). %u slots of these are reserved for outgoing connections. See -inboundrelaypercent for more information about limits applied to transaction relay inbound peers. "
                                                     "This limit does not apply to connections manually added via -addnode or the addnode RPC, which have a separate limit of %u. "
-                                                    "It does not apply to short-lived private broadcast connections either, which have a separate limit of %u.",
-                                                    DEFAULT_MAX_PEER_CONNECTIONS, MAX_OUTBOUND_FULL_RELAY_CONNECTIONS + MAX_BLOCK_RELAY_ONLY_CONNECTIONS + MAX_FEELER_CONNECTIONS, MAX_ADDNODE_CONNECTIONS, MAX_PRIVATE_BROADCAST_CONNECTIONS),
+                                                    "It does not apply to the short-lived connections of -privatebroadcast jobs either, which are bounded separately.",
+                                                    DEFAULT_MAX_PEER_CONNECTIONS, MAX_OUTBOUND_FULL_RELAY_CONNECTIONS + MAX_BLOCK_RELAY_ONLY_CONNECTIONS + MAX_FEELER_CONNECTIONS, MAX_ADDNODE_CONNECTIONS),
                    ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-inboundrelaypercent=<n>", strprintf("Permit a maximum percent of inbound connections to relay transactions, to limit memory utilization (0 to 100, default: %u).", DEFAULT_FULL_RELAY_INBOUND_PCT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-maxreceivebuffer=<n>", strprintf("Maximum per-connection receive buffer, <n>*1000 bytes (default: %u)", DEFAULT_MAXRECEIVEBUFFER), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
@@ -721,13 +730,18 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-privatebroadcast",
                    strprintf(
                        "EXPERIMENTAL: Broadcast transactions submitted via sendrawtransaction RPC using short-lived "
-                       "connections through the Tor or I2P networks, without putting them in the mempool first. "
-                       "This provides best-effort concealment of the transaction's origin. "
-                       "Transactions submitted through the wallet are not affected by this option "
-                       "(default: %u)",
-                   DEFAULT_PRIVATE_BROADCAST),
+                       "connections through the Tor network, without putting them in the mempool first: "
+                       "each transaction is one bounded job on a schedule fixed when it starts, to a few peers "
+                       "found through the release DNS seeds (resolved through Tor) and fixed onion seeds, run by "
+                       "the same code as bitcoin-privbcast. Peers are reached through Tor exits and onion services "
+                       "regardless of -onlynet and -dnsseed. Requires a Tor SOCKS5 proxy (-proxy, "
+                       "-onion or -listenonion with -torcontrol). Transactions submitted through the wallet are "
+                       "not affected by this option (default: %u)",
+                   node::DEFAULT_PRIVATE_BROADCAST),
                    ArgsManager::ALLOW_ANY,
                    OptionsCategory::NODE_RELAY);
+    argsman.AddArg("-privatebroadcastseed=<name>", "Regtest only: DNS seed name for private broadcast discovery instead of the release list; may be given more than once", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-privatebroadcastfixedseed=<addr:port>", "Regtest only: bundled private broadcast address instead of the release list; may be given more than once", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-whitelistforcerelay", strprintf("Add 'forcerelay' permission to whitelisted peers with default permissions. This will relay transactions even if the transactions were already in the mempool. (default: %d)", DEFAULT_WHITELISTFORCERELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-whitelistrelay", strprintf("Add 'relay' permission to whitelisted peers with default permissions. This will accept relayed transactions even when not relaying transactions (default: %d)", DEFAULT_WHITELISTRELAY), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
 
@@ -1070,8 +1084,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (user_p2p_max_connections < 0) {
         return InitError(Untranslated("-maxconnections must be greater or equal than zero"));
     }
-    const size_t max_private{args.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)
-                             ? MAX_PRIVATE_BROADCAST_CONNECTIONS
+    const size_t max_private{args.GetBoolArg("-privatebroadcast", node::DEFAULT_PRIVATE_BROADCAST)
+                             ? node::PrivateBroadcastManager::MAX_SOCKETS
                              : 0};
 
     // HTTP server listen sockets: by default two (IPv4 and IPv6 loopback), or one per -rpcbind entry
@@ -2363,30 +2377,42 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                     conflict->ToStringAddrPort()));
     }
 
-    if (args.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)) {
+    if (args.GetBoolArg("-privatebroadcast", node::DEFAULT_PRIVATE_BROADCAST)) {
         // If -listenonion is set, then NET_ONION may not be reachable now
         // but may become reachable later, thus only error here if it is not
         // reachable and will not become reachable for sure.
         const bool onion_may_become_reachable{listenonion && (!args.IsArgSet("-onlynet") || onlynet_used_with_onion)};
-        if (!g_reachable_nets.Contains(NET_I2P) &&
-            !g_reachable_nets.Contains(NET_ONION) &&
-            !onion_may_become_reachable) {
+        if (!g_reachable_nets.Contains(NET_ONION) && !onion_may_become_reachable) {
             return InitError(_("Private broadcast of own transactions requested (-privatebroadcast), "
-                               "but none of Tor or I2P networks is reachable"));
+                               "but the Tor network is not reachable"));
         }
-        if (!connOptions.m_use_addrman_outgoing) {
-            return InitError(_("Private broadcast of own transactions requested (-privatebroadcast), "
-                               "but -connect is also configured. They are incompatible because the "
-                               "private broadcast needs to open new connections to randomly "
-                               "chosen Tor or I2P peers. Consider using -maxconnections=0 -addnode=... "
-                               "instead"));
+        const bool regtest{args.GetChainType() == ChainType::REGTEST};
+        const bool test_knobs{args.IsArgSet("-privatebroadcastseed") || args.IsArgSet("-privatebroadcastfixedseed")};
+        if (!regtest && test_knobs) {
+            return InitError(Untranslated("-privatebroadcastseed and -privatebroadcastfixedseed are only accepted on regtest"));
         }
-        if (!proxyRandomize && (g_reachable_nets.Contains(NET_ONION) || onion_may_become_reachable)) {
-            InitWarning(_("Private broadcast of own transactions requested (-privatebroadcast) and "
-                          "-proxyrandomize is disabled. Tor circuits for private broadcast connections "
-                          "may be correlated to other connections over Tor. To reduce this risk, set "
-                          "-proxyrandomize=1."));
+        node::PrivateBroadcastManager::Options pb_opts;
+        pb_opts.tor_proxy = [] { return GetProxy(NET_ONION); };
+        pb_opts.network_active = [connman = node.connman.get()] { return connman->GetNetworkActive(); };
+        pb_opts.chain = Params().GetChainTypeString();
+        pb_opts.discovery.port = Params().GetDefaultPort();
+        if (regtest && (args.IsArgSet("-privatebroadcastseed") || args.IsArgSet("-privatebroadcastfixedseed"))) {
+            pb_opts.discovery.dns_seeds = args.GetArgs("-privatebroadcastseed");
+            for (const std::string& s : args.GetArgs("-privatebroadcastfixedseed")) {
+                const auto service{Lookup(s, pb_opts.discovery.port, /*fAllowLookup=*/false)};
+                if (!service) return InitError(Untranslated(strprintf("Invalid -privatebroadcastfixedseed=%s", s)));
+                pb_opts.discovery.bundled.push_back(*service);
+            }
+        } else {
+            pb_opts.discovery.dns_seeds = Params().DNSSeeds();
+            pb_opts.discovery.bundled = privbcast::DecodeFixedSeeds(Params().FixedSeeds());
         }
+        if (!g_reachable_nets.Contains(NET_IPV4) && !g_reachable_nets.Contains(NET_IPV6)) {
+            LogInfo("-privatebroadcast uses Tor exits even though -onlynet excludes IPv4 and IPv6\n");
+        }
+        node.privbcast = std::make_unique<node::PrivateBroadcastManager>(std::move(pb_opts));
+        node.privbcast->SubscribeNetworkActive(uiInterface.NotifyNetworkActiveChanged);
+        validation_signals.RegisterValidationInterface(node.privbcast.get());
     }
 
     if (!node.connman->Start(scheduler, connOptions)) {

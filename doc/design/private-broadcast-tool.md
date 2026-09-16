@@ -4,7 +4,9 @@ The goal is to broadcast a transaction without revealing the sender's IP address
 address or long-term node identity. A job is one run of that broadcast. `bitcoin-privbcast`
 announces one final transaction, or one parent and its child, to a bounded set of peers over
 Tor, makes at most 24 connections, finishes within ten minutes and keeps nothing but its
-report. The tool is a separate program from `bitcoind`.
+report. The tool is a separate program. With `-privatebroadcast`, `bitcoind` does not launch
+it; RPC submissions queue jobs, and worker threads in `bitcoind` run the same job code
+directly instead of the node's connection manager.
 
 Two rules govern a job, and the rest of this document follows from them. A job touches no
 node state, so nothing a recipient sees at the P2P layer can be tied to the node. A job draws
@@ -41,6 +43,34 @@ Every party sees a Tor circuit rather than the sender.
 The design does not hide that a job ran, that it ran from a release with this profile, or
 anything that correlates the job with other traffic through the same Tor daemon (see Limits).
 
+## Compared with `-privatebroadcast` before this change
+
+The entry points stay: `sendrawtransaction` and the `getprivatebroadcastinfo` and
+`abortprivatebroadcast` RPCs. What runs behind them is new.
+
+| | Before (in `CConnman` and `PeerManager`) | Now (a job) |
+|---|---|---|
+| Peers | from the node's address manager | discovered per job: the release DNS seeds resolved through Tor (`RESOLVE`), plus onion peers from the release fixed-seed list |
+| Networks | Tor, I2P, IPv4/IPv6 through the proxy | Tor only: onion peers, and IPv4/IPv6 peers through Tor exits |
+| Transport | v2 or v1 | v2 (BIP324) only |
+| Connections at once | 3 per transaction when it is submitted (all private broadcasts share a cap of 64), each up to 3 min | 3 at start, never more than 6 (one per slot) |
+| Connections in total | more with every re-send | at most 24: 6 slots of 4 opportunities, a first peer and up to 3 backups each |
+| Retries | re-sent to new peers until seen back in the node's mempool (after 1 min), up to 1000 times | none after an announcement; the schedule is drawn at job start and nothing seen on the network changes it |
+| Duration | open-ended | every job's network work ends within 568 s |
+| Peer profile | `NODE_NONE`, no wtxid relay, announces by txid | `NODE_WITNESS`, protocol 70017, requires wtxid relay (BIP339) and announces by wtxid |
+| Packages | no | one parent and its child, in the program |
+| Without a node | no | the `bitcoin-privbcast` program |
+
+The right column describes a smaller feature. It gives up I2P, peers that speak only the old
+transport, the node's address manager, and re-sending when the transaction does not come
+back. Each is given up for the two rules below and for a bounded cost: at most 24
+connections, over within 568 s, with a report of every attempt.
+
+**Delivery depends on recipients; privacy does not.** A hostile recipient learns no more
+about the sender's IP address or long-term identity than an honest one. Recipients are chosen
+at random across three paths for robustness: a recipient that drops the transaction, or an
+exit that interferes with it, costs one slot.
+
 ## The two rules
 
 Both are enforced by construction rather than by careful coding.
@@ -70,7 +100,8 @@ answers the peer's VERSION with WTXIDRELAY and VERACK, announces the transaction
 serves it once when asked for it by wtxid, sends one PING, and closes on the matching PONG.
 
 The protocol version is Core's current one, so the profile tracks the release rather than
-marking the tool. The user agent is a constant that no node sends (see bitcoin/bitcoin#27509).
+marking the tool. The user agent is the one the previous implementation sent, a constant
+other than the node's own (see bitcoin/bitcoin#27509); keeping it adds no second profile.
 
 The job requires a peer at protocol 70016 or later that offers `NODE_WITNESS`, accepts relay
 and sends WTXIDRELAY before its VERACK. It leaves any other peer before announcing anything.
@@ -216,6 +247,43 @@ about it, its advertised onion address for one. Nothing at the SOCKS interface c
 this; Tor accepts the credentials either way. The operator must ensure the SocksPort keeps
 stream isolation.
 
+## Inside the node
+
+With `-privatebroadcast`, `sendrawtransaction` queues a job in `bitcoind`'s
+`PrivateBroadcastManager`. A worker calls `privbcast::RunJob()` in the node's
+process, the same function the standalone program calls. A job uses none of the node's peer
+machinery: no address manager, connection manager, peer manager or ban list. Its discovery,
+schedule and wire profile are the tool's. The transaction does not enter the node's mempool
+until it comes back from the network, and the node then treats it like any other. Submitting
+the same transaction again queues another job, even one the node's mempool already holds;
+jobs are not deduplicated.
+
+Node settings that choose peers (`-onlynet`, `-dnsseed`, `-fixedseeds`, `-connect`,
+`-seednode`, `-addnode`) do not apply to jobs. Even with `-onlynet=onion`, a job can connect
+through Tor exits: the fixed-seed onions alone age with the release (see Limits), Tor hides
+the user's address on either path, and an exit can only drop or alter its own connection,
+which cannot control the other slots. There is no switch to change this, for the same reason
+there are no other knobs.
+
+A job shares five things with the node.
+
+- **The proxy.** The node's Tor proxy, trusted as the node's other proxy settings are. Every
+  stream carries fresh credentials regardless of `-proxyrandomize`.
+- **The queue.** At most two jobs run at once, in submission order. A job ends when its last
+  connection ends, so a recipient that holds a connection open can delay the start of the
+  next queued job. That job's own schedule is fixed once it starts, but its start time is not
+  independent of earlier recipients: an observer of both jobs may link their transactions by
+  the delay. The link alone does not identify the node.
+- **An observation.** The report records when the node's mempool first sees the transaction.
+  The observation is not fed back into a job.
+- **The log.** `debug.log` records job progress only with `-debug=privatebroadcast`. SOCKS
+  failures that mention a destination appear only with `-debug=proxy` or `-debug=net`.
+- **The process.** Shutdown and `setnetworkactive false` cancel jobs.
+
+Wallet sends are not private broadcasts. The wallet submits to the node's mempool and
+rebroadcasts from there, which a private broadcast must not do. Making wallet sends private
+is a separate change.
+
 ## Limits
 
 - The tool and the node still share a host and, usually, a Tor daemon. Load, Tor's caches
@@ -229,6 +297,11 @@ stream isolation.
   loses its paths without an exit.
 - Recipients can recognize the release by its profile and probe it. They learn only that
   someone used the tool.
+- Discovery does not exclude the node's own addresses. A filter on node state is the coupling
+  rule 1 forbids, and it is not wanted anyway: excluding some addresses would bias the
+  sampling of recipients, and self-delivery is indistinguishable from delivery to any other
+  recipient. A job that draws the node's own onion or IP makes the node one of that job's
+  first relayers.
 - Tor's timing and reachability vary between users. The schedule fixes when the job acts;
   the network decides how fast it answers.
 - A job stops when its schedule ends and does not retry on its own. Retrying because the

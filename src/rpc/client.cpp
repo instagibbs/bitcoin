@@ -315,6 +315,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
     { "estimaterawfee", 0, "conf_target" },
     { "estimaterawfee", 1, "threshold" },
     { "prioritisetransaction", 1, "dummy" },
+    { "abortprivatebroadcast", 0, "id" },
     { "prioritisetransaction", 2, "fee_delta" },
     { "setban", 2, "bantime" },
     { "setban", 3, "absolute" },

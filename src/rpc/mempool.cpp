@@ -11,12 +11,13 @@
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <index/txospenderindex.h>
-#include <net.h>
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netbase.h>
+#include <node/context.h>
 #include <node/mempool_persist.h>
 #include <node/mempool_persist_args.h>
+#include <node/privbcast_manager.h>
 #include <node/transaction.h>
 #include <node/txorphanage.h>
 #include <node/types.h>
@@ -25,6 +26,7 @@
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <primitives/transaction.h>
+#include <privbcast/job.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
@@ -63,13 +65,10 @@
 #include <utility>
 #include <vector>
 
-namespace node {
-struct NodeContext;
-} // namespace node
-
 using node::DumpMempool;
 
 using node::DEFAULT_MAX_BURN_AMOUNT;
+using node::DEFAULT_PRIVATE_BROADCAST;
 using node::DEFAULT_MAX_RAW_TX_FEE_RATE;
 using node::MempoolPath;
 using node::NodeContext;
@@ -88,15 +87,17 @@ static RPCMethod sendrawtransaction()
         "privacy by leaking the transaction's origin, as nodes will normally not\n"
         "rebroadcast non-wallet transactions already in their mempool.\n"
 
-        "\nIf -privatebroadcast is enabled, then the transaction will be sent via\n"
-        "dedicated, short-lived connections to Tor or I2P peers, or to IPv4/IPv6 peers\n"
-        "via the Tor network. This provides best-effort concealment of the transaction's origin.\n"
-        "Private broadcast is experimental and may change in future releases.\n"
-        "Submission does not itself add the transaction to the local mempool; normal\n"
-        "mempool acceptance and relay apply when it is received back from the network.\n"
-        "The private broadcast queue is bounded: when it is full, this RPC fails and\n"
-        "the transaction is not scheduled until an existing one completes or is\n"
-        "aborted. Use getprivatebroadcastinfo to inspect the queue and abortprivatebroadcast to abort.\n"
+        "\nIf -privatebroadcast is enabled, then the transaction is queued as a private\n"
+        "broadcast job: a bounded number of short-lived connections through the Tor network\n"
+        "to onion peers and to IPv4/IPv6 peers via Tor exits, on a schedule fixed when the\n"
+        "job starts, with no reaction to what the network does. This provides best-effort\n"
+        "concealment of the transaction's origin. Private broadcast is experimental and may\n"
+        "change in future releases. The transaction will only enter the local mempool when it\n"
+        "is received back from the network. The queue is bounded: when it is full, this RPC\n"
+        "fails and the transaction is not queued. Success means only that the job was queued:\n"
+        "a job does not retry, so if getprivatebroadcastinfo shows it finished with announced\n"
+        "false, submit the transaction again. Use getprivatebroadcastinfo to inspect the\n"
+        "jobs and their reports, and abortprivatebroadcast to abort one.\n"
 
         "\nA specific exception, RPC_TRANSACTION_ALREADY_IN_UTXO_SET, may throw if the transaction cannot be added to the mempool.\n"
 
@@ -150,14 +151,12 @@ static RPCMethod sendrawtransaction()
             AssertLockNotHeld(cs_main);
             NodeContext& node = EnsureAnyNodeContext(request.context);
             const bool private_broadcast_enabled{gArgs.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)};
-            if (private_broadcast_enabled &&
-                !g_reachable_nets.Contains(NET_ONION) &&
-                !g_reachable_nets.Contains(NET_I2P)) {
+            if (private_broadcast_enabled && !node::PrivateBroadcastManager::UsableProxy(GetProxy(NET_ONION))) {
                 throw JSONRPCError(RPC_MISC_ERROR,
-                                   "-privatebroadcast is enabled, but none of the Tor or I2P networks is "
-                                   "reachable. Maybe the location of the Tor proxy couldn't be retrieved "
-                                   "from the Tor daemon at startup. Check whether the Tor daemon is running "
-                                   "and that -torcontrol, -torpassword and -i2psam are configured properly.");
+                                   "-privatebroadcast is enabled, but no Tor SOCKS5 proxy is configured. Maybe the location of the Tor proxy "
+                                   "couldn't be retrieved from the Tor daemon at startup. Check whether the Tor "
+                                   "daemon is running and that -proxy, -onion or -torcontrol and -torpassword are "
+                                   "configured properly.");
             }
             const auto method = private_broadcast_enabled ? node::TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST
                                                           : node::TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL;
@@ -176,35 +175,70 @@ static RPCMethod sendrawtransaction()
     };
 }
 
+static UniValue JobToJson(const node::PrivateBroadcastManager::JobInfo& job)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("id", job.id);
+    o.pushKV("txid", job.tx->GetHash().ToString());
+    o.pushKV("wtxid", job.tx->GetWitnessHash().ToString());
+    if (job.parent) o.pushKV("parent_txid", job.parent->GetHash().ToString());
+    o.pushKV("state", std::string(node::PrivateBroadcastManager::StateName(job.state)));
+    o.pushKV("time_added", TicksSinceEpoch<std::chrono::seconds>(job.added));
+    if (job.started) o.pushKV("time_started", TicksSinceEpoch<std::chrono::seconds>(*job.started));
+    if (job.ended) o.pushKV("time_ended", TicksSinceEpoch<std::chrono::seconds>(*job.ended));
+    if (job.seen_in_mempool) o.pushKV("seen_in_mempool", TicksSinceEpoch<std::chrono::seconds>(*job.seen_in_mempool));
+    if (job.error) o.pushKV("error", *job.error);
+    if (job.state == node::PrivateBroadcastManager::JobState::RUNNING) {
+        UniValue progress(UniValue::VOBJ);
+        progress.pushKV("discovery_done", job.progress.discovery_done);
+        progress.pushKV("opportunities_ended", job.progress.opportunities_ended);
+        progress.pushKV("connections", job.progress.connections);
+        progress.pushKV("announcements_written", job.progress.announcements_written);
+        o.pushKV("progress", std::move(progress));
+    }
+    if (job.report) {
+        o.pushKV("announced", job.exit_code == 0);
+        o.pushKV("report", *job.report);
+    }
+    return o;
+}
+
 static RPCMethod getprivatebroadcastinfo()
 {
     return RPCMethod{
         "getprivatebroadcastinfo",
-        "Returns information about transactions tracked for private broadcast.\n"
-        "Transactions that have reached the send-attempt limit remain in the result with attempts_remaining=0.\n"
+        "Returns the private broadcast jobs: queued, running, and the most recent finished ones.\n"
+        "A job is one bounded broadcast of one transaction; it is done when its fixed schedule has run,\n"
+        "which says nothing about whether the network accepted the transaction. seen_in_mempool is when\n"
+        "this node's own mempool first accepted the transaction, from any source.\n"
         "This method is only available when running with -privatebroadcast enabled.\n",
         {},
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::ARR, "transactions", "",
+                {RPCResult::Type::ARR, "jobs", "",
                     {
                         {RPCResult::Type::OBJ, "", "",
                             {
+                                {RPCResult::Type::NUM, "id", "The job id"},
                                 {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
                                 {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
-                                {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
-                                {RPCResult::Type::NUM_TIME, "time_added", "The time this transaction was added to the private broadcast queue (seconds since epoch)"},
-                                {RPCResult::Type::NUM, "attempts_remaining", "The number of additional private broadcast send attempts allowed for this transaction"},
-                                {RPCResult::Type::ARR, "peers", "Per-peer send and acknowledgment information for this transaction",
+                                {RPCResult::Type::STR_HEX, "parent_txid", /*optional=*/true, "The unconfirmed parent served on request, for a package job"},
+                                {RPCResult::Type::STR, "state", "queued, running, done or aborted"},
+                                {RPCResult::Type::NUM_TIME, "time_added", "When the job was queued (seconds since epoch)"},
+                                {RPCResult::Type::NUM_TIME, "time_started", /*optional=*/true, "When the job started (seconds since epoch)"},
+                                {RPCResult::Type::NUM_TIME, "time_ended", /*optional=*/true, "When the job ended (seconds since epoch)"},
+                                {RPCResult::Type::NUM_TIME, "seen_in_mempool", /*optional=*/true, "When this node's mempool first accepted the transaction (seconds since epoch)"},
+                                {RPCResult::Type::STR, "error", /*optional=*/true, "Why the job could not run"},
+                                {RPCResult::Type::OBJ, "progress", /*optional=*/true, "How far a running job has got",
                                     {
-                                        {RPCResult::Type::OBJ, "", "",
-                                            {
-                                                {RPCResult::Type::STR, "address", "The address of the peer to which the transaction was sent"},
-                                                {RPCResult::Type::NUM_TIME, "sent", "The time this transaction was picked for sending to this peer via private broadcast (seconds since epoch)"},
-                                                {RPCResult::Type::NUM_TIME, "received", /*optional=*/true, "The time this peer acknowledged reception of the transaction (seconds since epoch)"},
-                                            }},
+                                        {RPCResult::Type::BOOL, "discovery_done", "Whether the peers to announce to have been chosen"},
+                                        {RPCResult::Type::NUM, "opportunities_ended", "Scheduled opportunities that have ended, dialled, missed or without a peer, of 24"},
+                                        {RPCResult::Type::NUM, "connections", "Attempts made so far"},
+                                        {RPCResult::Type::NUM, "announcements_written", "Announcements fully written to a peer so far"},
                                     }},
+                                {RPCResult::Type::BOOL, "announced", /*optional=*/true, "Whether at least one announcement was fully written to a peer"},
+                                {RPCResult::Type::ANY, "report", /*optional=*/true, "The job's full report, as bitcoin-privbcast prints it"},
                             }},
                     }},
             }},
@@ -215,37 +249,13 @@ static RPCMethod getprivatebroadcastinfo()
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
         {
             const NodeContext& node{EnsureAnyNodeContext(request.context)};
-            const PeerManager& peerman{EnsurePeerman(node)};
-            if (!peerman.GetInfo().private_broadcast) {
+            if (!node.privbcast) {
                 throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
             }
-
-            const auto txs{peerman.GetPrivateBroadcastInfo()};
-
-            UniValue transactions(UniValue::VARR);
-            for (const auto& tx_info : txs) {
-                UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", tx_info.tx->GetHash().ToString());
-                o.pushKV("wtxid", tx_info.tx->GetWitnessHash().ToString());
-                o.pushKV("hex", EncodeHexTx(*tx_info.tx));
-                o.pushKV("time_added", TicksSinceEpoch<std::chrono::seconds>(tx_info.time_added));
-                o.pushKV("attempts_remaining", tx_info.attempts_remaining);
-                UniValue peers(UniValue::VARR);
-                for (const auto& peer : tx_info.peers) {
-                    UniValue p(UniValue::VOBJ);
-                    p.pushKV("address", peer.address.ToStringAddrPort());
-                    p.pushKV("sent", TicksSinceEpoch<std::chrono::seconds>(peer.sent));
-                    if (peer.received.has_value()) {
-                        p.pushKV("received", TicksSinceEpoch<std::chrono::seconds>(*peer.received));
-                    }
-                    peers.push_back(std::move(p));
-                }
-                o.pushKV("peers", std::move(peers));
-                transactions.push_back(std::move(o));
-            }
-
+            UniValue jobs(UniValue::VARR);
+            for (const auto& job : node.privbcast->GetJobs()) jobs.push_back(JobToJson(job));
             UniValue ret(UniValue::VOBJ);
-            ret.pushKV("transactions", std::move(transactions));
+            ret.pushKV("jobs", std::move(jobs));
             return ret;
         },
     };
@@ -255,58 +265,42 @@ static RPCMethod abortprivatebroadcast()
 {
     return RPCMethod{
         "abortprivatebroadcast",
-        "Abort private broadcast attempts for a transaction currently being privately broadcast.\n"
-        "The transaction will be removed from the private broadcast queue.\n"
+        "Abort a private broadcast job. A queued job is removed; a running one is cancelled and ends\n"
+        "shortly with a report of what it did before the cancel.\n"
         "This method is only available when running with -privatebroadcast enabled.\n",
         {
-            {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid for all transactions in the private broadcast queue.\n"
-                                                                "If the provided id matches a txid that corresponds to multiple transactions with different wtxids, multiple transactions will be removed and returned."},
+            {"id", RPCArg::Type::NUM, RPCArg::Optional::NO, "The job id, as listed by getprivatebroadcastinfo"},
         },
         RPCResult{
-            RPCResult::Type::OBJ, "", "",
+            RPCResult::Type::OBJ, "", "The job as it was when the abort was requested",
             {
-                {RPCResult::Type::ARR, "removed_transactions", "Transactions removed from the private broadcast queue",
-                    {
-                        {RPCResult::Type::OBJ, "", "",
-                            {
-                                {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
-                                {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
-                                {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
-                            }},
-                    }},
+                {RPCResult::Type::NUM, "id", "The job id"},
+                {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
+                {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
+                {RPCResult::Type::STR, "state", "aborted for a queued job; running for a job still ending"},
             }
         },
         RPCExamples{
-            HelpExampleCli("abortprivatebroadcast", "\"id\"")
-            + HelpExampleRpc("abortprivatebroadcast", "\"id\"")
+            HelpExampleCli("abortprivatebroadcast", "1")
+            + HelpExampleRpc("abortprivatebroadcast", "1")
         },
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
         {
-
             const NodeContext& node{EnsureAnyNodeContext(request.context)};
-            PeerManager& peerman{EnsurePeerman(node)};
-            if (!peerman.GetInfo().private_broadcast) {
+            if (!node.privbcast) {
                 throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
             }
-
-            const uint256 id{ParseHashV(self.Arg<UniValue>("id"), "id")};
-
-            const auto removed_txs{peerman.AbortPrivateBroadcast(id)};
-            if (removed_txs.empty()) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not in private broadcast queue. Check getprivatebroadcastinfo.");
+            const uint64_t id{self.Arg<uint64_t>("id")};
+            const auto job{id > 0 ? node.privbcast->Abort(id) : std::nullopt};
+            if (!job) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "No queued or running private broadcast job with that id. Check getprivatebroadcastinfo.");
             }
-
-            UniValue removed_transactions(UniValue::VARR);
-            for (const auto& tx : removed_txs) {
-                UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", tx->GetHash().ToString());
-                o.pushKV("wtxid", tx->GetWitnessHash().ToString());
-                o.pushKV("hex", EncodeHexTx(*tx));
-                removed_transactions.push_back(std::move(o));
-            }
-            UniValue ret(UniValue::VOBJ);
-            ret.pushKV("removed_transactions", std::move(removed_transactions));
-            return ret;
+            UniValue o(UniValue::VOBJ);
+            o.pushKV("id", job->id);
+            o.pushKV("txid", job->tx->GetHash().ToString());
+            o.pushKV("wtxid", job->tx->GetWitnessHash().ToString());
+            o.pushKV("state", std::string(node::PrivateBroadcastManager::StateName(job->state)));
+            return o;
         },
     };
 }

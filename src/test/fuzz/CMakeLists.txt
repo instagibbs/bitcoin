@@ -81,7 +81,6 @@ add_executable(fuzz
   overflow.cpp
   p2p_handshake.cpp
   p2p_headers_presync.cpp
-  p2p_private_broadcast.cpp
   p2p_transport_serialization.cpp
   privbcast_attempt.cpp
   privbcast_discovery.cpp
@@ -100,7 +99,6 @@ add_executable(fuzz
   pow.cpp
   prevector.cpp
   primitives_transaction.cpp
-  private_broadcast.cpp
   process_message.cpp
   process_messages.cpp
   protocol.cpp

@@ -47,9 +47,10 @@ anything that correlates the job with other traffic through the same Tor daemon 
 
 ## Compared with `-privatebroadcast` before this change
 
-The entry points stay: `sendrawtransaction` and the `getprivatebroadcastinfo` and
-`abortprivatebroadcast` RPCs. What runs behind them is new, and `getprivatebroadcastinfo`
-now lists jobs and their reports instead of transactions and their peers.
+The entry points stay: `sendrawtransaction`, now also `submitpackage`, and the
+`getprivatebroadcastinfo` and `abortprivatebroadcast` RPCs. What runs behind them is new, and
+`getprivatebroadcastinfo` now lists jobs and their reports instead of transactions and their
+peers.
 
 | | Before (in `CConnman` and `PeerManager`) | Now (a job) |
 |---|---|---|
@@ -61,7 +62,7 @@ now lists jobs and their reports instead of transactions and their peers.
 | Retries | re-sent to one new peer every 2–3 min until a peer sends it back or it stops passing a test accept (for example, it is in the mempool or mined), up to 1000 times | none after an announcement; the schedule is drawn at job start and nothing seen on the network changes it |
 | Duration | open-ended | every job's network work ends within 568 s |
 | Peer profile | `NODE_NONE`, no wtxid relay, announces by txid | `NODE_WITNESS`, protocol 70017, requires wtxid relay (BIP339) and announces by wtxid |
-| Packages | no | one parent and its child, in the program |
+| Packages | no | one parent and its child |
 | Without a node | no | the `bitcoin-privbcast` program |
 
 The right column describes a smaller feature. It gives up I2P, peers that speak only the old
@@ -230,9 +231,9 @@ it works out which is which.
   older than Bitcoin Core 28 asks for the parent, rejects it alone and keeps the child as an
   orphan only until the job disconnects.
 - A second transaction is served on request only in package mode, that is, when the tool is
-  given two transactions. A recipient that asks for the parent therefore learns the sender
-  used package mode. That the two transactions belong together is already visible on the
-  chain.
+  given two transactions or `submitpackage` is given a parent and its child under
+  `-privatebroadcast`. A recipient that asks for the parent therefore learns the sender used
+  package mode. That the two transactions belong together is already visible on the chain.
 
 ## Using it
 
@@ -279,20 +280,31 @@ stream isolation.
 
 ## Inside the node
 
-With `-privatebroadcast`, `sendrawtransaction` queues a job in `bitcoind`'s
-`PrivateBroadcastManager`. A worker calls `privbcast::RunJob()` in the node's process, the
-same function the standalone program calls. A job uses none of the node's peer machinery: no
-address manager, connection manager, peer manager or ban list. It only reads the connection
-manager's network-active flag, so that `setnetworkactive false` stops it. Its discovery,
-schedule and wire profile are the tool's. The transaction does not enter the node's mempool
-until it comes back from the network, and the node then treats it like any other. Submitting
-a transaction whose job is still queued or running queues nothing more. A job runs until its
-schedule has run: every slot has announced or reached its last opportunity, including
-opportunities left without a peer. That takes at most ten minutes and often less. Once it has
-ended, or while it is being aborted by `abortprivatebroadcast` or `setnetworkactive false`,
-the same transaction may be queued again, even if the node's mempool holds it.
-`getprivatebroadcastinfo` shows those reports, including every peer a job dialled; they live
-in memory only and are gone after a restart.
+With `-privatebroadcast`, `sendrawtransaction` and `submitpackage` queue a job in
+`bitcoind`'s `PrivateBroadcastManager`. A worker calls `privbcast::RunJob()` in the node's
+process, the same function the standalone program calls. A job uses none of the node's peer
+machinery: no address manager, connection manager, peer manager or ban list. It only reads
+the connection manager's network-active flag, so that `setnetworkactive false` stops it. Its
+discovery, schedule and wire profile are the tool's. The transaction does not enter the
+node's mempool until it comes back from the network, and the node then treats it like any
+other. Submitting a transaction whose job is still queued or running queues nothing more. A
+job runs until its schedule has run: every slot has announced or reached its last
+opportunity, including opportunities left without a peer. That takes at most ten minutes and
+often less. Once it has ended, or while it is being aborted by `abortprivatebroadcast` or
+`setnetworkactive false`, the same transaction may be queued again, even if the node's
+mempool holds it. A job that serves a parent also covers its child submitted alone once the
+parent is in the node's mempool; before that, `sendrawtransaction` refuses the child for its
+missing input. A job for the child alone does not cover the package, which needs the parent
+served. `getprivatebroadcastinfo` shows those reports, including every peer a job dialled;
+they live in memory only and are gone after a restart.
+
+`submitpackage` takes one transaction, or one parent and its child. A transaction whose txid
+is already in the node's mempool counts as accepted and is sent as the caller gave it,
+whichever RPC submits it: the node validated the copy in its mempool, not this one. A single
+new one is test-accepted as `sendrawtransaction` does. A new parent too cheap on its own goes
+out with its child, because the node cannot evaluate a package's feerate without adding it to
+its mempool. The child is then checked only for its fee: it must stay within `maxfeerate`,
+and the pair must meet the mempool's minimum feerate.
 
 Node settings that choose peers (`-onlynet`, `-dnsseed`, `-fixedseeds`, `-connect`,
 `-seednode`, `-addnode`) do not apply to jobs, except that, as before, `-privatebroadcast` is

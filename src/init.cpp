@@ -729,7 +729,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                    ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-privatebroadcast",
                    strprintf(
-                       "EXPERIMENTAL: Broadcast transactions submitted via sendrawtransaction RPC using short-lived "
+                       "EXPERIMENTAL: Broadcast transactions submitted via the sendrawtransaction or submitpackage RPC using short-lived "
                        "connections through the Tor network, without putting them in the mempool first: "
                        "each transaction is one bounded job on a schedule fixed when it starts, to a few peers "
                        "found through the release DNS seeds (resolved through Tor) and fixed onion seeds, run by "

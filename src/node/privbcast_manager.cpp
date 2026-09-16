@@ -39,11 +39,12 @@ PrivateBroadcastManager::Queue::Queue(const uint256& seed, size_t max_queued, si
 auto PrivateBroadcastManager::Queue::Submit(CTransactionRef tx, CTransactionRef parent, NodeClock::time_point now) -> Admission
 {
     const Wtxid wtxid{tx->GetWitnessHash()};
-    // A job for the same transaction and parent that is still queued, or running and not being
-    // aborted, already covers it.
+    // A job for the same transaction that is still queued, or running and not being aborted,
+    // already covers it: with the same parent, or with any parent if none was given, as a job that
+    // serves a parent announces the child too. A job without a parent does not cover a package.
     const auto same = [&](const std::shared_ptr<Job>& j) {
-        return j->info.wtxid == wtxid && !j->info.parent == !parent &&
-               (!parent || j->info.parent->GetWitnessHash() == parent->GetWitnessHash());
+        return j->info.wtxid == wtxid &&
+               (!parent || (j->info.parent && j->info.parent->GetWitnessHash() == parent->GetWitnessHash()));
     };
     if (std::ranges::any_of(m_queued, same) ||
         std::ranges::any_of(m_running, [&](const std::shared_ptr<Job>& j) { return !j->abort.load() && same(j); })) {

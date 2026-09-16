@@ -6,6 +6,7 @@
 #include <rpc/mempool.h>
 #include <rpc/register.h> // IWYU pragma: associated
 
+#include <coins.h>
 #include <common/args.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
@@ -1383,6 +1384,168 @@ static RPCMethod getorphantxs()
     };
 }
 
+/**
+ * A transaction's fee: inputs that spend `parent`, if given, are valued from its outputs, the rest
+ * from the mempool and the UTXO set. nullopt if an input is missing or an amount is out of range.
+ * Like a test accept, it leaves no coins cache footprint: a coin it brought into the cache is
+ * uncached again.
+ */
+static std::optional<CAmount> TxFee(Chainstate& chainstate, const CTxMemPool& mempool, const CTransaction& tx, const CTransaction* parent)
+{
+    LOCK2(::cs_main, mempool.cs);
+    CCoinsViewCache& tip{chainstate.CoinsTip()};
+    const CCoinsViewMemPool view{&tip, mempool};
+    CAmount in{0};
+    for (const CTxIn& txin : tx.vin) {
+        CAmount value;
+        if (parent && txin.prevout.hash == parent->GetHash()) {
+            if (txin.prevout.n >= parent->vout.size()) return std::nullopt;
+            value = parent->vout[txin.prevout.n].nValue;
+        } else {
+            const bool cached{tip.HaveCoinInCache(txin.prevout)};
+            const std::optional<Coin> coin{view.GetCoin(txin.prevout)};
+            if (!cached) tip.Uncache(txin.prevout);
+            if (!coin) return std::nullopt;
+            value = coin->out.nValue;
+        }
+        if (!MoneyRange(value)) return std::nullopt;
+        in += value;
+        if (!MoneyRange(in)) return std::nullopt;
+    }
+    CAmount out{0};
+    for (const CTxOut& txout : tx.vout) {
+        if (!MoneyRange(txout.nValue)) return std::nullopt;
+        out += txout.nValue;
+        if (!MoneyRange(out)) return std::nullopt;
+    }
+    if (out > in) return std::nullopt;
+    return in - out;
+}
+
+/**
+ * The -privatebroadcast form of submitpackage: one transaction, or exactly one parent and its
+ * child. Nothing enters the mempool. The package is test-accepted and, if acceptable, queued as one
+ * private broadcast job that announces the child and serves the parent to a peer that asks for it
+ * (one parent, one child). A transaction whose txid is already in the mempool counts as accepted
+ * and is sent as given, unvalidated. A test accept applies no package feerate, so a parent that
+ * fails on its own as TX_RECONSIDERABLE (a fee too low by itself) is let through with the child
+ * unvalidated: that is the case package relay exists for, and the node cannot check it any further
+ * here. Only the fees are still worked out, so that maxfeerate holds for the child and the package
+ * meets the feerate floor package validation would apply.
+ */
+static UniValue SubmitPackagePrivately(NodeContext& node, Chainstate& chainstate, CTxMemPool& mempool,
+                                       const std::vector<CTransactionRef>& txns, const CFeeRate& max_raw_tx_fee_rate)
+{
+    CHECK_NONFATAL(node.privbcast);
+    if (!node::PrivateBroadcastManager::UsableProxy(GetProxy(NET_ONION))) {
+        throw JSONRPCError(RPC_MISC_ERROR, "-privatebroadcast is enabled, but no Tor SOCKS5 proxy is configured.");
+    }
+    if (txns.size() > 2) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "With -privatebroadcast a package is one transaction, or one parent and its child.");
+    }
+    const CTransactionRef& child{txns.back()};
+    const CTransactionRef parent{txns.size() == 2 ? txns.front() : nullptr};
+    // A transaction already in the mempool counts as accepted, as in an ordinary submitpackage, and the
+    // job sends it as given, as sendrawtransaction does. What is left is test-accepted: as a package
+    // when both are new, so that a parent too cheap on its own can go with its child, otherwise on its
+    // own, as sendrawtransaction does, which allows a replacement.
+    const CTransactionRef mempool_parent{parent ? mempool.get(parent->GetHash()) : nullptr};
+    const CTransactionRef mempool_child{mempool.get(child->GetHash())};
+    std::vector<CTransactionRef> to_check;
+    if (parent && !mempool_parent) to_check.push_back(parent);
+    if (!mempool_child) to_check.push_back(child);
+    const PackageMempoolAcceptResult result{[&] {
+        LOCK(::cs_main);
+        if (to_check.size() == 2) return ProcessNewPackage(chainstate, mempool, to_check, /*test_accept=*/true, /*client_maxfeerate=*/std::nullopt);
+        PackageValidationState state;
+        std::map<Wtxid, MempoolAcceptResult> results;
+        if (!to_check.empty()) {
+            MempoolAcceptResult single{chainstate.m_chainman.ProcessTransaction(to_check.front(), /*test_accept=*/true)};
+            if (single.m_result_type != MempoolAcceptResult::ResultType::VALID) state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            results.emplace(to_check.front()->GetWitnessHash(), std::move(single));
+        }
+        return PackageMempoolAcceptResult{state, std::move(results)};
+    }()};
+
+    bool acceptable{true};
+    bool parent_reconsiderable{false};
+    UniValue tx_results{UniValue::VOBJ};
+    for (const auto& tx : txns) {
+        UniValue r{UniValue::VOBJ};
+        r.pushKV("txid", tx->GetHash().GetHex());
+        const CTransactionRef& in_mempool{tx == child ? mempool_child : mempool_parent};
+        const auto it{result.m_tx_results.find(tx->GetWitnessHash())};
+        if (in_mempool) {
+            if (in_mempool->GetWitnessHash() != tx->GetWitnessHash()) r.pushKV("other-wtxid", in_mempool->GetWitnessHash().GetHex());
+        } else if (it == result.m_tx_results.end()) {
+            r.pushKV("error", "package-not-validated");
+            // A parent that failed only for its fee leaves its child unvalidated, but the fees are still
+            // checked: maxfeerate holds for the child, and the package must pay the feerate floor that
+            // package validation would apply.
+            if (tx == child && parent_reconsiderable) {
+                const std::optional<CAmount> parent_fee{TxFee(chainstate, mempool, *parent, nullptr)};
+                const std::optional<CAmount> child_fee{TxFee(chainstate, mempool, *tx, parent.get())};
+                const int32_t package_vsize{int32_t(GetVirtualTransactionSize(*parent) + GetVirtualTransactionSize(*tx))};
+                // std::max returns a reference to one of its arguments: copy it while GetMinFee()'s result lives.
+                const CFeeRate floor{WITH_LOCK(mempool.cs, return CFeeRate{std::max(mempool.GetMinFee(), mempool.m_opts.min_relay_feerate)})};
+                if (!parent_fee || !child_fee) {
+                    acceptable = false;
+                    r.pushKV("error", "missing or invalid inputs");
+                } else if (max_raw_tx_fee_rate != CFeeRate(0) && *child_fee > max_raw_tx_fee_rate.GetFee(GetVirtualTransactionSize(*tx))) {
+                    acceptable = false;
+                    r.pushKV("error", "max feerate exceeded");
+                } else if (*parent_fee + *child_fee < floor.GetFee(package_vsize)) {
+                    acceptable = false;
+                    r.pushKV("error", "package feerate too low");
+                }
+            }
+        } else {
+            const MempoolAcceptResult& tx_result{it->second};
+            switch (tx_result.m_result_type) {
+            case MempoolAcceptResult::ResultType::VALID: {
+                const int64_t vsize{GetVirtualTransactionSize(*tx)};
+                r.pushKV("vsize_adjusted", tx_result.m_vsize.value());
+                r.pushKV("vsize_bip141", vsize);
+                UniValue fees{UniValue::VOBJ};
+                fees.pushKV("base", ValueFromAmount(tx_result.m_base_fees.value()));
+                r.pushKV("fees", std::move(fees));
+                if (max_raw_tx_fee_rate != CFeeRate(0) && tx_result.m_base_fees.value() > max_raw_tx_fee_rate.GetFee(vsize)) {
+                    acceptable = false;
+                    r.pushKV("error", "max feerate exceeded");
+                }
+                break;
+            }
+            case MempoolAcceptResult::ResultType::INVALID:
+                r.pushKV("error", tx_result.m_state.ToString());
+                if (tx == parent && tx_result.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
+                    parent_reconsiderable = true; // the child may pay for it; only package relay can tell
+                } else {
+                    acceptable = false;
+                }
+                break;
+            case MempoolAcceptResult::ResultType::MEMPOOL_ENTRY:
+            case MempoolAcceptResult::ResultType::DIFFERENT_WITNESS:
+                acceptable = false;
+                r.pushKV("error", "already in mempool");
+                break;
+            } // no default case, so the compiler can warn about missing cases
+        }
+        tx_results.pushKV(tx->GetWitnessHash().GetHex(), std::move(r));
+    }
+    // A package-wide failure (malformed, TRUC or cluster limits) can stop validation before any
+    // per-transaction result; only a reconsiderable parent leaves an invalid package queueable.
+    if (result.m_state.IsInvalid() && !parent_reconsiderable) acceptable = false;
+
+    UniValue out{UniValue::VOBJ};
+    out.pushKV("package_msg", !acceptable ? (result.m_state.IsInvalid() ? result.m_state.ToString() : "transaction failed") :
+                              parent_reconsiderable ? "parent-reconsiderable" : "success");
+    out.pushKV("tx-results", std::move(tx_results));
+    if (acceptable && !node.privbcast->Submit(child, parent)) {
+        throw JSONRPCTransactionError(TransactionError::PRIVATE_BROADCAST_FULL);
+    }
+    return out;
+}
+
 static RPCMethod submitpackage()
 {
     return RPCMethod{"submitpackage",
@@ -1390,6 +1553,15 @@ static RPCMethod submitpackage()
         "The package will be validated according to consensus and mempool policy rules. If any transaction passes, it will be accepted to mempool.\n"
         "This RPC is experimental and the interface may be unstable. Refer to doc/policy/packages.md for documentation on package policies.\n"
         "Warning: successful submission does not mean the transactions will propagate throughout the network.\n"
+        "\nIf -privatebroadcast is enabled, the package must be one transaction, or one parent and its child. Nothing\n"
+        "enters the local mempool: the package is test-accepted and queued as one private broadcast job that announces\n"
+        "the child and serves the parent to a peer that asks for it. A transaction already in the mempool counts as\n"
+        "accepted, as it does without -privatebroadcast, and the job sends it as given. A single new transaction\n"
+        "is test-accepted on its own, as sendrawtransaction does, so it may replace a mempool transaction. A new parent\n"
+        "that fails on its own only for its fee (TX_RECONSIDERABLE) is allowed, with the child left unvalidated, since a\n"
+        "test accept applies no package feerate: the fees are still worked out, maxfeerate holds for the child and the\n"
+        "package must meet the mempool's minimum feerate, but a child that is otherwise invalid is still sent.\n"
+        "package_msg is then \"parent-reconsiderable\". The job is listed by getprivatebroadcastinfo.\n"
         ,
         {
             {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.\n"
@@ -1486,6 +1658,9 @@ static RPCMethod submitpackage()
             NodeContext& node = EnsureAnyNodeContext(request.context);
             CTxMemPool& mempool = EnsureMemPool(node);
             Chainstate& chainstate = EnsureChainman(node).ActiveChainstate();
+            if (gArgs.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)) {
+                return SubmitPackagePrivately(node, chainstate, mempool, txns, max_raw_tx_fee_rate);
+            }
             const auto package_result = WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/ false, client_maxfeerate));
 
             std::string package_msg = "success";

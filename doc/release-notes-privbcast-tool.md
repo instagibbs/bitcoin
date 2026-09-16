@@ -20,9 +20,9 @@ P2P and network changes
 
 - `-privatebroadcast` now runs the same bounded, fixed-schedule jobs as
   `bitcoin-privbcast`, inside the node: each transaction submitted with
-  `sendrawtransaction` becomes one job that announces it to a few peers found
-  through the release DNS seeds (resolved through Tor) and the fixed onion
-  seeds, over the node's Tor SOCKS5 proxy, and then stops. The node no longer
+  `sendrawtransaction` or `submitpackage` becomes one job that announces it to
+  a few peers found through the release DNS seeds (resolved through Tor) and the
+  fixed onion seeds, over the node's Tor SOCKS5 proxy, and then stops. The node no longer
   opens `private-broadcast` connections through its connection manager, does
   not pick recipients from its address manager, does not reattempt until the
   transaction is seen back, and no longer uses I2P for private broadcast; a
@@ -52,6 +52,17 @@ Updated RPCs
   `abortprivatebroadcast` still takes a txid or wtxid; it now also stops a
   running job, and each removed transaction carries its job's `state`.
   (TODO: PR number)
+
+- `submitpackage` now honors `-privatebroadcast`. Before, it added the package
+  to the mempool and announced it to all peers. It now takes one transaction,
+  or one parent and its child, test-accepts it and queues one private broadcast
+  job; nothing enters the local mempool. For a pair, the job announces the child
+  and serves the parent to a peer that asks for it. Transactions already in the
+  mempool count as accepted and are sent as given, and a single transaction
+  may replace a mempool transaction, as with `sendrawtransaction`. A parent too
+  cheap on its own is accepted with its child, which is then checked only for
+  its fee: the child must stay within `maxfeerate` and the pair must meet the
+  mempool's minimum feerate. (TODO: PR number)
 
 - `testmempoolaccept` leaves the node's validation caches and its coins cache
   exactly as it found them: the coins fetched for the check are uncached again,

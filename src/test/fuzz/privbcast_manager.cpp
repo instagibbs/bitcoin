@@ -216,7 +216,7 @@ FUZZ_TARGET(privbcast_manager)
         CallOneOf(
             fdp,
             [&] {
-                // Submit(), with or without a parent; refused while networking is disabled.
+                // sendrawtransaction, or submitpackage with a parent; refused while networking is disabled.
                 if (!network_active) return;
                 const CTransactionRef tx{pick_tx()};
                 CTransactionRef parent;
@@ -227,12 +227,12 @@ FUZZ_TARGET(privbcast_manager)
                 std::optional<Admission> first;
                 for (Side* side : sides) {
                     Queue& q{side->queue};
-                    // A job still queued, or running and not being aborted, for this wtxid and the same
-                    // parent, or no parent on both, covers it. A finished or aborting one does not,
-                    // whatever the node's mempool has seen.
+                    // A job still queued, or running and not being aborted, for this wtxid covers it, with
+                    // the same parent or with any parent if none is given now. A finished or aborting one
+                    // does not, whatever the node's mempool has seen.
                     const auto covers = [&](const std::shared_ptr<Job>& j) {
-                        return j->info.wtxid == tx->GetWitnessHash() && !j->info.parent == !parent &&
-                               (!parent || j->info.parent->GetWitnessHash() == parent->GetWitnessHash());
+                        return j->info.wtxid == tx->GetWitnessHash() &&
+                               (!parent || (j->info.parent && j->info.parent->GetWitnessHash() == parent->GetWitnessHash()));
                     };
                     const bool covered{std::ranges::any_of(q.Queued(), covers) ||
                                        std::ranges::any_of(q.Running(), [&](const auto& j) { return !j->abort.load() && covers(j); })};

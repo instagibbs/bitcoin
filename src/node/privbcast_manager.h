@@ -192,9 +192,10 @@ public:
 
     /**
      * Queue a job. Returns false if the queue is full, the manager is stopping, or networking is
-     * inactive. A transaction with the same parent whose job is still queued, or running and not
-     * being aborted, is not queued again, and true is returned. Otherwise the transaction is
-     * queued again, even while an aborted job for it winds down.
+     * inactive. A transaction whose job is still queued, or running and not being aborted, is not
+     * queued again, and true is returned: the job must have the same parent, or any parent if none
+     * is given now. Otherwise the transaction is queued again, even while an aborted job for it
+     * winds down.
      */
     bool Submit(CTransactionRef tx, CTransactionRef parent = nullptr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
     /** Snapshot of the retained finished jobs, oldest first, then the running and queued ones in order. */

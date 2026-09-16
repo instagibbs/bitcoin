@@ -11,6 +11,7 @@
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -239,6 +240,128 @@ BOOST_FIXTURE_TEST_CASE(rbf_conflicts_calculator, TestChain100Setup)
                                        /*pool=*/ pool,
                                        /*iters_conflicting=*/ conflicts,
                                        /*all_conflicts=*/ dummy).has_value());
+}
+
+BOOST_FIXTURE_TEST_CASE(sibling_eviction_selector, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    LOCK2(::cs_main, pool.cs);
+    TestMemPoolEntryHelper entry;
+    constexpr int64_t NO_WEIGHT_LIMIT{std::numeric_limits<int64_t>::max()};
+
+    // Spend output n of parent, without adding to the mempool.
+    auto spend = [&](const std::vector<std::pair<CTransactionRef, uint32_t>>& inputs) {
+        std::vector<CTransactionRef> parents;
+        for (const auto& [parent, _] : inputs) parents.push_back(parent);
+        CMutableTransaction tx(*make_tx(parents, {COIN / 2}));
+        for (size_t i{0}; i < inputs.size(); ++i) tx.vin[i].prevout.n = inputs[i].second;
+        return MakeTransactionRef(tx);
+    };
+    auto add = [&](const CTransactionRef& tx, CAmount fee) {
+        TryAddToMempool(pool, entry.Fee(fee).FromTx(tx));
+        return pool.GetIter(tx->GetHash()).value();
+    };
+    auto select = [&](const CTransactionRef& replacement, const CTxMemPool::setEntries& removals, int64_t max_count) {
+        const auto tmp_entry{entry.Fee(COIN / 10).FromTx(replacement)};
+        return GetEntriesForSiblingEviction(pool, tmp_entry, pool.GetParents(tmp_entry),
+                                            pool.CalculateMemPoolAncestors(tmp_entry), removals,
+                                            max_count, NO_WEIGHT_LIMIT);
+    };
+
+    // parent has 6 outputs; children c0..c3 spend outputs 0..3. c0 is low fee but has a high fee
+    // child g0, so [c0, g0] forms one chunk worth more than any sibling on its own.
+    const auto parent_tx = make_tx({m_coinbase_txns[0]}, std::vector<CAmount>(6, COIN));
+    add(parent_tx, CENT);
+    const auto c0 = spend({{parent_tx, 0}});
+    const auto c1 = spend({{parent_tx, 1}});
+    const auto c2 = spend({{parent_tx, 2}});
+    const auto c3 = spend({{parent_tx, 3}});
+    const auto g0 = spend({{c0, 0}});
+    const auto c0_it = add(c0, 100);
+    const auto c1_it = add(c1, 3000);
+    const auto c2_it = add(c2, 2000);
+    const auto c3_it = add(c3, 1000);
+    const auto g0_it = add(g0, 20000);
+    const auto replacement = spend({{parent_tx, 4}});
+
+    // Pinned set: parent + replacement = 2. Everything fits with a limit of 7: no eviction.
+    BOOST_CHECK(select(replacement, {}, 7) == CTxMemPool::setEntries{});
+    // Budget 4: the [c0, g0] chunk (2) and c1 are the most valuable; c2 fits last, c3 does not.
+    BOOST_CHECK(select(replacement, {}, 6) == CTxMemPool::setEntries({c3_it}));
+    // Budget 3: keep [c0, g0] and c1.
+    BOOST_CHECK(select(replacement, {}, 5) == CTxMemPool::setEntries({c2_it, c3_it}));
+    // Budget 1: the chunk does not fit, so c1 alone is kept although the chunk is worth more.
+    BOOST_CHECK(select(replacement, {}, 3) == CTxMemPool::setEntries({c0_it, g0_it, c2_it, c3_it}));
+    // Budget 0: evict everything.
+    BOOST_CHECK(select(replacement, {}, 2) == CTxMemPool::setEntries({c0_it, g0_it, c1_it, c2_it, c3_it}));
+    // The pinned set alone does not fit.
+    BOOST_CHECK(!select(replacement, {}, 1));
+    // An ancestor staged for removal.
+    BOOST_CHECK(!select(replacement, {pool.GetIter(parent_tx->GetHash()).value()}, 7));
+
+    // Weight limit: parent + replacement pinned, one child at a time fits.
+    {
+        const auto tmp_entry{entry.Fee(COIN / 10).FromTx(replacement)};
+        const auto pinned_weight{tmp_entry.GetAdjustedWeight() + pool.GetIter(parent_tx->GetHash()).value()->GetAdjustedWeight()};
+        const auto result = GetEntriesForSiblingEviction(pool, tmp_entry, pool.GetParents(tmp_entry),
+                                                         pool.CalculateMemPoolAncestors(tmp_entry), {},
+                                                         /*max_count=*/64, pinned_weight + c1_it->GetAdjustedWeight());
+        BOOST_CHECK(result == CTxMemPool::setEntries({c0_it, g0_it, c2_it, c3_it}));
+    }
+
+    // A staged removal can disconnect material from the pinned set. q joins the cluster only through
+    // x, which spends c1 and q. With x removed, q is neither budgeted nor evicted; a limit of 7
+    // (budget 5 for [c0, g0], c1, c2, c3 = 5 remaining candidates) evicts nothing.
+    const auto q = spend({{m_coinbase_txns[1], 0}});
+    const auto q_it = add(q, 500);
+    const auto x = spend({{c1, 0}, {q, 0}});
+    const auto x_it = add(x, 500);
+    BOOST_CHECK(select(replacement, {x_it}, 7) == CTxMemPool::setEntries{});
+    BOOST_CHECK(select(replacement, {x_it}, 6) == CTxMemPool::setEntries({c3_it}));
+    // Without the removal, q and x are candidates: x depends on both c1 and q, and has the lowest
+    // feerate, so with budget 6 for 7 candidates only x is evicted.
+    BOOST_CHECK(select(replacement, {}, 8) == CTxMemPool::setEntries({x_it}));
+    BOOST_CHECK(select(replacement, {}, 7) == CTxMemPool::setEntries({q_it, x_it}));
+
+    // Two parents in one cluster, both pinned: the replacement spends parent output 5 and c2.
+    const auto merge = spend({{parent_tx, 5}, {c2, 0}});
+    BOOST_CHECK(select(merge, {}, 3) == CTxMemPool::setEntries({c0_it, g0_it, c1_it, c3_it, q_it, x_it}));
+    BOOST_CHECK(!select(merge, {}, 2));
+
+    // A negative fee delta makes c1 the least valuable candidate. Budget 6 for 7 candidates.
+    pool.PrioritiseTransaction(c1->GetHash(), -2900);
+    BOOST_CHECK(select(replacement, {}, 8) == CTxMemPool::setEntries({c1_it, x_it}));
+    pool.PrioritiseTransaction(c1->GetHash(), 2900);
+    BOOST_CHECK(select(replacement, {}, 8) == CTxMemPool::setEntries({x_it}));
+
+    // Dependency accounting across units, on a fresh cluster. parent2 is pinned. p1 is a rich
+    // candidate; its child y and grandchild z form the chunk [y, z] (5050 per weight, below p1's
+    // 20000 so it is not merged into p1), whose two members both depend on p1's unit: counted
+    // once, so the chunk is eligible as soon as p1 is kept. w spends z with a fee below the
+    // sibling s1, and is a separate unit behind [y, z].
+    const auto parent2_tx = make_tx({m_coinbase_txns[2]}, std::vector<CAmount>(4, COIN));
+    add(parent2_tx, CENT);
+    const auto p1 = spend({{parent2_tx, 0}});
+    const auto y = spend({{p1, 0}});
+    const auto z = spend({{y, 0}});
+    const auto w = spend({{z, 0}});
+    const auto s1 = spend({{parent2_tx, 1}});
+    const auto p1_it = add(p1, 20000);
+    const auto y_it = add(y, 100);
+    const auto z_it = add(z, 10000);
+    const auto w_it = add(w, 300);
+    const auto s1_it = add(s1, 1000);
+    const auto replacement2 = spend({{parent2_tx, 2}});
+    // Budget 5: everything fits.
+    BOOST_CHECK(select(replacement2, {}, 7) == CTxMemPool::setEntries{});
+    // Budget 3: p1, then [y, z]; s1 and w do not fit.
+    BOOST_CHECK(select(replacement2, {}, 5) == CTxMemPool::setEntries({w_it, s1_it}));
+    // Budget 2: p1, then [y, z] does not fit, so w is blocked although it would fit alone; s1 is kept.
+    BOOST_CHECK(select(replacement2, {}, 4) == CTxMemPool::setEntries({y_it, z_it, w_it}));
+    // Budget 1: p1 only.
+    BOOST_CHECK(select(replacement2, {}, 3) == CTxMemPool::setEntries({y_it, z_it, w_it, s1_it}));
+    // Budget 0.
+    BOOST_CHECK(select(replacement2, {}, 2) == CTxMemPool::setEntries({p1_it, y_it, z_it, w_it, s1_it}));
 }
 
 BOOST_FIXTURE_TEST_CASE(improves_feerate, TestChain100Setup)

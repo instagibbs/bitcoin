@@ -376,6 +376,8 @@ public:
 
     /** Returns an iterator to the given hash, if found */
     std::optional<txiter> GetIter(const Txid& txid) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+    /** Iterator to an entry known to be in the mempool, without a hash lookup. */
+    txiter GetIter(const CTxMemPoolEntry& entry) const EXCLUSIVE_LOCKS_REQUIRED(cs) { return mapTx.iterator_to(entry); }
     std::optional<txiter> GetIter(const Wtxid& wtxid) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Translate a set of hashes into a set of pool iterators to avoid repeated lookups.
@@ -419,6 +421,18 @@ public:
         return ret;
     }
 
+
+    /** All in-mempool ancestors of entry, including entry itself, in unspecified order. Bounded by
+     *  the cluster count limit regardless of the transaction's input count. */
+    std::vector<const CTxMemPoolEntry*> GetAncestors(const CTxMemPoolEntry& entry) const EXCLUSIVE_LOCKS_REQUIRED(cs) {
+        auto ancestors = m_txgraph->GetAncestors(entry, TxGraph::Level::MAIN);
+        std::vector<const CTxMemPoolEntry*> ret;
+        ret.reserve(ancestors.size());
+        for (const auto& tx : ancestors) {
+            ret.emplace_back(static_cast<const CTxMemPoolEntry*>(tx));
+        }
+        return ret;
+    }
 
     size_t GetUniqueClusterCount(const setEntries& iters_conflicting) const EXCLUSIVE_LOCKS_REQUIRED(cs) {
         std::vector<const TxGraph::Ref *> entries;

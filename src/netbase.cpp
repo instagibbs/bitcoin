@@ -315,10 +315,11 @@ enum class IntrRecvError {
  *          IntrRecvError::OK only if all of the specified number of bytes were
  *          read.
  *
- * @see This function can be interrupted by calling g_socks5_interrupt().
- *      Sockets can be made non-blocking with Sock::SetNonBlocking().
+ * @param interrupt Interrupt that ends the read early (`g_socks5_interrupt` for ordinary connections).
+ *
+ * @see Sockets can be made non-blocking with Sock::SetNonBlocking().
  */
-static IntrRecvError InterruptibleRecv(uint8_t* data, size_t len, std::chrono::milliseconds timeout, const Sock& sock)
+static IntrRecvError InterruptibleRecv(uint8_t* data, size_t len, std::chrono::milliseconds timeout, const Sock& sock, const CThreadInterrupt& interrupt)
 {
     auto curTime{Now<SteadyMilliseconds>()};
     const auto endTime{curTime + timeout};
@@ -343,7 +344,7 @@ static IntrRecvError InterruptibleRecv(uint8_t* data, size_t len, std::chrono::m
                 return IntrRecvError::NetworkError;
             }
         }
-        if (g_socks5_interrupt) {
+        if (interrupt) {
             return IntrRecvError::Interrupted;
         }
         curTime = Now<SteadyMilliseconds>();
@@ -407,28 +408,31 @@ static std::string Socks5ErrorString(uint8_t err)
  * @returns The address from the reply's BND.ADDR field (an invalid CNetAddr when the proxy
  *          answered with a domain name), or std::nullopt on failure.
  */
-static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::string& strDest, uint16_t port, const ProxyCredentials* auth, bool require_auth, const Sock& sock, Socks5Deadline deadline)
+static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::string& strDest, uint16_t port, const ProxyCredentials* auth, bool require_auth, const Sock& sock, const Socks5Params& params)
 {
+    const Socks5Deadline& deadline{params.deadline};
+    const std::chrono::milliseconds per_stage{params.stage_timeout.value_or(g_socks5_recv_timeout)};
+    CThreadInterrupt& interrupt{params.interrupt ? *params.interrupt : g_socks5_interrupt};
     // Local stages (method selection, authentication, sending the command) wait at most the
     // per-stage timeout. The command reply is where the proxy does its remote work (building a
     // circuit, connecting, resolving), so with a deadline it may take the whole remaining budget.
     // Nothing ever waits past the deadline.
     const auto stage_timeout = [&](bool remote) -> std::optional<std::chrono::milliseconds> {
-        if (!deadline) return g_socks5_recv_timeout;
+        if (!deadline) return per_stage;
         const auto remaining{std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now())};
         if (remaining <= 0ms) return std::nullopt;
-        return remote ? remaining : std::min(g_socks5_recv_timeout, remaining);
+        return remote ? remaining : std::min(per_stage, remaining);
     };
     const auto send_stage = [&](const std::vector<uint8_t>& data) {
         const auto timeout{stage_timeout(/*remote=*/false)};
         if (!timeout) return false;
-        sock.SendComplete(data, *timeout, g_socks5_interrupt);
+        sock.SendComplete(data, *timeout, interrupt);
         return true;
     };
     const auto recv_stage = [&](uint8_t* data, size_t len, bool remote = false) {
         const auto timeout{stage_timeout(remote)};
         if (!timeout) return IntrRecvError::Timeout;
-        return InterruptibleRecv(data, len, *timeout, sock);
+        return InterruptibleRecv(data, len, *timeout, sock, interrupt);
     };
     Assume(!require_auth || auth != nullptr);
     const char* const verb{cmd == SOCKS5Command::RESOLVE ? "resolving" : "connecting"};
@@ -590,14 +594,14 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
     }
 }
 
-bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock, bool require_auth, Socks5Deadline deadline)
+bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock, bool require_auth, const Socks5Params& params)
 {
-    return Socks5Request(SOCKS5Command::CONNECT, strDest, port, auth, require_auth, sock, deadline).has_value();
+    return Socks5Request(SOCKS5Command::CONNECT, strDest, port, auth, require_auth, sock, params).has_value();
 }
 
-std::optional<CNetAddr> Socks5Resolve(const std::string& name, const ProxyCredentials& auth, const Sock& sock, Socks5Deadline deadline)
+std::optional<CNetAddr> Socks5Resolve(const std::string& name, const ProxyCredentials& auth, const Sock& sock, const Socks5Params& params)
 {
-    const auto addr{Socks5Request(SOCKS5Command::RESOLVE, name, /*port=*/0, &auth, /*require_auth=*/true, sock, deadline)};
+    const auto addr{Socks5Request(SOCKS5Command::RESOLVE, name, /*port=*/0, &auth, /*require_auth=*/true, sock, params)};
     if (!addr) return std::nullopt;
     if (!addr->IsValid() || !(addr->IsIPv4() || addr->IsIPv6())) {
         LogDebug(BCLog::NET, "SOCKS5 RESOLVE of %s did not return a usable IP address\n", name);
@@ -766,9 +770,14 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
 
 std::unique_ptr<Sock> Proxy::Connect() const
 {
+    return Connect(std::chrono::milliseconds{nConnectTimeout});
+}
+
+std::unique_ptr<Sock> Proxy::Connect(std::chrono::milliseconds timeout) const
+{
     if (!IsValid()) return {};
 
-    if (!m_is_unix_socket) return ConnectDirectly(proxy, /*manual_connection=*/true);
+    if (!m_is_unix_socket) return ConnectDirectly(proxy, /*manual_connection=*/true, timeout);
 
 #ifdef HAVE_SOCKADDR_UN
     auto sock = CreateSock(AF_UNIX, SOCK_STREAM, 0);
@@ -791,7 +800,7 @@ std::unique_ptr<Sock> Proxy::Connect() const
                          len,
                          path,
                          /*manual_connection=*/true,
-                         std::chrono::milliseconds{nConnectTimeout})) {
+                         timeout)) {
         return {};
     }
 
@@ -901,10 +910,10 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
                                           uint16_t port,
                                           bool& proxy_connection_failed,
                                           bool require_auth,
-                                          Socks5Deadline deadline)
+                                          const Socks5Params& params)
 {
     // first connect to proxy server
-    auto sock = proxy.Connect();
+    auto sock = proxy.Connect(params.connect_timeout.value_or(std::chrono::milliseconds{nConnectTimeout}));
     if (!sock) {
         proxy_connection_failed = true;
         return {};
@@ -912,24 +921,24 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
 
     // do socks negotiation
     if (proxy.m_tor_stream_isolation || require_auth) {
-        ProxyCredentials random_auth{TorStreamIsolationCredentials().Generate()};
-        if (!Socks5(dest, port, &random_auth, *sock, require_auth, deadline)) {
+        const ProxyCredentials random_auth{params.auth ? *params.auth : TorStreamIsolationCredentials().Generate()};
+        if (!Socks5(dest, port, &random_auth, *sock, require_auth, params)) {
             return {};
         }
     } else {
-        if (!Socks5(dest, port, nullptr, *sock, /*require_auth=*/false, deadline)) {
+        if (!Socks5(dest, port, nullptr, *sock, /*require_auth=*/false, params)) {
             return {};
         }
     }
     return sock;
 }
 
-std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name, Socks5Deadline deadline)
+std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name, const Socks5Params& params)
 {
-    auto sock = proxy.Connect();
+    auto sock = proxy.Connect(params.connect_timeout.value_or(std::chrono::milliseconds{nConnectTimeout}));
     if (!sock) return std::nullopt;
-    const ProxyCredentials auth{TorStreamIsolationCredentials().Generate()};
-    return Socks5Resolve(name, auth, *sock, deadline);
+    const ProxyCredentials auth{params.auth ? *params.auth : TorStreamIsolationCredentials().Generate()};
+    return Socks5Resolve(name, auth, *sock, params);
 }
 
 CSubNet LookupSubNet(const std::string& subnet_str)

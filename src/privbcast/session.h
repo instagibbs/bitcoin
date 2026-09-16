@@ -34,8 +34,8 @@ inline constexpr int MIN_PEER_PROTOCOL_VERSION{70001};
 inline constexpr uint64_t SERVICES{NODE_WITNESS};
 /**
  * Fixed and never versioned; the same string the node's own private broadcast sends. That alone does not
- * make the two indistinguishable (the node advertises no services and negotiates wtxid relay; this tool
- * advertises NODE_WITNESS and announces by txid): being recognised as the tool is accepted.
+ * make the two indistinguishable (the node advertises no services and speaks v1 or v2; this tool
+ * advertises NODE_WITNESS and is v2 only; both announce by txid): being recognised as the tool is accepted.
  */
 inline constexpr std::string_view USER_AGENT{"/pynode:0.0.1/"};
 /** Maximum user agent length accepted from the peer, as in net.h. */

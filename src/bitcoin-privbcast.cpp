@@ -173,6 +173,8 @@ MAIN_FUNCTION
 #endif
         fwrite(line.data(), 1, line.size(), stderr);
     };
+    // The library logs progress under the node's private broadcast category; the tool shows it by default.
+    LogInstance().EnableCategory(BCLog::PRIVBROADCAST);
     for (const std::string& cat : args.GetArgs("-debug")) {
         if (cat == "0" || cat == "none") {
             LogInstance().DisableCategory(BCLog::ALL);

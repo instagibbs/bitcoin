@@ -1213,9 +1213,11 @@ BOOST_AUTO_TEST_CASE(run_job_end_to_end_with_mock_connector)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1226,7 +1228,7 @@ BOOST_AUTO_TEST_CASE(run_job_end_to_end_with_mock_connector)
     // three backups (and their grace) are overrun while the middle onion slot's opportunities fall
     // due. Every other connect fails at once.
     std::atomic<int> connects{0};
-    cfg.connector = [&](const Candidate&, SteadyClock::time_point) -> Connector {
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
         return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
             if (connects.fetch_add(1) == 0) {
                 std::this_thread::sleep_for(Scaled(plan::MID_MAX) + Scaled(plan::START_GRACE) + std::chrono::milliseconds{40});
@@ -1297,9 +1299,11 @@ BOOST_AUTO_TEST_CASE(run_job_slow_preparation_is_a_miss)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1307,7 +1311,7 @@ BOOST_AUTO_TEST_CASE(run_job_slow_preparation_is_a_miss)
 
     JobConfig cfg{OnionJobConfig(8)};
     std::atomic<int> factory_calls{0};
-    cfg.connector = [&](const Candidate&, SteadyClock::time_point) -> Connector {
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
         if (factory_calls.fetch_add(1) == 0) std::this_thread::sleep_for(Scaled(plan::START_GRACE) + std::chrono::milliseconds{40});
         return [](bool& proxy_failed) -> std::unique_ptr<Sock> {
             proxy_failed = false;
@@ -1339,9 +1343,11 @@ BOOST_AUTO_TEST_CASE(run_job_slot_failure_is_contained)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1350,7 +1356,7 @@ BOOST_AUTO_TEST_CASE(run_job_slot_failure_is_contained)
     for (const std::string& message : {std::string{"connector blew up"}, std::string{}}) {
         JobConfig cfg{OnionJobConfig(8)};
         std::atomic<int> connects{0};
-        cfg.connector = [&](const Candidate&, SteadyClock::time_point) -> Connector {
+        cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
             return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
                 if (connects.fetch_add(1) == 0) throw std::runtime_error(message);
                 proxy_failed = false;
@@ -1383,9 +1389,11 @@ BOOST_AUTO_TEST_CASE(run_job_cancel_during_preparation_does_not_dial)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1395,7 +1403,7 @@ BOOST_AUTO_TEST_CASE(run_job_cancel_during_preparation_does_not_dial)
     JobConfig cfg{OnionJobConfig(8)};
     cfg.interrupted = [&] { return stop.load(); };
     std::atomic<bool> dialled{false};
-    cfg.connector = [&](const Candidate&, SteadyClock::time_point) -> Connector {
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
         stop = true; // cancelled between preparation and the dial
         return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
             dialled = true;
@@ -1421,9 +1429,11 @@ BOOST_AUTO_TEST_CASE(run_job_no_slot_waits_for_another)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1445,7 +1455,7 @@ BOOST_AUTO_TEST_CASE(run_job_no_slot_waits_for_another)
     JobConfig cfg{OnionJobConfig(0)};
     cfg.discover = [found] { return found; };
     std::atomic<int> connects{0};
-    cfg.connector = [&](const Candidate&, SteadyClock::time_point) -> Connector {
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
         return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
             if (connects.fetch_add(1) < static_cast<int>(CountSlots(Stratum::PROMPT))) {
                 std::this_thread::sleep_for(Scaled(plan::MID_MAX) + Scaled(plan::START_GRACE) + std::chrono::milliseconds{40});
@@ -1482,9 +1492,11 @@ BOOST_AUTO_TEST_CASE(run_job_interrupt_reaches_blocked_connector)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1494,11 +1506,13 @@ BOOST_AUTO_TEST_CASE(run_job_interrupt_reaches_blocked_connector)
     std::atomic<bool> stop{false};
     cfg.interrupted = [&] { return stop.load(); };
     std::atomic<bool> connector_entered{false};
-    cfg.connector = [&](const Candidate&, SteadyClock::time_point) -> Connector {
-        return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
+    cfg.connector = [&](const Candidate&, const Socks5Params& socks) -> Connector {
+        BOOST_REQUIRE(socks.interrupt != nullptr);
+        BOOST_CHECK(socks.interrupt != &g_socks5_interrupt); // the job's own, not the process-wide latch
+        return [&, interrupt = socks.interrupt](bool& proxy_failed) -> std::unique_ptr<Sock> {
             connector_entered = true;
             // Like a SOCKS exchange: returns only when interrupted.
-            while (!g_socks5_interrupt) std::this_thread::sleep_for(std::chrono::milliseconds{2});
+            while (!*interrupt) std::this_thread::sleep_for(std::chrono::milliseconds{2});
             proxy_failed = false;
             return nullptr;
         };
@@ -1584,9 +1598,11 @@ BOOST_AUTO_TEST_CASE(run_job_no_replacement_after_announcement)
         ~Guard()
         {
             SetTimeDivisor(1);
-            nConnectTimeout = connect_timeout;
-            g_socks5_recv_timeout = socks_timeout;
-            g_socks5_interrupt.reset();
+            // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+            // belong to ordinary connections.
+            BOOST_CHECK_EQUAL(nConnectTimeout, connect_timeout);
+            BOOST_CHECK(g_socks5_recv_timeout == socks_timeout);
+            BOOST_CHECK(!g_socks5_interrupt);
         }
     } guard;
     SetTimeDivisor(250);
@@ -1599,7 +1615,7 @@ BOOST_AUTO_TEST_CASE(run_job_no_replacement_after_announcement)
     // opportunities 1 to 3 are never used, so no replacement is made after an announcement.
     {
         JobConfig cfg{OnionJobConfig(8)};
-        cfg.connector = [](const Candidate&, SteadyClock::time_point) -> Connector {
+        cfg.connector = [](const Candidate&, const Socks5Params&) -> Connector {
             return [](bool&) -> std::unique_ptr<Sock> { return std::make_unique<BreakSock>(); };
         };
         const JobReport report{RunJob(cfg)};
@@ -1627,7 +1643,7 @@ BOOST_AUTO_TEST_CASE(run_job_no_replacement_after_announcement)
     // announces, so the onion slot does use its later opportunities: a replacement is made.
     {
         JobConfig cfg{OnionJobConfig(8)};
-        cfg.connector = [](const Candidate&, SteadyClock::time_point) -> Connector {
+        cfg.connector = [](const Candidate&, const Socks5Params&) -> Connector {
             return [](bool&) -> std::unique_ptr<Sock> { return nullptr; }; // socks connect failed
         };
         const JobReport report{RunJob(cfg)};

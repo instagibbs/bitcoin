@@ -52,6 +52,12 @@ static_assert(QUERY_GRACE + CONNECT_TIMEOUT < QUERY_DEADLINE);
 static_assert(QUERY_DEADLINE < WINDOW);
 } // namespace disc
 
+/**
+ * Isolation credentials for one proxy stream, drawn fresh from the OS: no process- or job-wide
+ * prefix, so nothing at the SOCKS interface groups the node's streams with a job's.
+ */
+ProxyCredentials FreshIsolationCredentials();
+
 /** Where a candidate recipient came from. */
 enum class Source : uint8_t {
     DNS_SEED, //!< A release DNS seed name, resolved through Tor; reached through an exit

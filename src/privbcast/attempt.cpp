@@ -37,11 +37,12 @@ bool IsTransientSocketError(int err)
 
 } // namespace
 
-Connector TorConnector(const Proxy& tor, const Candidate& candidate, SteadyClock::time_point socks_deadline)
+Connector TorConnector(const Proxy& tor, const Candidate& candidate, Socks5Params socks)
 {
-    return [tor, candidate, socks_deadline](bool& proxy_failed) {
+    return [tor, candidate, socks = std::move(socks)](bool& proxy_failed) mutable {
+        socks.auth = FreshIsolationCredentials();
         return ConnectThroughProxy(tor, candidate.addr.ToStringAddr(), candidate.addr.GetPort(), proxy_failed,
-                                   /*require_auth=*/true, socks_deadline);
+                                   /*require_auth=*/true, socks);
     };
 }
 

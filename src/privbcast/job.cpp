@@ -23,8 +23,6 @@
 #include <thread>
 #include <utility>
 
-/** Defined in netbase.cpp; how long each SOCKS5 stage waits for the proxy. The tool bounds it per phase. */
-extern std::chrono::milliseconds g_socks5_recv_timeout;
 
 namespace privbcast {
 
@@ -122,12 +120,12 @@ Assignment AssignCandidates(const DiscoveryResult& discovery)
 
 namespace {
 
-/** Sleep until `when`, returning false if interrupted first. Interruption also unblocks SOCKS. */
-bool WaitUntil(SteadyClock::time_point when, const std::function<bool()>& interrupted)
+/** Sleep until `when`, returning false if interrupted first. Interruption also unblocks this job's SOCKS exchanges. */
+bool WaitUntil(SteadyClock::time_point when, const std::function<bool()>& interrupted, CThreadInterrupt& socks_interrupt)
 {
     while (true) {
         if (interrupted()) {
-            g_socks5_interrupt();
+            socks_interrupt();
             return false;
         }
         const auto now{SteadyClock::now()};
@@ -286,22 +284,32 @@ UniValue BuildReport(const std::string& chain, const CTransactionRef& tx, const 
 
 JobReport RunJob(const JobConfig& cfg)
 {
+    // Delivery's SOCKS bounds are plan constants carried on every dial: a CONNECT always returns
+    // within the handshake budget, so a slow proxy exchange cannot push the slot's next fixed
+    // opportunity. The interrupt is this job's own; the process-wide SOCKS settings and interrupt
+    // (ordinary connections' in bitcoind) are neither read nor written. Declared before anything
+    // that captures it so it outlives every thread of the job.
+    CThreadInterrupt socks_interrupt;
     const auto make_connector = [&](const Candidate& c, SteadyClock::time_point socks_deadline) -> Connector {
-        return cfg.connector ? cfg.connector(c, socks_deadline) : TorConnector(cfg.tor, c, socks_deadline);
+        Socks5Params socks{socks_deadline};
+        socks.stage_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(plan::SOCKS_RECV_TIMEOUT));
+        socks.connect_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(plan::CONNECT_TIMEOUT));
+        socks.interrupt = &socks_interrupt;
+        return cfg.connector ? cfg.connector(c, socks) : TorConnector(cfg.tor, c, std::move(socks));
     };
     FastRandomContext rng;
     const auto t0{SteadyClock::now()};
     const Schedule schedule{Schedule::Draw(t0, rng)};
-    LogInfo("job txid=%s wtxid=%s%s slots=%u\n", cfg.tx->GetHash().ToString(), cfg.tx->GetWitnessHash().ToString(),
+    LogDebug(BCLog::PRIVBROADCAST, "job txid=%s wtxid=%s%s slots=%u\n", cfg.tx->GetHash().ToString(), cfg.tx->GetWitnessHash().ToString(),
             cfg.parent ? strprintf(" parent=%s", cfg.parent->GetHash().ToString()) : "", plan::SLOTS);
 
     // A signal only sets a flag; a slot thread blocked inside a SOCKS exchange would not see it
-    // until that exchange returned. The watcher turns the flag into a SOCKS interrupt.
+    // until that exchange returned. The watcher turns the flag into this job's SOCKS interrupt.
     std::atomic<bool> watcher_stop{false};
     std::thread watcher([&] {
         while (!watcher_stop.load()) {
             if (cfg.interrupted()) {
-                g_socks5_interrupt();
+                socks_interrupt();
                 return;
             }
             std::this_thread::sleep_for(50ms);
@@ -320,24 +328,20 @@ JobReport RunJob(const JobConfig& cfg)
     } watcher_guard{watcher_stop, watcher};
 
     const DiscoveryResult discovery{cfg.discover ? cfg.discover() : Discover(cfg.tor, cfg.discovery, t0, rng, cfg.interrupted)};
-    // Delivery's SOCKS stage timeouts: a CONNECT always returns within the handshake budget, so
-    // a slow proxy exchange cannot push the slot's next fixed opportunity.
-    nConnectTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(plan::CONNECT_TIMEOUT)).count();
-    g_socks5_recv_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(plan::SOCKS_RECV_TIMEOUT));
-    LogInfo("discovery done: exit-path candidates=%u onion candidates=%u duplicates=%u rejected=%u\n",
+    LogDebug(BCLog::PRIVBROADCAST, "discovery done: exit-path candidates=%u onion candidates=%u duplicates=%u rejected=%u\n",
             discovery.NumExitPath(), discovery.onion.size(), discovery.duplicates, discovery.rejected);
     const Assignment assignment{AssignCandidates(discovery)};
 
     std::vector<SlotRecord> records(plan::SLOTS);
     uint32_t slots_completed{0};
     bool interrupted{false};
-    if (!WaitUntil(schedule.DeliveryStart(), cfg.interrupted)) {
+    if (!WaitUntil(schedule.DeliveryStart(), cfg.interrupted, socks_interrupt)) {
         interrupted = true;
         for (SlotRecord& rec : records) rec.interrupted = true; // none of them ran
     } else {
         std::string primaries;
         for (uint32_t s = 0; s < plan::SLOTS; ++s) primaries += strprintf(" +%d", count_seconds(schedule.primary[s]));
-        LogInfo("delivery start: primaries%s s\n", primaries);
+        LogDebug(BCLog::PRIVBROADCAST, "delivery start: primaries%s s\n", primaries);
         // One thread per slot, each following only its own pre-drawn times. Nothing here consults
         // how many connections are live: a limiter that waited for another slot would let a
         // hostile peer holding its connection open delay this one.
@@ -357,7 +361,7 @@ JobReport RunJob(const JobConfig& cfg)
                 try {
                     for (uint32_t k = 0; k < plan::OPPORTUNITIES_PER_SLOT; ++k) {
                         const auto start{schedule.OpportunityStart(s, k)};
-                        if (!WaitUntil(start, cfg.interrupted)) {
+                        if (!WaitUntil(start, cfg.interrupted, socks_interrupt)) {
                             rec.interrupted = true;
                             return;
                         }
@@ -366,7 +370,7 @@ JobReport RunJob(const JobConfig& cfg)
                             ++rec.empty_opportunities;
                             continue;
                         }
-                        LogInfo("slot %u opportunity %u: %s (%s)\n", s, k, cand->addr.ToStringAddrPort(), cand->provenance);
+                        LogDebug(BCLog::PRIVBROADCAST, "slot %u opportunity %u: %s (%s)\n", s, k, cand->addr.ToStringAddrPort(), cand->provenance);
                         // The SOCKS exchange must be over HANDSHAKE_RESERVE before the handshake deadline,
                         // leaving the transport handshake and VERSION/VERACK their share of the budget.
                         const auto socks_deadline{start + Scaled(wire::HANDSHAKE_TIMEOUT) - Scaled(plan::HANDSHAKE_RESERVE)};
@@ -382,13 +386,13 @@ JobReport RunJob(const JobConfig& cfg)
                             // A host stalled past the grace, or a previous attempt overran into this
                             // opportunity: skipped rather than dialled late.
                             ++rec.missed_opportunities;
-                            LogInfo("slot %u opportunity %u: missed\n", s, k);
+                            LogDebug(BCLog::PRIVBROADCAST, "slot %u opportunity %u: missed\n", s, k);
                             continue;
                         }
                         // The evidence is kept before anything that could still fail.
                         rec.attempts.push_back(std::move(*res));
                         const AttemptResult& done{rec.attempts.back()};
-                        LogInfo("slot %u opportunity %u: %s%s\n", s, k, OutcomeName(done.outcome),
+                        LogDebug(BCLog::PRIVBROADCAST, "slot %u opportunity %u: %s%s\n", s, k, OutcomeName(done.outcome),
                                 done.reason.empty() ? "" : strprintf(" (%s)", done.reason));
                         if (done.evidence.inv_handed) return; // Nothing after an announcement is replaceable.
                         if (cfg.interrupted()) {
@@ -413,22 +417,22 @@ JobReport RunJob(const JobConfig& cfg)
         for (auto& t : threads) t.join();
         for (uint32_t s = 0; s < plan::SLOTS; ++s) {
             if (records[s].interrupted) {
-                LogInfo("slot %u interrupted\n", s);
+                LogDebug(BCLog::PRIVBROADCAST, "slot %u interrupted\n", s);
             } else if (records[s].error) {
-                LogInfo("slot %u failed%s\n", s, records[s].error->empty() ? "" : strprintf(": %s", *records[s].error));
+                LogDebug(BCLog::PRIVBROADCAST, "slot %u failed%s\n", s, records[s].error->empty() ? "" : strprintf(": %s", *records[s].error));
             } else {
                 ++slots_completed;
             }
         }
         interrupted = cfg.interrupted() || std::any_of(records.begin(), records.end(), [](const SlotRecord& rec) { return rec.interrupted; });
-        LogInfo("%s\n", interrupted ? "delivery interrupted" : "delivery done");
+        LogDebug(BCLog::PRIVBROADCAST, "%s\n", interrupted ? "delivery interrupted" : "delivery done");
     }
 
     watcher_guard.Stop();
     int exit_code{2};
     UniValue json{BuildReport(cfg.chain, cfg.tx, schedule, discovery, records, slots_completed, interrupted, SteadyClock::now(), exit_code, cfg.parent)};
     const UniValue& summary{json["summary"]};
-    LogInfo("job done: connections=%s announcements_written=%s tx_written=%s%s pongs=%s\n",
+    LogDebug(BCLog::PRIVBROADCAST, "job done: connections=%s announcements_written=%s tx_written=%s%s pongs=%s\n",
             summary["connections"].getValStr(), summary["announcements_written"].getValStr(), summary["tx_written"].getValStr(),
             cfg.parent ? strprintf(" parents_served=%s", summary["parents_served"].getValStr()) : "", summary["pongs"].getValStr());
     return JobReport{std::move(json), exit_code};

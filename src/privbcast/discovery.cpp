@@ -19,10 +19,15 @@
 #include <set>
 #include <thread>
 
-/** Defined in netbase.cpp; how long each SOCKS5 stage waits for the proxy. The tool bounds it per phase. */
-extern std::chrono::milliseconds g_socks5_recv_timeout;
-
 namespace privbcast {
+
+ProxyCredentials FreshIsolationCredentials()
+{
+    FastRandomContext rng;
+    ProxyCredentials auth;
+    auth.username = auth.password = HexStr(rng.randbytes(16));
+    return auth;
+}
 
 size_t DiscoveryResult::NumExitPath() const
 {
@@ -110,10 +115,15 @@ DiscoveryResult Discover(const Proxy& tor, const DiscoveryPlan& plan, SteadyCloc
     std::iota(tie_order.begin(), tie_order.end(), size_t{0});
     std::shuffle(tie_order.begin(), tie_order.end(), rng);
 
-    // SOCKS stage timeouts are plan constants: with the connect timeout a RESOLVE always ends by
-    // its absolute deadline, so a slow exit or resolver cannot delay the freeze or delivery.
-    nConnectTimeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(disc::CONNECT_TIMEOUT)).count();
-    g_socks5_recv_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(disc::SOCKS_RECV_TIMEOUT));
+    // Every SOCKS bound is a plan constant carried per query: with the connect timeout a RESOLVE
+    // always ends by its absolute deadline, so a slow exit or resolver cannot delay the freeze or
+    // delivery. The process-wide settings and interrupt are never read or written; the interrupt
+    // below belongs to this discovery alone and is destroyed after its workers are joined.
+    CThreadInterrupt cut_queries;
+    Socks5Params socks{t0 + Scaled(disc::QUERY_DEADLINE)};
+    socks.stage_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(disc::SOCKS_RECV_TIMEOUT));
+    socks.connect_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(Scaled(disc::CONNECT_TIMEOUT));
+    socks.interrupt = &cut_queries;
 
     auto st{std::make_shared<DiscoveryState>()};
     st->answers.resize(n);
@@ -136,7 +146,7 @@ DiscoveryResult Discover(const Proxy& tor, const DiscoveryPlan& plan, SteadyCloc
     } join_workers{workers};
     for (size_t i = 0; i < n; ++i) {
         for (uint32_t q = 0; q < disc::QUERIES_PER_SEED; ++q) {
-            workers.emplace_back([st, i, q, tor, name = plan.dns_seeds[i], t0, window_end, interrupted] {
+            workers.emplace_back([st, i, q, tor, socks, name = plan.dns_seeds[i], t0, window_end, interrupted] {
                 bool run{false};
                 {
                     std::lock_guard lock{st->mutex};
@@ -149,7 +159,9 @@ DiscoveryResult Discover(const Proxy& tor, const DiscoveryPlan& plan, SteadyCloc
                 }
                 if (run) {
                     try {
-                        const auto addr{ResolveThroughProxy(tor, name, t0 + Scaled(disc::QUERY_DEADLINE))};
+                        Socks5Params query{socks};
+                        query.auth = FreshIsolationCredentials();
+                        const auto addr{ResolveThroughProxy(tor, name, query)};
                         std::lock_guard lock{st->mutex};
                         if (!st->closed && SteadyClock::now() < window_end) { // late answers are discarded
                             if (addr) {
@@ -185,15 +197,9 @@ DiscoveryResult Discover(const Proxy& tor, const DiscoveryPlan& plan, SteadyCloc
         skipped = st->skipped;
         // A worker still inside a RESOLVE is cut short: its answer would be discarded anyway,
         // and no discovery socket may outlive this call.
-        if (st->running > 0 || interrupted()) g_socks5_interrupt();
+        if (st->running > 0 || interrupted()) cut_queries();
     }
     for (auto& w : workers) w.join();
-    // The SOCKS interrupt is a latch. Discovery is over, so unless the job itself is being
-    // cancelled, clear it for delivery.
-    if (!interrupted()) {
-        g_socks5_interrupt.reset();
-        if (interrupted()) g_socks5_interrupt(); // cancelled between the check and the reset
-    }
 
     DiscoveryResult result{Freeze(plan, answers, tie_order, rng)};
     for (size_t i = 0; i < n; ++i) {

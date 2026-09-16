@@ -43,11 +43,11 @@ struct AttemptResult {
 using Connector = std::function<std::unique_ptr<Sock>(bool& proxy_failed)>;
 
 /**
- * The production connector: through the Tor proxy with fresh isolation credentials, auth
- * required, the whole SOCKS exchange bounded by `socks_deadline` (the TCP connect to the
- * proxy is bounded separately by the connect timeout).
+ * The production connector: through the Tor proxy with isolation credentials drawn fresh at
+ * dial time, auth required, every bound (exchange deadline, stage and connect timeouts,
+ * interrupt) taken from `socks`, never from the process-wide settings.
  */
-Connector TorConnector(const Proxy& tor, const Candidate& candidate, SteadyClock::time_point socks_deadline);
+Connector TorConnector(const Proxy& tor, const Candidate& candidate, Socks5Params socks);
 
 /**
  * Drive an already connected socket: pump bytes through the transport, feed complete

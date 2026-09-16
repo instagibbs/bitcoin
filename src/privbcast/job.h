@@ -170,8 +170,11 @@ struct JobConfig {
     std::string chain;
     /** Cancellation flag, polled from every thread; must not throw. Production reads an atomic. */
     std::function<bool()> interrupted;
-    /** Test seam: how attempts open their connections. Defaults to TorConnector with the given SOCKS deadline. */
-    std::function<Connector(const Candidate&, SteadyClock::time_point socks_deadline)> connector;
+    /**
+     * Test seam: how attempts open their connections. Defaults to TorConnector with the given
+     * bounds (exchange deadline, stage and connect timeouts, and this job's own interrupt).
+     */
+    std::function<Connector(const Candidate&, const Socks5Params& socks)> connector;
     /** Test seam: the frozen candidates to deliver to. Defaults to resolving through the proxy. */
     std::function<DiscoveryResult()> discover;
 };

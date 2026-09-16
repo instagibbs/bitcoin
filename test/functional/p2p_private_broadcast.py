@@ -18,6 +18,7 @@ and then past its last opportunity; whatever the mid and late slots have not rea
 missed. The schedule itself is asserted exactly in src/test/privbcast_tests.cpp.
 """
 import base64
+from decimal import Decimal
 import hashlib
 import threading
 import time
@@ -204,6 +205,37 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             self.end_jobs(batch)
             ids = [i for i in ids if i not in batch]
 
+    def test_package(self):
+        self.log.info("submitpackage with a low-fee parent and its child queues one job that serves the parent on request")
+        # The recipient asks for a missing parent after its orphan-resolution delays: 2 s for a non-preferred
+        # announcer plus 2 s because it has wtxid-relay peers (the private broadcast connection is one), well
+        # inside the 30 s parent hold. Take the ordinary node0-node1 link away for this part. And let node1
+        # be reached through one endpoint only: with several connections from the same job, node1 may ask
+        # a connection that has not served the child for the parent, which the protocol does not answer
+        # (one parent, one child, on one connection).
+        self.disconnect_nodes(0, 1)
+        with self.lock:
+            self.exit_path_active = [self.exit_path[0]]
+        parent = self.wallet.create_self_transfer(fee_rate=Decimal("0"))
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
+        res = self.nodes[0].submitpackage([parent["hex"], child["hex"]])
+        assert_equal(res["package_msg"], "parent-reconsiderable")
+        assert "min relay fee not met" in res["tx-results"][parent["wtxid"]]["error"]
+        assert_equal(res["tx-results"][child["wtxid"]]["error"], "package-not-validated")
+        job_id = res["private_broadcast_job"]
+        assert_equal(self.jobs()[job_id]["parent_txid"], parent["txid"])
+        assert parent["txid"] not in self.nodes[0].getrawmempool()
+        self.start_delivery([job_id])
+        self.tick_until(lambda: child["txid"] in self.nodes[1].getrawmempool() and parent["txid"] in self.nodes[1].getrawmempool())
+        job = self.end_jobs([job_id])[0]
+        assert_greater_than_or_equal(job["report"]["summary"]["parents_served"], 1)
+        assert child["txid"] not in self.nodes[0].getrawmempool()
+        # node1 does not announce transactions it already had when a peer connects, so node0 is not
+        # expected to learn these two; receipt-back is covered above.
+        self.connect_nodes(0, 1)
+        with self.lock:
+            self.exit_path_active = self.exit_path[:6]
+
     def run_test(self):
         self.mocktime = int(time.time())
         self.advance(0)
@@ -289,6 +321,20 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_greater_than_or_equal(job["report"]["summary"]["announcements_written"], 1)
         with self.lock:
             self.exit_path_active = self.exit_path[:6]
+
+        self.log.info("Under -privatebroadcast a package is at most one parent and its child, and a valid single transaction also works")
+        p1 = self.wallet.create_self_transfer()
+        p2 = self.wallet.create_self_transfer()
+        c = self.wallet.create_self_transfer_multi(utxos_to_spend=[p1["new_utxo"], p2["new_utxo"]])
+        assert_raises_rpc_error(-8, "one parent and its child", self.nodes[0].submitpackage, [p1["hex"], p2["hex"], c["hex"]])
+        single = self.wallet.create_self_transfer()
+        res = self.nodes[0].submitpackage([single["hex"]])
+        assert_equal(res["package_msg"], "success")
+        assert "fees" in res["tx-results"][single["wtxid"]]
+        assert single["txid"] not in self.nodes[0].getrawmempool()
+        self.finish([res["private_broadcast_job"]])
+
+        self.test_package()
 
         self.log.info("Disabling networking aborts running and queued jobs for good; re-enabling admits new ones")
         txs = [self.wallet.create_self_transfer() for _ in range(MAX_CONCURRENT_JOBS + 1)]

@@ -1368,6 +1368,82 @@ static RPCMethod getorphantxs()
     };
 }
 
+/**
+ * The -privatebroadcast form of submitpackage: one transaction, or exactly one parent and its
+ * child. Nothing enters the mempool. The package is test-accepted and, if acceptable, queued as one
+ * private broadcast job that announces the child and serves the parent to a peer that asks for it
+ * (one parent, one child). A test accept applies no package feerate, so a parent that fails on its
+ * own as TX_RECONSIDERABLE (a fee too low by itself) is let through with the child unvalidated:
+ * that is the case package relay exists for, and the node cannot check it any further here.
+ */
+static UniValue SubmitPackagePrivately(NodeContext& node, Chainstate& chainstate, CTxMemPool& mempool,
+                                       const std::vector<CTransactionRef>& txns, const CFeeRate& max_raw_tx_fee_rate)
+{
+    CHECK_NONFATAL(node.privbcast);
+    if (!node::PrivateBroadcastManager::UsableProxy(GetProxy(NET_ONION))) {
+        throw JSONRPCError(RPC_MISC_ERROR, "-privatebroadcast is enabled, but no Tor SOCKS5 proxy is configured.");
+    }
+    if (txns.size() > 2) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "With -privatebroadcast a package is one transaction, or one parent and its child.");
+    }
+    const CTransactionRef& child{txns.back()};
+    const CTransactionRef parent{txns.size() == 2 ? txns.front() : nullptr};
+    const auto result{WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/true, /*client_maxfeerate=*/std::nullopt))};
+
+    bool acceptable{true};
+    bool parent_reconsiderable{false};
+    UniValue tx_results{UniValue::VOBJ};
+    for (const auto& tx : txns) {
+        UniValue r{UniValue::VOBJ};
+        r.pushKV("txid", tx->GetHash().GetHex());
+        const auto it{result.m_tx_results.find(tx->GetWitnessHash())};
+        if (it == result.m_tx_results.end()) {
+            r.pushKV("error", "package-not-validated");
+        } else {
+            const MempoolAcceptResult& tx_result{it->second};
+            switch (tx_result.m_result_type) {
+            case MempoolAcceptResult::ResultType::VALID: {
+                const int64_t vsize{GetVirtualTransactionSize(*tx)};
+                r.pushKV("vsize_adjusted", tx_result.m_vsize.value());
+                r.pushKV("vsize_bip141", vsize);
+                UniValue fees{UniValue::VOBJ};
+                fees.pushKV("base", ValueFromAmount(tx_result.m_base_fees.value()));
+                r.pushKV("fees", std::move(fees));
+                if (max_raw_tx_fee_rate != CFeeRate(0) && tx_result.m_base_fees.value() > max_raw_tx_fee_rate.GetFee(vsize)) {
+                    acceptable = false;
+                    r.pushKV("error", "max feerate exceeded");
+                }
+                break;
+            }
+            case MempoolAcceptResult::ResultType::INVALID:
+                r.pushKV("error", tx_result.m_state.ToString());
+                if (tx == parent && tx_result.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
+                    parent_reconsiderable = true; // the child may pay for it; only package relay can tell
+                } else {
+                    acceptable = false;
+                }
+                break;
+            case MempoolAcceptResult::ResultType::MEMPOOL_ENTRY:
+            case MempoolAcceptResult::ResultType::DIFFERENT_WITNESS:
+                acceptable = false;
+                r.pushKV("error", "already in mempool");
+                break;
+            } // no default case, so the compiler can warn about missing cases
+        }
+        tx_results.pushKV(tx->GetWitnessHash().GetHex(), std::move(r));
+    }
+
+    UniValue out{UniValue::VOBJ};
+    out.pushKV("package_msg", !acceptable ? result.m_state.ToString() : parent_reconsiderable ? "parent-reconsiderable" : "success");
+    out.pushKV("tx-results", std::move(tx_results));
+    if (acceptable) {
+        const auto id{node.privbcast->Submit(child, parent)};
+        if (!id) throw JSONRPCTransactionError(TransactionError::PRIVATE_BROADCAST_FULL);
+        out.pushKV("private_broadcast_job", *id);
+    }
+    return out;
+}
+
 static RPCMethod submitpackage()
 {
     return RPCMethod{"submitpackage",
@@ -1375,6 +1451,12 @@ static RPCMethod submitpackage()
         "The package will be validated according to consensus and mempool policy rules. If any transaction passes, it will be accepted to mempool.\n"
         "This RPC is experimental and the interface may be unstable. Refer to doc/policy/packages.md for documentation on package policies.\n"
         "Warning: successful submission does not mean the transactions will propagate throughout the network.\n"
+        "\nIf -privatebroadcast is enabled, the package must be one transaction, or one parent and its child. Nothing\n"
+        "enters the local mempool: the package is test-accepted and queued as one private broadcast job that announces\n"
+        "the child and serves the parent to a peer that asks for it. A parent that fails on its own only for its fee\n"
+        "(TX_RECONSIDERABLE) is allowed, with the child left unvalidated, since a test accept applies no package feerate:\n"
+        "maxfeerate is then not applied to the child, and a child that is invalid is still sent. package_msg is then\n"
+        "\"parent-reconsiderable\" and private_broadcast_job the job id (see getprivatebroadcastinfo).\n"
         ,
         {
             {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.\n"
@@ -1421,6 +1503,7 @@ static RPCMethod submitpackage()
                 {
                     {RPCResult::Type::STR_HEX, "", "The transaction id"},
                 }},
+                {RPCResult::Type::NUM, "private_broadcast_job", /*optional=*/true, "With -privatebroadcast: the id of the queued job; nothing entered the mempool"},
             },
         },
         RPCExamples{
@@ -1471,6 +1554,9 @@ static RPCMethod submitpackage()
             NodeContext& node = EnsureAnyNodeContext(request.context);
             CTxMemPool& mempool = EnsureMemPool(node);
             Chainstate& chainstate = EnsureChainman(node).ActiveChainstate();
+            if (gArgs.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)) {
+                return SubmitPackagePrivately(node, chainstate, mempool, txns, max_raw_tx_fee_rate);
+            }
             const auto package_result = WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/ false, client_maxfeerate));
 
             std::string package_msg = "success";

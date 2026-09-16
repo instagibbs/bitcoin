@@ -45,8 +45,8 @@ anything that correlates the job with other traffic through the same Tor daemon 
 
 ## Compared with `-privatebroadcast` before this change
 
-The entry points stay: `sendrawtransaction` and the `getprivatebroadcastinfo` and
-`abortprivatebroadcast` RPCs. What runs behind them is new.
+The entry points stay: `sendrawtransaction`, now also `submitpackage`, and the
+`getprivatebroadcastinfo` and `abortprivatebroadcast` RPCs. What runs behind them is new.
 
 | | Before (in `CConnman` and `PeerManager`) | Now (a job) |
 |---|---|---|
@@ -58,7 +58,7 @@ The entry points stay: `sendrawtransaction` and the `getprivatebroadcastinfo` an
 | Retries | re-sent to new peers until seen back in the node's mempool (after 1 min), up to 1000 times | none after an announcement; the schedule is drawn at job start and nothing seen on the network changes it |
 | Duration | open-ended | every job's network work ends within 568 s |
 | Peer profile | `NODE_NONE`, no wtxid relay, announces by txid | `NODE_WITNESS`, protocol 70017, requires wtxid relay (BIP339) and announces by wtxid |
-| Packages | no | one parent and its child, in the program |
+| Packages | no | one parent and its child |
 | Without a node | no | the `bitcoin-privbcast` program |
 
 The right column describes a smaller feature. It gives up I2P, peers that speak only the old
@@ -203,9 +203,9 @@ it works out which is which.
   sent. A recipient older than Bitcoin Core 28 asks for the parent, rejects it alone and
   keeps the child as an orphan only until the job disconnects.
 - A second transaction is served on request only in package mode, that is, when the tool is
-  given two transactions. A recipient that asks for the parent therefore learns the sender
-  used package mode. That the two transactions belong together is already visible on the
-  chain.
+  given two transactions or `submitpackage` is used under `-privatebroadcast`. A recipient
+  that asks for the parent therefore learns the sender used package mode. That the two
+  transactions belong together is already visible on the chain.
 
 ## Using it
 
@@ -249,8 +249,8 @@ stream isolation.
 
 ## Inside the node
 
-With `-privatebroadcast`, `sendrawtransaction` queues a job in `bitcoind`'s
-`PrivateBroadcastManager`. A worker calls `privbcast::RunJob()` in the node's
+With `-privatebroadcast`, `sendrawtransaction` and `submitpackage` queue a job in
+`bitcoind`'s `PrivateBroadcastManager`. A worker calls `privbcast::RunJob()` in the node's
 process, the same function the standalone program calls. A job uses none of the node's peer
 machinery: no address manager, connection manager, peer manager or ban list. Its discovery,
 schedule and wire profile are the tool's. The transaction does not enter the node's mempool

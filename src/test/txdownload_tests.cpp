@@ -10,9 +10,11 @@
 #include <script/script.h>
 #include <test/util/common.h>
 #include <test/util/random.h>
+#include <test/util/script.h>
 #include <test/util/setup_common.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <array>
 
 #include <boost/test/unit_test.hpp>
@@ -65,7 +67,7 @@ static std::map<TxValidationResult, Behaviors> expected_behaviors{
     {TxValidationResult::TX_PREMATURE_SPEND,         {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_WITNESS_MUTATED,         {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_WITNESS_STRIPPED,        {                0,                 0,              0,               0,        0,            0,             0}},
-    {TxValidationResult::TX_CONFLICT,                {                0,                 1,              0,               0,        1,            0,             1}},
+    {TxValidationResult::TX_CONFLICT,                {                0,                 0,              0,               0,        1,            0,             0}},
     {TxValidationResult::TX_MEMPOOL_POLICY,          {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_NO_MEMPOOL,              {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_RECONSIDERABLE,          {                0,                 0,              0,               1,        1,            0,             1}},

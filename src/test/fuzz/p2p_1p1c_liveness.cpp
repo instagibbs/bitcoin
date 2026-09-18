@@ -7,13 +7,15 @@
 //
 // Property: if an honest peer announces the child of an acceptable {low-fee parent, child} package,
 // the child ends up in our mempool, whatever other peers do. Adversaries hold no keys: they may
-// announce, deliver the parent or child with any witness (the fuzzer mutates witness stack items
-// freely), deliver a fake child of the parent, send notfound, stall, disconnect and reconnect.
+// announce, deliver the parent, the child or the confirmed transaction funding the child with any
+// witness (the fuzzer mutates witness stack items freely), deliver a fake child of the parent, send
+// notfound, stall, disconnect and reconnect.
 //
 // Nothing below PeerManager is modelled: message handling, transaction download, validation ordering
 // and result attribution are the production code paths, and the adversary's malleations of the cast
-// transactions are not limited to a fixed set. The cast itself is fixed: P2WSH inputs, single-input
-// children. The oracle is coarse (mempool membership) and each execution pays for real validation.
+// transactions are not limited to a fixed set. The cast itself is fixed: P2WSH inputs, children with
+// one confirmed fee input. The oracle is coarse (mempool membership) and each execution pays for real
+// validation.
 
 #include <addresstype.h>
 #include <addrman.h>
@@ -64,12 +66,15 @@ const std::vector<unsigned char> WITNESS_DUMMY(64, 0);
 
 struct Cast {
     CTransactionRef parent;     //!< too low fee to be accepted alone
-    CTransactionRef child;      //!< pays for the pair
+    CTransactionRef child;      //!< pays for the pair, from the parent's output and a confirmed output of FUND
     CTransactionRef fake_child; //!< spends the parent and an unknown outpoint
 };
 std::vector<Cast> CASTS;
+/** Confirmed transaction whose outputs fund the children. Confirmed longer ago than the recently-confirmed
+ * filter remembers (a fresh PeerManager per input has an empty one), with its outputs in the coins cache. */
+CTransactionRef FUND;
 
-CTransactionRef MakeTx(uint32_t version, const std::vector<COutPoint>& inputs, CAmount amount_out)
+CTransactionRef MakeTx(uint32_t version, const std::vector<COutPoint>& inputs, const std::vector<CAmount>& amounts_out)
 {
     CMutableTransaction mtx;
     mtx.version = version;
@@ -77,7 +82,7 @@ CTransactionRef MakeTx(uint32_t version, const std::vector<COutPoint>& inputs, C
         mtx.vin.emplace_back(outpoint);
         mtx.vin.back().scriptWitness.stack = {WITNESS_DUMMY, std::vector<unsigned char>(WITNESS_SCRIPT_DROP_TRUE.begin(), WITNESS_SCRIPT_DROP_TRUE.end())};
     }
-    mtx.vout.emplace_back(amount_out, P2WSH_DROP_TRUE);
+    for (const auto amount : amounts_out) mtx.vout.emplace_back(amount, P2WSH_DROP_TRUE);
     return MakeTransactionRef(mtx);
 }
 
@@ -87,23 +92,30 @@ void initialize()
     g_setup = testing_setup.get();
 
     std::vector<COutPoint> coins;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         const CBlock block{g_setup->CreateAndProcessBlock({}, P2WSH_DROP_TRUE)};
         coins.emplace_back(block.vtx.at(0)->GetHash(), 0);
     }
     g_setup->mineBlocks(COINBASE_MATURITY);
+    const CAmount coinbase_value{50 * COIN};
+    // FUND: one output per cast, confirmed in its own block.
+    constexpr CAmount FUND_OUTPUT{10 * COIN};
+    FUND = MakeTx(2, {coins.at(4)}, std::vector<CAmount>(4, FUND_OUTPUT));
+    const CBlock fund_block{g_setup->CreateAndProcessBlock({CMutableTransaction{*FUND}}, P2WSH_DROP_TRUE)};
+    Assert(fund_block.vtx.size() == 2);
 
     size_t coin_index{0};
     for (const uint32_t version : {uint32_t{2}, uint32_t{3}}) {
         // A parent of ~112 vbytes with its witness and ~94 without: 10 sat is below the minimum relay
         // feerate with the witness and above it without.
         for (const CAmount parent_fee : {CAmount{0}, CAmount{10}}) {
-            const CAmount coinbase_value{50 * COIN};
             Cast cast;
-            cast.parent = MakeTx(version, {coins.at(coin_index++)}, coinbase_value - parent_fee);
-            cast.child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}}, coinbase_value - parent_fee - 100);
-            cast.fake_child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{Txid::FromUint256(uint256::ONE), 0}}, coinbase_value);
+            cast.parent = MakeTx(version, {coins.at(coin_index)}, {coinbase_value - parent_fee});
+            cast.child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{FUND->GetHash(), static_cast<uint32_t>(coin_index)}},
+                                {coinbase_value - parent_fee + FUND_OUTPUT - 100});
+            cast.fake_child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{Txid::FromUint256(uint256::ONE), 0}}, {coinbase_value});
             CASTS.push_back(std::move(cast));
+            ++coin_index;
         }
     }
 }
@@ -233,7 +245,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     g_setup->m_clock.set(now);
 
     const Cast& cast{PickValue(fuzzed_data_provider, CASTS)};
-    const std::vector<CTransactionRef> cast_txs{cast.parent, cast.child, cast.fake_child};
+    const std::vector<CTransactionRef> cast_txs{cast.parent, cast.child, cast.fake_child, FUND};
 
     AddrMan addrman{*node_ctx.netgroupman, /*deterministic=*/true, /*consistency_check_ratio=*/0};
     ConnmanTestMsg connman{0, 0, addrman, *node_ctx.netgroupman, Params()};

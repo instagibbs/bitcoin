@@ -383,4 +383,81 @@ BOOST_FIXTURE_TEST_CASE(orphan_parent_request_survives_reject_from_other_peer, T
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(known_tx_replay_does_not_reject_children, TestChain100Setup)
+{
+    // A confirmed transaction FUND with an unspent output in the coins cache, and a confirmed coin for
+    // the parent. Neither block is fed to the download manager, so that FUND is not in its
+    // recently-confirmed filter (as any transaction confirmed more than a few blocks ago).
+    const auto fund_input_mtx = CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 1, coinbaseKey, P2WSH_OP_TRUE, 49 * COIN, false);
+    CreateAndProcessBlock({fund_input_mtx}, CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG);
+    // The second coinbase is mature from height 102.
+    const auto parent_input_mtx = CreateValidMempoolTransaction(m_coinbase_txns[1], 0, 2, coinbaseKey, P2WSH_OP_TRUE, 49 * COIN, false);
+    CMutableTransaction fund_mtx;
+    fund_mtx.vin.emplace_back(fund_input_mtx.GetHash(), 0);
+    fund_mtx.vin[0].scriptWitness.stack.push_back(WITNESS_STACK_ELEM_OP_TRUE);
+    fund_mtx.vout.emplace_back(24 * COIN, P2WSH_OP_TRUE);
+    fund_mtx.vout.emplace_back(24 * COIN, P2WSH_OP_TRUE);
+    const auto fund = MakeTransactionRef(fund_mtx);
+    const auto fund_block = CreateAndProcessBlock({fund_mtx, parent_input_mtx}, CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG);
+    BOOST_REQUIRE(WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()) == fund_block.GetHash());
+
+    // Zero-fee parent, and a child paying for the pair from FUND's second output.
+    CMutableTransaction parent_mtx;
+    parent_mtx.vin.emplace_back(parent_input_mtx.GetHash(), 0);
+    parent_mtx.vin[0].scriptWitness.stack.push_back(WITNESS_STACK_ELEM_OP_TRUE);
+    parent_mtx.vout.emplace_back(49 * COIN, P2WSH_OP_TRUE);
+    const auto parent = MakeTransactionRef(parent_mtx);
+    CMutableTransaction child_mtx;
+    child_mtx.vin.emplace_back(parent->GetHash(), 0);
+    child_mtx.vin.emplace_back(fund->GetHash(), 1);
+    for (auto& input : child_mtx.vin) input.scriptWitness.stack.push_back(WITNESS_STACK_ELEM_OP_TRUE);
+    child_mtx.vout.emplace_back(49 * COIN + 24 * COIN - 10000, P2WSH_OP_TRUE);
+    const auto child = MakeTransactionRef(child_mtx);
+
+    // A witness-stripped copy of FUND: same txid, and wtxid == txid.
+    CMutableTransaction fund_stripped_mtx{fund_mtx};
+    fund_stripped_mtx.vin[0].scriptWitness.SetNull();
+    const auto fund_stripped = MakeTransactionRef(fund_stripped_mtx);
+    BOOST_REQUIRE(fund_stripped->GetWitnessHash().ToUint256() == fund->GetHash().ToUint256());
+
+    LOCK(cs_main);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{.m_mempool = pool, .m_deterministic_txrequest = true}};
+    constexpr NodeId honest{1}, other{2};
+    txdownload_impl.ConnectedPeer(honest, {/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+    txdownload_impl.ConnectedPeer(other, {/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+
+    // One of FUND's outputs is in the coins cache, as it is after the block creating it was connected
+    // (until the cache is emptied) or after any transaction spending it was validated.
+    auto& coins_tip = m_node.chainman->ActiveChainstate().CoinsTip();
+    coins_tip.AccessCoin(COutPoint{fund->GetHash(), 0});
+    BOOST_REQUIRE(coins_tip.HaveCoinInCache(COutPoint{fund->GetHash(), 0}));
+
+    // Another peer sends the stripped copy of the confirmed FUND. Its inputs are spent, and one of its
+    // outputs is in the coins cache, so it is rejected as already known before its missing witness
+    // could be noticed.
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(other, fund_stripped).first);
+    const auto fund_result = m_node.chainman->ProcessTransaction(fund_stripped);
+    BOOST_REQUIRE_MESSAGE(fund_result.m_state.GetResult() == TxValidationResult::TX_CONFLICT, fund_result.m_state.ToString());
+    txdownload_impl.MempoolRejectedTx(fund_stripped, fund_result.m_state, other, /*first_time_failure=*/true);
+
+    // The honest child arrives. FUND is one of its parents and is confirmed, not rejected: the child
+    // must be kept as an orphan.
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(honest, child).first);
+    const auto child_result = m_node.chainman->ProcessTransaction(child);
+    BOOST_REQUIRE(child_result.m_state.GetResult() == TxValidationResult::TX_MISSING_INPUTS);
+    txdownload_impl.MempoolRejectedTx(child, child_result.m_state, honest, /*first_time_failure=*/true);
+    BOOST_CHECK(txdownload_impl.m_orphanage->HaveTxFromPeer(child->GetWitnessHash(), honest));
+    BOOST_CHECK(!txdownload_impl.RecentRejectsFilter().contains(child->GetHash().ToUint256()));
+
+    // The honest parent then finds its child, and the pair is acceptable.
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(honest, parent).first);
+    const auto parent_result = m_node.chainman->ProcessTransaction(parent);
+    BOOST_REQUIRE(parent_result.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE);
+    const auto todo = txdownload_impl.MempoolRejectedTx(parent, parent_result.m_state, honest, /*first_time_failure=*/true);
+    BOOST_CHECK(todo.m_package_to_validate.has_value());
+    const auto package_result = ProcessNewPackage(m_node.chainman->ActiveChainstate(), pool, {parent, child}, /*test_accept=*/false, std::nullopt);
+    BOOST_CHECK(package_result.m_state.IsValid());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

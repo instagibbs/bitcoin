@@ -77,6 +77,15 @@ static CTransactionRef MakeTransactionSpending(const std::vector<COutPoint>& out
     for (size_t o = 0; o < num_outputs; ++o) tx.vout.emplace_back(CENT, P2WSH_OP_TRUE);
     return MakeTransactionRef(tx);
 }
+/** All parent txids of tx, sorted and unique (what validation reports when every input is missing). */
+static std::vector<Txid> UniqueParents(const CTransaction& tx)
+{
+    std::vector<Txid> parents;
+    for (const auto& in : tx.vin) parents.push_back(in.prevout.hash);
+    std::ranges::sort(parents);
+    parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
+    return parents;
+}
 static std::vector<COutPoint> PickCoins(FuzzedDataProvider& fuzzed_data_provider)
 {
     std::vector<COutPoint> ret;
@@ -234,7 +243,7 @@ FUZZ_TARGET(txdownloadman, .init = initialize)
                 state.Invalid(fuzzed_data_provider.PickValueInArray(TESTED_TX_RESULTS), "");
                 bool first_time_failure{fuzzed_data_provider.ConsumeBool()};
 
-                node::RejectedTxTodo todo = txdownloadman.MempoolRejectedTx(rand_tx, state, rand_peer, first_time_failure);
+                node::RejectedTxTodo todo = txdownloadman.MempoolRejectedTx(rand_tx, state, rand_peer, first_time_failure, UniqueParents(*rand_tx));
                 Assert(first_time_failure || !todo.m_should_add_extra_compact_tx);
             },
             [&] {
@@ -532,7 +541,18 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                                        NoTrimmingPossible(*txdownload_impl.m_orphanage, *rand_tx) :
                                        NoTrimmingAfterErase(*txdownload_impl.m_orphanage, announcers_before, {rand_tx->GetWitnessHash()})};
 
-                node::RejectedTxTodo todo = txdownload_impl.MempoolRejectedTx(rand_tx, state, rand_peer, first_time_failure);
+                // For a missing-inputs failure, validation tells us which parents are missing: a random
+                // non-empty subset of the transaction's parents.
+                std::vector<Txid> missing_parents;
+                if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
+                    const auto all_parents{UniqueParents(*rand_tx)};
+                    for (const auto& parent : all_parents) {
+                        if (fuzzed_data_provider.ConsumeBool()) missing_parents.push_back(parent);
+                    }
+                    if (missing_parents.empty()) missing_parents.push_back(all_parents.front());
+                }
+
+                node::RejectedTxTodo todo = txdownload_impl.MempoolRejectedTx(rand_tx, state, rand_peer, first_time_failure, missing_parents);
                 Assert(first_time_failure || !todo.m_should_add_extra_compact_tx);
                 if (!reject_contains_wtxid) Assert(todo.m_unique_parents.size() <= rand_tx->vin.size());
                 CheckRequestsKept(requests_before, txdownload_impl.m_txrequest, allowed_hashes);
@@ -596,7 +616,7 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                     // MempoolRejectedTx with a different error.
                     TxValidationState state_missing_inputs;
                     state_missing_inputs.Invalid(TxValidationResult::TX_MISSING_INPUTS, "");
-                    txdownload_impl.MempoolRejectedTx(ptx, state_missing_inputs, rand_peer, fuzzed_data_provider.ConsumeBool());
+                    txdownload_impl.MempoolRejectedTx(ptx, state_missing_inputs, rand_peer, fuzzed_data_provider.ConsumeBool(), UniqueParents(*ptx));
                 }
             });
 

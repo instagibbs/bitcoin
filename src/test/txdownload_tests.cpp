@@ -67,7 +67,7 @@ static std::map<TxValidationResult, Behaviors> expected_behaviors{
     {TxValidationResult::TX_PREMATURE_SPEND,         {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_WITNESS_MUTATED,         {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_WITNESS_STRIPPED,        {                0,                 0,              0,               0,        0,            0,             0}},
-    {TxValidationResult::TX_CONFLICT,                {                0,                 1,              0,               0,        1,            0,             1}},
+    {TxValidationResult::TX_CONFLICT,                {                0,                 0,              0,               0,        1,            0,             0}},
     {TxValidationResult::TX_MEMPOOL_POLICY,          {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_NO_MEMPOOL,              {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_RECONSIDERABLE,          {                0,                 0,              0,               1,        1,            0,             1}},
@@ -563,6 +563,53 @@ BOOST_FIXTURE_TEST_CASE(missing_parents_reports_all_missing_once, TestChain100Se
     std::vector<Txid> expected{p1->GetHash(), p2->GetHash()};
     std::sort(expected.begin(), expected.end());
     BOOST_CHECK(*result.m_missing_parents == expected);
+}
+
+// A witnessed parent in the mempool, a stripped copy of it rejected as TX_CONFLICT, then the parent is
+// gone: a later child must not be rejected because the known parent's txid is in the reject filter.
+BOOST_FIXTURE_TEST_CASE(known_mempool_parent_replay_does_not_poison_after_eviction, TestChain100Setup)
+{
+    const auto p_input_mtx = CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 1, coinbaseKey, P2WSH_OP_TRUE, 49 * COIN, false);
+    CreateAndProcessBlock({p_input_mtx}, CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG);
+    CMutableTransaction parent_mtx;
+    parent_mtx.vin.emplace_back(p_input_mtx.GetHash(), 0);
+    parent_mtx.vin[0].scriptWitness.stack.push_back(WITNESS_STACK_ELEM_OP_TRUE);
+    parent_mtx.vout.emplace_back(49 * COIN - 10000, P2WSH_OP_TRUE); // pays its own fee: accepted alone
+    const auto parent = MakeTransactionRef(parent_mtx);
+    CMutableTransaction stripped_mtx{parent_mtx};
+    stripped_mtx.vin[0].scriptWitness.SetNull();
+    const auto parent_stripped = MakeTransactionRef(stripped_mtx);
+    CMutableTransaction child_mtx;
+    child_mtx.vin.emplace_back(parent->GetHash(), 0);
+    child_mtx.vin[0].scriptWitness.stack.push_back(WITNESS_STACK_ELEM_OP_TRUE);
+    child_mtx.vout.emplace_back(49 * COIN - 20000, P2WSH_OP_TRUE);
+    const auto child = MakeTransactionRef(child_mtx);
+
+    LOCK(cs_main);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{.m_mempool = pool, .m_deterministic_txrequest = true}};
+    constexpr NodeId honest{1}, other{2};
+    txdownload_impl.ConnectedPeer(honest, {/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+    txdownload_impl.ConnectedPeer(other, {/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+
+    // Parent accepted into the mempool.
+    BOOST_REQUIRE(m_node.chainman->ProcessTransaction(parent).m_result_type == MempoolAcceptResult::ResultType::VALID);
+    txdownload_impl.MempoolAcceptedTx(parent);
+    // Another peer replays a stripped copy: same non-witness data as the mempool entry.
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(other, parent_stripped).first);
+    const auto stripped_result = m_node.chainman->ProcessTransaction(parent_stripped);
+    BOOST_REQUIRE_MESSAGE(stripped_result.m_state.GetResult() == TxValidationResult::TX_CONFLICT, stripped_result.m_state.ToString());
+    txdownload_impl.MempoolRejectedTx(parent_stripped, stripped_result.m_state, other, /*first_time_failure=*/true, {});
+    // The parent leaves the mempool (evicted or replaced), without a tip change.
+    WITH_LOCK(pool.cs, pool.removeRecursive(*parent, MemPoolRemovalReason::SIZELIMIT));
+    BOOST_REQUIRE(!pool.exists(parent->GetHash()));
+    // A child arrives: the parent is genuinely missing now. It must be stored, not rejected.
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(honest, child).first);
+    const auto child_result = m_node.chainman->ProcessTransaction(child);
+    BOOST_REQUIRE(child_result.m_state.GetResult() == TxValidationResult::TX_MISSING_INPUTS);
+    txdownload_impl.MempoolRejectedTx(child, child_result.m_state, honest, /*first_time_failure=*/true, *child_result.m_missing_parents);
+    BOOST_CHECK_MESSAGE(txdownload_impl.m_orphanage->HaveTxFromPeer(child->GetWitnessHash(), honest),
+                        "child rejected because the evicted parent's txid was poisoned by a stripped replay");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

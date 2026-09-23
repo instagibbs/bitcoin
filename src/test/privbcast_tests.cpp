@@ -7,6 +7,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <primitives/transaction.h>
+#include <privbcast/attempt.h>
 #include <privbcast/discovery.h>
 #include <limits>
 #include <stdexcept>
@@ -451,6 +452,74 @@ BOOST_AUTO_TEST_CASE(session_failures_are_classified_by_announcement)
         h.FeedRaw(NetMsgType::PONG, {1, 2, 3, 4, 5, 6, 7}, h.t0);
         BOOST_CHECK(h.session.GetOutcome() == Outcome::POST_ANNOUNCEMENT_FAILURE);
         BOOST_CHECK_EQUAL(h.session.Reason(), "malformed pong");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(run_session_over_v1_transport)
+{
+    // The peer's side of a complete exchange, framed with a real V1 transport.
+    const CTransactionRef tx{MakeTx()};
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const auto t0{Clock::now()};
+    Session session{tx, t0, rng};
+    auto pipes{std::make_shared<DynSock::Pipes>()};
+    pipes->recv.PushNetMsg(NetMsgType::VERSION, 70016, uint64_t{NODE_NETWORK | NODE_WITNESS}, int64_t{0},
+                           uint64_t{0}, CNetAddr::V1(CService{}), uint64_t{0}, CNetAddr::V1(CService{}),
+                           uint64_t{42}, std::string{"/peer:1.0/"}, int{100}, true);
+    pipes->recv.PushNetMsg(NetMsgType::WTXIDRELAY);
+    pipes->recv.PushNetMsg(NetMsgType::VERACK);
+    pipes->recv.PushNetMsg(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WTX, tx->GetWitnessHash().ToUint256()}});
+    pipes->recv.PushNetMsg(NetMsgType::PONG, session.PingNonce());
+    AttemptResult result;
+    {
+        DynSock sock{pipes};
+        V1Transport transport{NodeId{0}};
+        RunSession(sock, transport, session, result, t0 + wire::ATTEMPT_MAX, [] { return false; });
+    }
+    BOOST_CHECK(session.GetOutcome() == Outcome::PONG_RECEIVED);
+    BOOST_CHECK(session.GetEvidence().inv_handed.has_value());
+    BOOST_CHECK(session.GetEvidence().inv_written.has_value());
+    BOOST_CHECK(session.GetEvidence().tx_written.has_value());
+    BOOST_CHECK(session.GetEvidence().ping_written.has_value());
+    BOOST_CHECK(result.bytes_sent > 0 && result.bytes_recv > 0);
+    std::string sent;
+    while (const auto msg{pipes->send.GetNetMsg()}) sent += (sent.empty() ? "" : ",") + msg->m_type;
+    BOOST_CHECK_EQUAL(sent, "version,wtxidrelay,verack,inv,tx,ping");
+}
+
+BOOST_AUTO_TEST_CASE(run_session_receive_cap_and_peer_close)
+{
+    const CTransactionRef tx{MakeTx()};
+    FastRandomContext rng{/*fDeterministic=*/true};
+    {
+        // Enough ignorable bytes to exceed the cap before any handshake progress.
+        const auto t0{Clock::now()};
+        Session session{tx, t0, rng};
+        auto pipes{std::make_shared<DynSock::Pipes>()};
+        for (uint64_t i = 0; i < 3000; ++i) pipes->recv.PushNetMsg(NetMsgType::PING, i);
+        AttemptResult result;
+        {
+            DynSock sock{pipes};
+            V1Transport transport{NodeId{0}};
+            RunSession(sock, transport, session, result, t0 + wire::ATTEMPT_MAX, [] { return false; });
+        }
+        BOOST_CHECK(session.GetOutcome() == Outcome::NOT_ANNOUNCED);
+        BOOST_CHECK_EQUAL(session.Reason(), "receive cap");
+        BOOST_CHECK(result.bytes_recv > wire::MAX_RECV_BYTES);
+    }
+    {
+        const auto t0{Clock::now()};
+        Session session{tx, t0, rng};
+        auto pipes{std::make_shared<DynSock::Pipes>()};
+        pipes->recv.Eof();
+        AttemptResult result;
+        {
+            DynSock sock{pipes};
+            V1Transport transport{NodeId{0}};
+            RunSession(sock, transport, session, result, t0 + wire::ATTEMPT_MAX, [] { return false; });
+        }
+        BOOST_CHECK(session.GetOutcome() == Outcome::NOT_ANNOUNCED);
+        BOOST_CHECK_EQUAL(session.Reason(), "peer closed");
     }
 }
 

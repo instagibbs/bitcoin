@@ -1,0 +1,77 @@
+// Copyright (c) 2026-present The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit.
+
+#ifndef BITCOIN_PRIVBCAST_ATTEMPT_H
+#define BITCOIN_PRIVBCAST_ATTEMPT_H
+
+#include <privbcast/timing.h>
+#include <net_transport.h>
+#include <netbase.h>
+#include <primitives/transaction.h>
+#include <privbcast/discovery.h>
+#include <privbcast/session.h>
+#include <random.h>
+#include <util/sock.h>
+#include <util/time.h>
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+
+namespace privbcast {
+
+/** Everything recorded about one physical connection attempt. */
+struct AttemptResult {
+    Candidate candidate;
+    Outcome outcome{Outcome::PENDING};
+    std::string reason;
+    Session::Evidence evidence;
+    size_t bytes_sent{0};
+    size_t bytes_recv{0};
+    Clock::time_point scheduled_start;
+    Clock::time_point started;
+    std::optional<Clock::time_point> connected; //!< SOCKS connection to the peer established
+    Clock::time_point ended;
+};
+
+/**
+ * Opens the connection to the candidate. Returns the connected socket or nullptr; sets
+ * `proxy_failed` when the proxy itself was unreachable. Injectable so tests can supply a mock.
+ */
+using Connector = std::function<std::unique_ptr<Sock>(bool& proxy_failed)>;
+
+/**
+ * The production connector: through the Tor proxy with isolation credentials drawn fresh at
+ * dial time, auth required, every bound (exchange deadline, stage and connect timeouts,
+ * interrupt) taken from `socks`, never from the process-wide settings.
+ */
+Connector TorConnector(const Proxy& tor, const Candidate& candidate, Socks5Params socks);
+
+/**
+ * Drive an already connected socket: pump bytes through the transport, feed complete
+ * messages to the session, send what the session emits, report transport handover and
+ * completion back to the session. Returns when the session has finished, the hard deadline
+ * has passed, or the job is interrupted. Exposed for tests with mock sockets.
+ */
+void RunSession(Sock& sock, Transport& transport, Session& session, AttemptResult& result,
+                Clock::time_point hard_deadline, const std::function<bool()>& interrupted);
+
+/**
+ * One connection attempt at a scheduled opportunity. Everything is prepared first; then, as the
+ * last step before the connector is invoked, the attempt is abandoned if the job is cancelled or
+ * `dial_deadline` (the opportunity's start grace) has passed, and nullopt is returned: nothing was
+ * dialled. The pre-announcement budget counts from `scheduled_start`, not from when the connection
+ * opened, so a slow proxy cannot push a failure past the slot's next scheduled opportunity; an
+ * announced attempt may live on to `hard_deadline` while that slot's backups are suppressed.
+ * The transport is always BIP324 (v2); there is no v1 fallback.
+ */
+std::optional<AttemptResult> RunAttempt(const Connector& connect, const Candidate& candidate, const CTransactionRef& tx,
+                                        Clock::time_point scheduled_start, Clock::time_point dial_deadline,
+                                        Clock::time_point hard_deadline, const std::function<bool()>& interrupted);
+
+} // namespace privbcast
+
+#endif // BITCOIN_PRIVBCAST_ATTEMPT_H

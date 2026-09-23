@@ -407,6 +407,19 @@ if(BUILD_UTIL)
   install_binary_component(bitcoin-util HAS_MANPAGE)
 endif()
 
+# Bounded private transaction broadcast over Tor, sharing nothing with a running node.
+add_library(bitcoin_privbcast STATIC EXCLUDE_FROM_ALL
+  privbcast/session.cpp
+  privbcast/timing.cpp
+)
+target_link_libraries(bitcoin_privbcast
+  PRIVATE
+    core_interface
+    bitcoin_common
+    bitcoin_util
+    univalue
+)
+
 
 if(BUILD_GUI)
   add_subdirectory(qt)

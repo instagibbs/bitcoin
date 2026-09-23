@@ -82,6 +82,7 @@ add_executable(test_bitcoin
   pmt_tests.cpp
   pool_tests.cpp
   pow_tests.cpp
+  privbcast_tests.cpp
   prevector_tests.cpp
   private_broadcast_tests.cpp
   psbt_tests.cpp
@@ -168,6 +169,7 @@ target_link_libraries(test_bitcoin
   test_util
   bitcoin_cli
   bitcoin_node
+  bitcoin_privbcast
   bitcoin_consensus
   minisketch
   secp256k1

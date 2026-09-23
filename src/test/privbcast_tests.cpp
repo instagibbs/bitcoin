@@ -2,6 +2,8 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit.
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
+
 #include <net_transport.h>
 #include <netaddress.h>
 #include <netbase.h>
@@ -14,6 +16,8 @@
 #include <algorithm>
 #include <policy/packages.h>
 #include <policy/policy.h>
+#include <privbcast/input.h>
+#include <privbcast/job.h>
 #include <privbcast/session.h>
 #include <privbcast/timing.h>
 #include <protocol.h>
@@ -39,6 +43,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -122,6 +127,89 @@ struct Harness {
     {
         return NetMsg::Make(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WTX, tx->GetWitnessHash().ToUint256()}});
     }
+};
+
+
+/** A job config with no proxy to reach: `onions` bundled onion candidates and nothing else. */
+JobConfig OnionJobConfig(int onions)
+{
+    JobConfig cfg;
+    cfg.tx = MakeTx();
+    cfg.chain = "regtest";
+    cfg.tor = Proxy{LookupNumeric("127.0.0.1", 9050), /*tor_stream_isolation=*/true};
+    cfg.interrupted = [] { return false; };
+    for (int i = 0; i < onions; ++i) {
+        std::vector<uint8_t> pubkey(32, static_cast<uint8_t>(i + 1));
+        CNetAddr addr;
+        BOOST_REQUIRE(addr.SetSpecial(OnionToString(pubkey)));
+        cfg.discovery.bundled.emplace_back(addr, 8333);
+    }
+    return cfg;
+}
+
+/**
+ * The run_job tests run a whole job on the mocked clock. Time moves only while every job thread is
+ * parked in a wait, and then straight to the wait that is due next, so a test sees exactly the
+ * schedule the code computes, at any host speed. A mock that has to stall waits on that clock too.
+ */
+class JobTestEnv
+{
+public:
+    JobTestEnv()
+    {
+        g_socks5_interrupt.reset();
+        mocktime::Start();
+    }
+    ~JobTestEnv()
+    {
+        mocktime::Stop();
+        // A job leaves the process-wide SOCKS settings and interrupt alone: in bitcoind they
+        // belong to ordinary connections.
+        BOOST_CHECK_EQUAL(nConnectTimeout, m_connect_timeout);
+        BOOST_CHECK(g_socks5_recv_timeout == m_socks_timeout);
+        BOOST_CHECK(!g_socks5_interrupt);
+    }
+    /** Run the job, advancing the clock between waits; `each_step` runs after every advance. */
+    JobReport Run(const JobConfig& cfg_in, const std::function<void()>& each_step = {})
+    {
+        std::atomic<bool> abort{false};
+        JobConfig cfg{cfg_in};
+        cfg.interrupted = [&, interrupted = cfg_in.interrupted] { return abort.load() || interrupted(); };
+        std::optional<JobReport> report;
+        std::atomic<bool> done{false};
+        std::thread runner([&] {
+            report.emplace(RunJob(cfg));
+            done = true;
+        });
+        bool parked{true};
+        while (!done) {
+            if (!mocktime::Settle(30s, [&] { return done.load(); })) {
+                parked = false;
+                abort = true;
+                WakeWaiters();
+                break;
+            }
+            if (done) break;
+            if (const auto next{mocktime::NextWait()}) {
+                mocktime::Advance(std::max(*next, 1s));
+            } else {
+                // Only unbounded waits are pending (the watcher, a blocked connector): nothing on the
+                // job side needs time, so none passes; the job's last timestamp stays where its
+                // schedule put it. A test that wants the clock to move anyway does so in `each_step`.
+                std::this_thread::sleep_for(1ms);
+            }
+            if (each_step) each_step();
+        }
+        runner.join();
+        BOOST_REQUIRE_MESSAGE(parked, "job threads did not park");
+        return *report;
+    }
+    /** Block the calling job thread (a stalling mock) until the mocked clock reaches `until`. */
+    static void StallUntil(Clock::time_point until) { WaitUntil(until, [] { return false; }); }
+
+private:
+    const int m_connect_timeout{nConnectTimeout};
+    const std::chrono::milliseconds m_socks_timeout{g_socks5_recv_timeout};
 };
 
 } // namespace
@@ -582,6 +670,695 @@ BOOST_AUTO_TEST_CASE(discovery_freeze_bundled_onions)
         BOOST_CHECK_EQUAL(c.provenance, "bundled");
     }
     BOOST_CHECK_EQUAL(r.NumExitPath(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(schedule_is_fixed_at_start)
+{
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const auto t0{Clock::now()};
+    bool late_pair_at_minimum_gap{false};
+    for (int i = 0; i < 200; ++i) {
+        const Schedule s{Schedule::Draw(t0, rng)};
+        BOOST_CHECK(s.DeliveryStart() == t0 + disc::WINDOW);
+        std::vector<std::chrono::seconds> late;
+        for (uint32_t slot = 0; slot < plan::SLOTS; ++slot) {
+            const auto p{s.primary[slot]};
+            switch (StratumOfSlot(slot)) {
+            case Stratum::PROMPT: BOOST_CHECK(p == 0s); break;
+            case Stratum::MID: BOOST_CHECK(p >= plan::MID_MIN && p <= plan::MID_MAX); break;
+            case Stratum::LATE:
+                BOOST_CHECK(p >= plan::LATE_MIN && p <= plan::LATE_MAX);
+                late.push_back(p);
+                break;
+            }
+            BOOST_CHECK(s.OpportunityStart(slot, 0) == s.DeliveryStart() + p);
+            for (uint32_t k = 1; k < plan::OPPORTUNITIES_PER_SLOT; ++k) {
+                const auto b{s.backup[slot][k - 1]};
+                BOOST_CHECK(b >= plan::BACKUP_MIN && b <= plan::BACKUP_MAX);
+                BOOST_CHECK(s.OpportunityStart(slot, k) == s.OpportunityStart(slot, k - 1) + b);
+                // A backup never opens before the previous opportunity's pre-announcement outcome is known.
+                BOOST_CHECK(s.OpportunityStart(slot, k) >= s.OpportunityStart(slot, k - 1) + wire::HANDSHAKE_TIMEOUT + plan::START_GRACE);
+            }
+            for (uint32_t k = 0; k < plan::OPPORTUNITIES_PER_SLOT; ++k) {
+                BOOST_CHECK(s.AttemptDeadline(slot, k) == s.OpportunityStart(slot, k) + wire::ATTEMPT_MAX);
+            }
+            BOOST_CHECK(s.SlotEnd(slot) <= s.OpportunityStart(slot, 0) + plan::SLOT_MAX);
+            BOOST_CHECK(s.SlotEnd(slot) <= t0 + plan::SCHEDULED_BOUND);
+        }
+        BOOST_REQUIRE_EQUAL(late.size(), 2U);
+        std::sort(late.begin(), late.end());
+        BOOST_CHECK(late[1] - late[0] >= plan::PRIMARY_SEPARATION);
+        if (late[1] - late[0] == plan::PRIMARY_SEPARATION) late_pair_at_minimum_gap = true;
+    }
+    BOOST_CHECK(late_pair_at_minimum_gap); // the minimum gap does occur, drawn or repaired; the repair itself is tested below
+}
+
+BOOST_AUTO_TEST_CASE(schedule_layout_and_separation)
+{
+    // The slot layout is the approved one, pinned independently of the table.
+    const std::vector<SlotClass> classes{SlotClass::EXIT_PATH, SlotClass::EXIT_PATH, SlotClass::ONION,
+                                         SlotClass::ONION, SlotClass::EXIT_PATH, SlotClass::EXIT_PATH};
+    const std::vector<Stratum> strata{Stratum::PROMPT, Stratum::PROMPT, Stratum::PROMPT, Stratum::MID, Stratum::LATE, Stratum::LATE};
+    BOOST_REQUIRE_EQUAL(plan::SLOTS, 6U);
+    for (uint32_t s = 0; s < plan::SLOTS; ++s) {
+        BOOST_CHECK(ClassOfSlot(s) == classes[s]);
+        BOOST_CHECK(StratumOfSlot(s) == strata[s]);
+    }
+    BOOST_CHECK_EQUAL(plan::ONION_SLOTS, 2U);
+    // The schedule is a function of the seed alone.
+    FastRandomContext rng_a{/*fDeterministic=*/true}, rng_b{/*fDeterministic=*/true};
+    const auto t0{Clock::now()};
+    for (int i = 0; i < 20; ++i) {
+        const Schedule a{Schedule::Draw(t0, rng_a)}, b{Schedule::Draw(t0, rng_b)};
+        BOOST_CHECK(a.primary == b.primary);
+        BOOST_CHECK(a.backup == b.backup);
+    }
+    // Separation: already apart is untouched, order is normalised, a collision moves the later
+    // draw forward, and at the top of the window it moves the earlier draw back instead.
+    using std::chrono::seconds;
+    const seconds gap{plan::PRIMARY_SEPARATION}, hi{plan::LATE_MAX};
+    BOOST_CHECK(SeparateDraws(seconds{190}, seconds{200}, gap, hi) == std::make_pair(seconds{190}, seconds{200}));
+    BOOST_CHECK(SeparateDraws(seconds{200}, seconds{190}, gap, hi) == std::make_pair(seconds{190}, seconds{200}));
+    BOOST_CHECK(SeparateDraws(seconds{200}, seconds{201}, gap, hi) == std::make_pair(seconds{200}, seconds{205}));
+    BOOST_CHECK(SeparateDraws(seconds{238}, seconds{239}, gap, hi) == std::make_pair(seconds{234}, seconds{239}));
+    BOOST_CHECK(SeparateDraws(seconds{240}, seconds{240}, gap, hi) == std::make_pair(seconds{235}, seconds{240}));
+}
+
+BOOST_AUTO_TEST_CASE(assignment_spreads_seeds_and_reserves_onions)
+{
+    const auto ip = [](const std::string& s) { return CService{LookupHost(s, false).value(), 8333}; };
+    DiscoveryResult d;
+    const size_t n{7};
+    d.per_seed.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        d.tie_order.push_back(i);
+        for (size_t j = 0; j < disc::MAX_PER_SEED; ++j) {
+            d.per_seed[i].push_back(Candidate{ip(strprintf("%d.%d.0.1", 10 + i, j)), Source::DNS_SEED, strprintf("seed%d", i)});
+        }
+    }
+    for (uint32_t i = 0; i < plan::ONION_SLOTS * plan::OPPORTUNITIES_PER_SLOT; ++i) {
+        std::vector<uint8_t> pubkey(32, static_cast<uint8_t>(i + 1));
+        CNetAddr addr;
+        BOOST_REQUIRE(addr.SetSpecial(OnionToString(pubkey)));
+        d.onion.push_back(Candidate{CService{addr, 8333}, Source::BUNDLED, "bundled"});
+    }
+    const Assignment a{AssignCandidates(d)};
+    std::set<std::string> endpoints;
+    std::map<std::string, int> per_seed_use;
+    std::set<std::string> exit_primary_seeds;
+    for (uint32_t s = 0; s < plan::SLOTS; ++s) {
+        std::set<std::string> seeds_in_slot;
+        for (uint32_t k = 0; k < plan::OPPORTUNITIES_PER_SLOT; ++k) {
+            BOOST_REQUIRE(a[s][k].has_value());
+            const Candidate& c{*a[s][k]};
+            BOOST_CHECK(endpoints.insert(c.addr.ToStringAddrPort()).second); // never reused
+            if (ClassOfSlot(s) == SlotClass::ONION) {
+                BOOST_CHECK(c.source == Source::BUNDLED);
+            } else {
+                BOOST_CHECK(c.source == Source::DNS_SEED);
+                ++per_seed_use[c.provenance];
+                BOOST_CHECK(seeds_in_slot.insert(c.provenance).second); // a different seed at every opportunity
+                if (k == 0) BOOST_CHECK(exit_primary_seeds.insert(c.provenance).second); // primaries from different seeds
+            }
+        }
+    }
+    for (const auto& [seed, uses] : per_seed_use) BOOST_CHECK(uses <= static_cast<int>(disc::MAX_PER_SEED));
+
+    std::vector<uint32_t> exit_slots, onion_slots;
+    for (uint32_t s = 0; s < plan::SLOTS; ++s) (ClassOfSlot(s) == SlotClass::ONION ? onion_slots : exit_slots).push_back(s);
+    BOOST_REQUIRE_EQUAL(exit_slots.size(), plan::SLOTS - plan::ONION_SLOTS);
+
+    // Exactly as many productive seeds as exit-path slots: a naive round-robin would hand each
+    // slot the same seed at every opportunity; the per-slot avoidance must still spread them.
+    // Four seeds of three candidates fill three opportunities per slot; the rest stay empty.
+    {
+        DiscoveryResult four{d};
+        four.per_seed.resize(exit_slots.size());
+        four.tie_order.clear();
+        for (size_t i = 0; i < exit_slots.size(); ++i) four.tie_order.push_back(i);
+        const Assignment b4{AssignCandidates(four)};
+        for (const uint32_t s : exit_slots) {
+            std::set<std::string> seeds_in_slot;
+            for (uint32_t k = 0; k < plan::OPPORTUNITIES_PER_SLOT; ++k) {
+                if (k >= disc::MAX_PER_SEED) {
+                    BOOST_CHECK(!b4[s][k].has_value());
+                    continue;
+                }
+                BOOST_REQUIRE(b4[s][k].has_value());
+                BOOST_CHECK(seeds_in_slot.insert(b4[s][k]->provenance).second);
+            }
+        }
+    }
+    // A single productive seed with three candidates: primaries come first across all slots, so
+    // three exit-path slots get a primary, the last one stays empty, and nobody gets a backup.
+    {
+        DiscoveryResult one{d};
+        one.per_seed.resize(1);
+        one.tie_order = {0};
+        const Assignment b1{AssignCandidates(one)};
+        for (size_t i = 0; i < exit_slots.size(); ++i) BOOST_CHECK_EQUAL(b1[exit_slots[i]][0].has_value(), i + 1 < exit_slots.size());
+        for (const uint32_t s : exit_slots) {
+            for (uint32_t k = 1; k < plan::OPPORTUNITIES_PER_SLOT; ++k) BOOST_CHECK(!b1[s][k].has_value());
+        }
+    }
+    // A single seed with enough candidates has to repeat itself rather than leave slots empty.
+    {
+        DiscoveryResult one{d};
+        one.per_seed.resize(1);
+        one.tie_order = {0};
+        for (int i = 0; one.per_seed[0].size() < exit_slots.size() * plan::OPPORTUNITIES_PER_SLOT; ++i) {
+            one.per_seed[0].push_back(Candidate{CService{LookupNumeric(strprintf("203.0.113.%d", 100 + i), 8333)}, Source::DNS_SEED, one.per_seed[0][0].provenance});
+        }
+        const Assignment b1{AssignCandidates(one)};
+        for (const uint32_t s : exit_slots) {
+            for (uint32_t k = 0; k < plan::OPPORTUNITIES_PER_SLOT; ++k) {
+                BOOST_CHECK(b1[s][k].has_value() && b1[s][k]->provenance == one.per_seed[0][0].provenance);
+            }
+        }
+    }
+
+    // Without onions the onion slots fall back to exit-path candidates; without exit-path
+    // candidates the exit-path slots stay empty rather than taking onions.
+    DiscoveryResult no_onion{d};
+    no_onion.onion.clear();
+    const Assignment b{AssignCandidates(no_onion)};
+    BOOST_CHECK(b[onion_slots[0]][0].has_value() && b[onion_slots[0]][0]->source == Source::DNS_SEED);
+    DiscoveryResult only_onion{d};
+    for (auto& v : only_onion.per_seed) v.clear();
+    const Assignment c{AssignCandidates(only_onion)};
+    for (const uint32_t s : onion_slots) BOOST_CHECK(c[s][0].has_value() && c[s][0]->source == Source::BUNDLED);
+    for (const uint32_t s : exit_slots) {
+        for (uint32_t k = 0; k < plan::OPPORTUNITIES_PER_SLOT; ++k) BOOST_CHECK(!c[s][k].has_value());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(input_parse_tor_is_loopback_only)
+{
+    std::string error;
+    for (const auto& ok : {"127.0.0.1:9050", "127.0.0.1", "127.255.0.7:1", "[::1]:9150"}) {
+        BOOST_CHECK_MESSAGE(ParseTor(ok, error).has_value(), ok);
+    }
+    for (const auto& bad : {"0.0.0.0:9050", "10.0.0.1:9050", "8.8.8.8:9050", "[::2]:9050", "[fe80::1]:9050", "localhost:9050", "not an address", ""}) {
+        BOOST_CHECK_MESSAGE(!ParseTor(bad, error).has_value(), bad);
+    }
+#ifdef HAVE_SOCKADDR_UN
+    const auto unix_sock{ParseTor("unix:/tmp/tor.sock", error)};
+    BOOST_REQUIRE(unix_sock.has_value());
+    BOOST_CHECK(unix_sock->m_is_unix_socket);
+    BOOST_CHECK(unix_sock->m_tor_stream_isolation);
+#endif
+}
+
+BOOST_AUTO_TEST_CASE(input_read_bounded)
+{
+    std::string out, error;
+    {
+        std::istringstream in{"  deadbeef\n"};
+        BOOST_REQUIRE(ReadBounded(in, 100, out, error));
+        BOOST_CHECK_EQUAL(out, "deadbeef");
+    }
+    {
+        std::istringstream in{"   \n\t"};
+        BOOST_CHECK(!ReadBounded(in, 100, out, error));
+        BOOST_CHECK_EQUAL(error, "no transaction on stdin");
+    }
+    {
+        std::istringstream in{std::string(101, 'a')};
+        BOOST_CHECK(!ReadBounded(in, 100, out, error));
+        BOOST_CHECK_EQUAL(error, "stdin too large");
+    }
+    {
+        std::istringstream in{std::string(100, 'a')};
+        BOOST_CHECK(ReadBounded(in, 100, out, error));
+        BOOST_CHECK_EQUAL(out.size(), 100U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(input_parse_and_check_transaction)
+{
+    std::string error;
+    const CTransactionRef tx{MakeTx()};
+    DataStream ds;
+    ds << TX_WITH_WITNESS(*tx);
+    const std::string hex{HexStr(ds)};
+    BOOST_REQUIRE(ParseAndCheckTransaction(hex, 0, error).has_value());
+    BOOST_CHECK(!ParseAndCheckTransaction("zz", 0, error).has_value());
+    BOOST_CHECK_EQUAL(error, "transaction decode failed");
+
+    CMutableTransaction coinbase{*tx};
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript{} << OP_0 << OP_0; // satisfies bad-cb-length
+    DataStream cb;
+    cb << TX_WITH_WITNESS(CTransaction{coinbase});
+    BOOST_CHECK(!ParseAndCheckTransaction(HexStr(cb), 0, error).has_value());
+    BOOST_CHECK_EQUAL(error, "transaction is a coinbase");
+
+    CMutableTransaction burn{*tx};
+    burn.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(20, 0x42);
+    burn.vout[0].nValue = 1000;
+    DataStream b;
+    b << TX_WITH_WITNESS(CTransaction{burn});
+    BOOST_CHECK(!ParseAndCheckTransaction(HexStr(b), 999, error).has_value());
+    BOOST_CHECK(ParseAndCheckTransaction(HexStr(b), 1000, error).has_value());
+
+    CMutableTransaction heavy{*tx};
+    heavy.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(100'001, 0x42);
+    heavy.vout[0].nValue = 0;
+    DataStream hv;
+    hv << TX_WITH_WITNESS(CTransaction{heavy});
+    BOOST_CHECK(!ParseAndCheckTransaction(HexStr(hv), 0, error).has_value());
+    BOOST_CHECK_EQUAL(error, "transaction weight exceeds the standard maximum");
+}
+
+BOOST_AUTO_TEST_CASE(input_decode_fixed_seeds)
+{
+    std::vector<CService> seeds;
+    seeds.emplace_back(LookupHost("1.2.3.4", false).value(), 8333);
+    std::vector<uint8_t> pubkey(32, 0x07);
+    CNetAddr onion;
+    BOOST_REQUIRE(onion.SetSpecial(OnionToString(pubkey)));
+    seeds.emplace_back(onion, 8333);
+    DataStream ds;
+    ParamsStream ps{ds, CAddress::V2_NETWORK};
+    for (const auto& s : seeds) ps << s;
+    const auto span{MakeUCharSpan(ds)};
+    const std::vector<uint8_t> bytes(span.begin(), span.end());
+    const auto decoded{DecodeFixedSeeds(bytes)};
+    BOOST_REQUIRE_EQUAL(decoded.size(), 2U);
+    BOOST_CHECK(decoded[0] == seeds[0]);
+    BOOST_CHECK(decoded[1] == seeds[1]);
+    // A truncated list yields what could be decoded.
+    const auto partial{DecodeFixedSeeds(std::span<const uint8_t>{bytes}.first(bytes.size() - 3))};
+    BOOST_CHECK_EQUAL(partial.size(), 1U);
+    BOOST_CHECK(DecodeFixedSeeds({}).empty());
+}
+
+BOOST_AUTO_TEST_CASE(run_attempt_decisions)
+{
+    const CTransactionRef tx{MakeTx()};
+    const auto never = [] { return false; };
+    Candidate onion{CService{}, Source::BUNDLED, "bundled"};
+    {
+        std::vector<uint8_t> pubkey(32, 0x09);
+        CNetAddr addr;
+        BOOST_REQUIRE(addr.SetSpecial(OnionToString(pubkey)));
+        onion.addr = CService{addr, 8333};
+    }
+    const Candidate exit_path{CService{LookupHost("8.0.0.1", false).value(), 8333}, Source::DNS_SEED, "a.seed."};
+
+    // Reaching the opportunity after its grace, or once the job is cancelled: nothing is dialled.
+    {
+        bool connected{false};
+        const Connector connect = [&](bool&) -> std::unique_ptr<Sock> { connected = true; return nullptr; };
+        const auto start{Clock::now() - 10s};
+        BOOST_CHECK(!RunAttempt(connect, exit_path, tx, start, start + plan::START_GRACE, start + wire::ATTEMPT_MAX, never).has_value());
+        BOOST_CHECK(!connected);
+        const auto cancelled = [] { return true; };
+        const auto now{Clock::now()};
+        BOOST_CHECK(!RunAttempt(connect, exit_path, tx, now, now + plan::START_GRACE, now + wire::ATTEMPT_MAX, cancelled).has_value());
+        BOOST_CHECK(!connected);
+    }
+    // Proxy unreachable versus SOCKS failure.
+    {
+        const Connector proxy_down = [](bool& failed) -> std::unique_ptr<Sock> { failed = true; return nullptr; };
+        const auto res{RunAttempt(proxy_down, exit_path, tx, Clock::now(), Clock::now() + 10s, Clock::now() + 10s, never).value()};
+        BOOST_CHECK(res.outcome == Outcome::NOT_ANNOUNCED);
+        BOOST_CHECK_EQUAL(res.reason, "proxy unreachable");
+        const Connector socks_fail = [](bool&) -> std::unique_ptr<Sock> { return nullptr; };
+        const auto res2{RunAttempt(socks_fail, exit_path, tx, Clock::now(), Clock::now() + 10s, Clock::now() + 10s, never).value()};
+        BOOST_CHECK(res2.outcome == Outcome::NOT_ANNOUNCED);
+        BOOST_CHECK_EQUAL(res2.reason, "socks connect failed");
+    }
+    // A peer that closes the attempt without sending a byte (a v1-only peer facing the v2 handshake)
+    // is a transport failure for every class of endpoint: there is no v1 retry, the slot's next
+    // pre-assigned peer is tried instead.
+    const auto closed_peer = [](bool&) -> std::unique_ptr<Sock> {
+        auto pipes{std::make_shared<DynSock::Pipes>()};
+        pipes->recv.Eof();
+        return std::make_unique<DynSock>(pipes);
+    };
+    {
+        const auto res{RunAttempt(closed_peer, onion, tx, Clock::now(), Clock::now() + 10s, Clock::now() + 10s, never).value()};
+        BOOST_CHECK(res.outcome == Outcome::NOT_ANNOUNCED);
+        BOOST_CHECK(res.bytes_sent >= 24U); // the v2 key went out first
+    }
+    {
+        const auto res{RunAttempt(closed_peer, exit_path, tx, Clock::now(), Clock::now() + 10s, Clock::now() + 10s, never).value()};
+        BOOST_CHECK(res.outcome == Outcome::NOT_ANNOUNCED);
+        BOOST_CHECK_EQUAL(res.reason, "peer closed");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(run_job_end_to_end_with_mock_connector)
+{
+    // A whole job: fixed schedule, primaries first, a connector that overruns its opportunity,
+    // empty opportunities, and the report contract.
+    JobTestEnv env;
+    JobConfig cfg{OnionJobConfig(8)};
+    // The first connect (the prompt onion slot's) stalls past the whole middle window: its slot's
+    // three backups (and their grace) are overrun while the middle onion slot's opportunities fall
+    // due. Every other connect fails at once.
+    std::atomic<int> connects{0};
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
+        return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
+            if (connects.fetch_add(1) == 0) JobTestEnv::StallUntil(Clock::now() + plan::MID_MAX + plan::START_GRACE + 1s);
+            proxy_failed = false;
+            return nullptr;
+        };
+    };
+    const JobReport report{env.Run(cfg)};
+    const UniValue& summary{report.json["summary"]};
+    // No stretching: the job ends by its scheduled bound.
+    BOOST_CHECK(summary["duration_ms"].getInt<int64_t>() <= Ticks<std::chrono::milliseconds>(plan::SCHEDULED_BOUND));
+    BOOST_CHECK_EQUAL(report.exit_code, 2);
+    BOOST_CHECK_EQUAL(summary["interrupted"].get_bool(), false);
+    BOOST_CHECK_EQUAL(summary["slots_completed"].getInt<int>(), static_cast<int>(plan::SLOTS));
+    BOOST_CHECK_EQUAL(summary["announcements_written"].getInt<int>(), 0);
+    // Only the onion slots have candidates (eight onions cover two slots x four opportunities); the
+    // exit-path slots see empty opportunities only.
+    uint32_t attempts{0}, missed{0}, empty{0};
+    for (const UniValue& slot : report.json["slots"].getValues()) {
+        attempts += slot["attempts"].size();
+        missed += slot["missed_opportunities"].getInt<int>();
+        empty += slot["empty_opportunities"].getInt<int>();
+        if (slot["class"].get_str() == "exit_path") {
+            BOOST_CHECK_EQUAL(slot["attempts"].size(), 0U);
+            BOOST_CHECK_EQUAL(slot["empty_opportunities"].getInt<int>(), static_cast<int>(plan::OPPORTUNITIES_PER_SLOT));
+        }
+        for (const UniValue& a : slot["attempts"].getValues()) {
+            BOOST_CHECK_EQUAL(a["outcome"].get_str(), "not_announced");
+            BOOST_CHECK_EQUAL(a["reason"].get_str(), "socks connect failed");
+            BOOST_CHECK_EQUAL(a["source"].get_str(), "bundled");
+        }
+    }
+    // The onion slot whose first connect stalled had its next three opportunities missed rather
+    // than dialled late; the other onion slot's four connects failed at once. Every opportunity is
+    // exactly one of attempted, missed or empty.
+    BOOST_CHECK_EQUAL(attempts + missed + empty, plan::SLOTS * plan::OPPORTUNITIES_PER_SLOT);
+    BOOST_CHECK_EQUAL(missed, plan::OPPORTUNITIES_PER_SLOT - 1);
+    BOOST_CHECK_EQUAL(attempts, 1U + plan::OPPORTUNITIES_PER_SLOT);
+    BOOST_CHECK_EQUAL(empty, (plan::SLOTS - plan::ONION_SLOTS) * plan::OPPORTUNITIES_PER_SLOT);
+    BOOST_CHECK_EQUAL(summary["connections"].getInt<int>(), static_cast<int>(attempts));
+    // No slot waits for another: the middle slot dialled while the prompt slot's connect was still stalled.
+    const auto find_slot = [&](const std::string& stratum) -> const UniValue& {
+        for (const UniValue& slot : report.json["slots"].getValues()) {
+            if (slot["stratum"].get_str() == stratum && slot["class"].get_str() == "onion") return slot;
+        }
+        BOOST_FAIL("no onion slot in stratum " + stratum);
+        return report.json["slots"][0];
+    };
+    const UniValue& prompt_onion{find_slot("prompt")};
+    const UniValue& mid_onion{find_slot("mid")};
+    BOOST_REQUIRE_EQUAL(prompt_onion["attempts"].size(), 1U);
+    BOOST_CHECK_EQUAL(prompt_onion["missed_opportunities"].getInt<int>(), static_cast<int>(plan::OPPORTUNITIES_PER_SLOT - 1));
+    BOOST_REQUIRE_EQUAL(mid_onion["attempts"].size(), plan::OPPORTUNITIES_PER_SLOT);
+    BOOST_CHECK(mid_onion["attempts"][0]["started_ms"].getInt<int64_t>() < prompt_onion["attempts"][0]["ended_ms"].getInt<int64_t>());
+}
+
+BOOST_AUTO_TEST_CASE(run_job_slow_preparation_is_a_miss)
+{
+    // Preparing an attempt (logging, the connector) can stall on a loaded host. The grace check is the
+    // last step before the dial, so a stall past the grace skips the opportunity instead of dialling late.
+    JobTestEnv env;
+    JobConfig cfg{OnionJobConfig(8)};
+    std::atomic<int> factory_calls{0};
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
+        if (factory_calls.fetch_add(1) == 0) JobTestEnv::StallUntil(Clock::now() + plan::START_GRACE + 1s);
+        return [](bool& proxy_failed) -> std::unique_ptr<Sock> {
+            proxy_failed = false;
+            return nullptr;
+        };
+    };
+    const JobReport report{env.Run(cfg)};
+    const int64_t grace_ms{Ticks<std::chrono::milliseconds>(plan::START_GRACE)};
+    uint32_t attempts{0}, missed{0};
+    for (const UniValue& slot : report.json["slots"].getValues()) {
+        attempts += slot["attempts"].size();
+        missed += slot["missed_opportunities"].getInt<int>();
+        for (const UniValue& a : slot["attempts"].getValues()) {
+            BOOST_CHECK(a["started_ms"].getInt<int64_t>() - a["scheduled_start_ms"].getInt<int64_t>() <= grace_ms); // started is the very timestamp the grace check used
+        }
+    }
+    // The stalled first opportunity is the one miss; every other onion opportunity is dialled on time.
+    BOOST_CHECK_EQUAL(missed, 1U);
+    BOOST_CHECK_EQUAL(attempts, plan::ONION_SLOTS * plan::OPPORTUNITIES_PER_SLOT - 1);
+    BOOST_CHECK_EQUAL(report.json["summary"]["connections"].getInt<int>(), static_cast<int>(attempts));
+}
+
+BOOST_AUTO_TEST_CASE(run_job_slot_failure_is_contained)
+{
+    // A connector that throws ends its own slot with an error; the other slots run to completion
+    // and the job neither aborts nor reports an interrupt.
+    JobTestEnv env;
+    for (const std::string& message : {std::string{"connector blew up"}, std::string{}}) {
+        JobConfig cfg{OnionJobConfig(8)};
+        std::atomic<int> connects{0};
+        cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
+            return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
+                if (connects.fetch_add(1) == 0) throw std::runtime_error(message);
+                proxy_failed = false;
+                return nullptr;
+            };
+        };
+        const JobReport report{env.Run(cfg)};
+        const UniValue& summary{report.json["summary"]};
+        BOOST_CHECK_EQUAL(summary["interrupted"].get_bool(), false);
+        BOOST_CHECK_EQUAL(summary["slots_completed"].getInt<int>(), static_cast<int>(plan::SLOTS - 1)); // failure does not depend on the message
+        int failed{0};
+        for (const UniValue& slot : report.json["slots"].getValues()) {
+            if (slot["error"].isNull()) continue;
+            ++failed;
+            BOOST_CHECK_EQUAL(slot["error"].get_str(), message);
+            BOOST_CHECK_EQUAL(slot["attempts"].size(), 0U); // the attempt never produced a result
+            BOOST_CHECK_EQUAL(slot["class"].get_str(), "onion");
+        }
+        BOOST_CHECK_EQUAL(failed, 1);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(run_job_cancel_during_preparation_does_not_dial)
+{
+    // Cancellation that lands while an attempt is being prepared is seen by the check right before
+    // the dial: nothing is connected, and the job ends interrupted.
+    JobTestEnv env;
+    std::atomic<bool> stop{false};
+    JobConfig cfg{OnionJobConfig(8)};
+    cfg.interrupted = [&] { return stop.load(); };
+    std::atomic<bool> dialled{false};
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
+        stop = true; // cancelled between preparation and the dial
+        return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
+            dialled = true;
+            proxy_failed = false;
+            return nullptr;
+        };
+    };
+    const JobReport report{env.Run(cfg)};
+    BOOST_CHECK(!dialled);
+    BOOST_CHECK_EQUAL(report.json["summary"]["connections"].getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(report.json["summary"]["interrupted"].get_bool(), true);
+    BOOST_CHECK(report.json["summary"]["slots_completed"].getInt<int>() < static_cast<int>(plan::SLOTS));
+}
+
+BOOST_AUTO_TEST_CASE(run_job_no_slot_waits_for_another)
+{
+    // All three prompt connects stall for the whole middle window; the middle slot's primary still
+    // opens at its own time. Four attempts overlap, so any limiter of three or fewer would fail this;
+    // that the slot loop has no limiter at all is a matter of inspection.
+    JobTestEnv env;
+    DiscoveryResult found;
+    found.per_seed.resize(1);
+    found.seeds.resize(1);
+    found.tie_order = {0};
+    for (uint32_t i = 0; i < (plan::SLOTS - plan::ONION_SLOTS) * plan::OPPORTUNITIES_PER_SLOT; ++i) {
+        found.per_seed[0].push_back(Candidate{CService{LookupNumeric(strprintf("203.0.113.%d", 10 + i), 8333)}, Source::DNS_SEED, "seed0"});
+    }
+    for (uint32_t i = 0; i < plan::ONION_SLOTS * plan::OPPORTUNITIES_PER_SLOT; ++i) {
+        std::vector<uint8_t> pubkey(32, static_cast<uint8_t>(i + 1));
+        CNetAddr addr;
+        BOOST_REQUIRE(addr.SetSpecial(OnionToString(pubkey)));
+        found.onion.push_back(Candidate{CService{addr, 8333}, Source::BUNDLED, "bundled"});
+    }
+    JobConfig cfg{OnionJobConfig(0)};
+    cfg.discover = [found] { return found; };
+    std::atomic<int> connects{0};
+    cfg.connector = [&](const Candidate&, const Socks5Params&) -> Connector {
+        return [&](bool& proxy_failed) -> std::unique_ptr<Sock> {
+            if (connects.fetch_add(1) < static_cast<int>(CountSlots(Stratum::PROMPT))) {
+                JobTestEnv::StallUntil(Clock::now() + plan::MID_MAX + plan::START_GRACE + 1s);
+            }
+            proxy_failed = false;
+            return nullptr;
+        };
+    };
+    const JobReport report{env.Run(cfg)};
+    int64_t prompt_ended{std::numeric_limits<int64_t>::max()};
+    std::optional<int64_t> mid_started;
+    for (const UniValue& slot : report.json["slots"].getValues()) {
+        const UniValue& attempts{slot["attempts"]};
+        if (slot["stratum"].get_str() == "prompt") {
+            BOOST_REQUIRE_EQUAL(attempts.size(), 1U); // stalled once; its backups fell due meanwhile and were missed
+            BOOST_CHECK_EQUAL(slot["missed_opportunities"].getInt<int>(), static_cast<int>(plan::OPPORTUNITIES_PER_SLOT - 1));
+            prompt_ended = std::min(prompt_ended, attempts[0]["ended_ms"].getInt<int64_t>());
+        } else if (slot["stratum"].get_str() == "mid") {
+            BOOST_REQUIRE_EQUAL(attempts.size(), plan::OPPORTUNITIES_PER_SLOT); // every connect failed at once
+            mid_started = attempts[0]["started_ms"].getInt<int64_t>();
+        }
+    }
+    BOOST_REQUIRE(mid_started.has_value());
+    BOOST_CHECK(*mid_started < prompt_ended); // dialled while all three prompt connects were still stalled
+}
+
+BOOST_AUTO_TEST_CASE(run_job_interrupt_reaches_blocked_connector)
+{
+    // Cancellation must reach a thread blocked inside the connector (a SOCKS exchange in bitcoind):
+    // the watcher turns the flag into the job's SOCKS interrupt, and the job ends at once.
+    JobTestEnv env;
+    JobConfig cfg{OnionJobConfig(1)};
+    std::atomic<bool> stop{false};
+    cfg.interrupted = [&] { return stop.load(); };
+    std::atomic<bool> connector_entered{false};
+    cfg.connector = [&](const Candidate&, const Socks5Params& socks) -> Connector {
+        BOOST_REQUIRE(socks.interrupt != nullptr);
+        BOOST_CHECK(socks.interrupt != &g_socks5_interrupt); // the job's own, not the process-wide latch
+        return [&, interrupt = socks.interrupt](bool& proxy_failed) -> std::unique_ptr<Sock> {
+            connector_entered = true;
+            // Like a SOCKS exchange: returns only when interrupted.
+            WaitUntil(Clock::time_point::max(), [interrupt] { return bool(*interrupt); });
+            proxy_failed = false;
+            return nullptr;
+        };
+    };
+    // Cancel once the empty slots have run out their opportunities: after that nothing but the
+    // blocked connector is alive on the job side, so only the watcher can turn the flag into a
+    // SOCKS interrupt. Nothing bounded is pending by then, so the clock is pushed on here.
+    const auto cancel_at{Clock::now() + plan::SCHEDULED_BOUND + 1s};
+    const JobReport report{env.Run(cfg, [&] {
+        if (stop) return;
+        if (Clock::now() >= cancel_at) {
+            stop = true;
+            WakeWaiters();
+        } else if (!mocktime::NextWait()) {
+            mocktime::Advance(1s);
+        }
+    })};
+    BOOST_CHECK(connector_entered);
+    BOOST_CHECK_EQUAL(report.exit_code, 2);
+    const UniValue& summary{report.json["summary"]};
+    BOOST_CHECK_EQUAL(summary["interrupted"].get_bool(), true);
+    BOOST_CHECK(summary["slots_completed"].getInt<int>() < static_cast<int>(plan::SLOTS));
+    // The job ended with the cancellation, not at its hard cap.
+    const int64_t duration_ms{summary["duration_ms"].getInt<int64_t>()};
+    BOOST_CHECK(duration_ms >= Ticks<std::chrono::milliseconds>(plan::SCHEDULED_BOUND));
+    BOOST_CHECK(duration_ms < Ticks<std::chrono::milliseconds>(plan::JOB_CAP));
+}
+
+BOOST_AUTO_TEST_CASE(run_job_no_replacement_after_announcement)
+{
+    // The replaceability boundary is INV being handed to the transport, not its bytes leaving.
+    // A peer that completes the handshake, receives the INV and then breaks the connection has
+    // been announced to: its slot makes no further attempt.
+    struct BreakSock : ZeroSock {
+        BreakSock() : m_peer(std::make_unique<V2Transport>(NodeId{2}, /*initiating=*/false)) {} // the tool speaks v2 only
+        BreakSock& operator=(Sock&&) override { assert(false && "Move of Sock into BreakSock not allowed."); return *this; }
+        ssize_t Recv(void* buf, size_t len, int flags) const override
+        {
+            Pump();
+            if (m_to_tool.empty()) { errno = WSAEWOULDBLOCK; return -1; }
+            const size_t n{std::min(len, m_to_tool.size())};
+            std::memcpy(buf, m_to_tool.data(), n);
+            if ((flags & MSG_PEEK) == 0) m_to_tool.erase(m_to_tool.begin(), m_to_tool.begin() + n);
+            return static_cast<ssize_t>(n);
+        }
+        ssize_t Send(const void* data, size_t len, int) const override
+        {
+            if (m_app_seen >= 3) { errno = ECONNRESET; return -1; } // our INV or later: refuse the write
+            std::span<const uint8_t> bytes{static_cast<const uint8_t*>(data), len};
+            while (!bytes.empty()) {
+                if (!m_peer->ReceivedBytes(bytes)) { errno = ECONNRESET; return -1; }
+                if (m_peer->ReceivedMessageComplete()) {
+                    bool reject{false};
+                    const CNetMessage msg{m_peer->GetReceivedMessage(NodeClock::now(), reject)};
+                    if (!reject && msg.m_type == NetMsgType::VERSION) {
+                        m_pending.push_back(PeerVersion());
+                        m_pending.push_back(NetMsg::Make(NetMsgType::WTXIDRELAY));
+                        m_pending.push_back(NetMsg::Make(NetMsgType::VERACK));
+                    }
+                    ++m_app_seen;
+                }
+            }
+            return static_cast<ssize_t>(len);
+        }
+        void Pump() const
+        {
+            while (!m_pending.empty() && m_peer->SetMessageToSend(m_pending.front())) m_pending.pop_front();
+            while (true) {
+                const auto [b, more, type] = m_peer->GetBytesToSend(!m_pending.empty());
+                if (b.empty()) break;
+                m_to_tool.insert(m_to_tool.end(), b.begin(), b.end());
+                m_peer->MarkBytesSent(b.size());
+                while (!m_pending.empty() && m_peer->SetMessageToSend(m_pending.front())) m_pending.pop_front();
+            }
+        }
+        const std::unique_ptr<Transport> m_peer;
+        mutable std::vector<uint8_t> m_to_tool;
+        mutable std::deque<CSerializedNetMsg> m_pending;
+        mutable size_t m_app_seen{0};
+    };
+
+    JobTestEnv env;
+
+    // Eight onions, so each onion slot has four: opportunities 1 to 3 are there to be used only
+    // if opportunity 0 failed before announcing.
+
+    // Every attempt announces then breaks. Each onion slot announces at opportunity 0 and is done;
+    // opportunities 1 to 3 are never used, so no replacement is made after an announcement.
+    {
+        JobConfig cfg{OnionJobConfig(8)};
+        cfg.connector = [](const Candidate&, const Socks5Params&) -> Connector {
+            return [](bool&) -> std::unique_ptr<Sock> { return std::make_unique<BreakSock>(); };
+        };
+        const JobReport report{env.Run(cfg)};
+        BOOST_CHECK_EQUAL(report.exit_code, 2); // announced but never fully written
+        const UniValue& summary{report.json["summary"]};
+        BOOST_CHECK_EQUAL(summary["announcements_handed"].getInt<int>(), static_cast<int>(plan::ONION_SLOTS));
+        BOOST_CHECK_EQUAL(summary["announcements_written"].getInt<int>(), 0);
+        int attempts{0};
+        for (const UniValue& slot : report.json["slots"].getValues()) {
+            bool seen_announced{false};
+            for (const UniValue& a : slot["attempts"].getValues()) {
+                BOOST_CHECK(!seen_announced); // nothing runs in a slot after it announced
+                ++attempts;
+                if (!a["inv_handed_ms"].isNull()) {
+                    seen_announced = true;
+                    BOOST_CHECK(a["inv_written_ms"].isNull()); // handed over, write refused
+                    BOOST_CHECK_EQUAL(a["outcome"].get_str(), "post_announcement_failure");
+                }
+            }
+        }
+        BOOST_CHECK_EQUAL(attempts, static_cast<int>(plan::ONION_SLOTS)); // one announcing attempt per onion slot, then it stops
+    }
+
+    // Control: the same candidates, but every connect fails before any handshake. Now nothing
+    // announces, so each onion slot uses all of its later opportunities: replacements are made.
+    {
+        JobConfig cfg{OnionJobConfig(8)};
+        cfg.connector = [](const Candidate&, const Socks5Params&) -> Connector {
+            return [](bool&) -> std::unique_ptr<Sock> { return nullptr; }; // socks connect failed
+        };
+        const JobReport report{env.Run(cfg)};
+        BOOST_CHECK_EQUAL(report.exit_code, 2);
+        BOOST_CHECK_EQUAL(report.json["summary"]["announcements_handed"].getInt<int>(), 0);
+        int max_in_a_slot{0};
+        for (const UniValue& slot : report.json["slots"].getValues()) {
+            max_in_a_slot = std::max<int>(max_in_a_slot, slot["attempts"].size());
+            for (const UniValue& a : slot["attempts"].getValues()) {
+                BOOST_CHECK_EQUAL(a["outcome"].get_str(), "not_announced");
+                BOOST_CHECK_EQUAL(a["reason"].get_str(), "socks connect failed");
+            }
+        }
+        BOOST_CHECK_EQUAL(max_in_a_slot, static_cast<int>(plan::OPPORTUNITIES_PER_SLOT)); // replacement happens when nothing announced
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

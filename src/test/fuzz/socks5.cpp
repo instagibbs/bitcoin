@@ -49,5 +49,9 @@ FUZZ_TARGET(socks5, .init = initialize_socks5)
     auto str_dest = fuzzed_data_provider.ConsumeRandomLengthString(512);
     auto port = fuzzed_data_provider.ConsumeIntegral<uint16_t>();
     auto* auth = fuzzed_data_provider.ConsumeBool() ? &proxy_credentials : nullptr;
-    (void)Socks5(str_dest, port, auth, fuzzed_sock);
+    if (fuzzed_data_provider.ConsumeBool()) {
+        (void)Socks5Resolve(str_dest, proxy_credentials, fuzzed_sock);
+    } else {
+        (void)Socks5(str_dest, port, auth, fuzzed_sock, /*require_auth=*/auth != nullptr && fuzzed_data_provider.ConsumeBool());
+    }
 }

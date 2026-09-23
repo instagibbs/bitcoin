@@ -11,6 +11,7 @@
 #include <sync.h>
 #include <tinyformat.h>
 #include <util/log.h>
+#include <util/check.h>
 #include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/string.h>
@@ -256,11 +257,12 @@ enum SOCKS5Method: uint8_t {
     NO_ACCEPTABLE = 0xff, //!< No acceptable methods
 };
 
-/** Values defined for CMD in RFC1928 */
+/** Values defined for CMD in RFC1928 and https://spec.torproject.org/socks-extensions.html */
 enum SOCKS5Command: uint8_t {
     CONNECT = 0x01,
     BIND = 0x02,
-    UDP_ASSOCIATE = 0x03
+    UDP_ASSOCIATE = 0x03,
+    RESOLVE = 0xf0, //!< Tor extension: resolve a hostname to a single IP address
 };
 
 /** Values defined for REP in RFC1928 and https://spec.torproject.org/socks-extensions.html */
@@ -394,19 +396,24 @@ static std::string Socks5ErrorString(uint8_t err)
  * Perform the SOCKS5 greeting, the optional username/password authentication and one
  * request, then parse the reply.
  *
- * @param[in] cmd The request.
- * @param[in] strDest The destination hostname.
- * @param[in] port The destination port.
+ * @param[in] cmd The request: CONNECT, or the Tor RESOLVE extension.
+ * @param[in] strDest The destination hostname, or the name to resolve.
+ * @param[in] port The destination port; not meaningful for RESOLVE.
  * @param[in] auth Credentials to offer, or nullptr to offer no authentication.
+ * @param[in] require_auth Fail unless the proxy selects username/password authentication.
+ *            Tor uses the credentials for stream isolation, so a proxy that selects no
+ *            authentication provides none.
  * @param[in] sock Socket already connected to the proxy.
  * @returns The address from the reply's BND.ADDR field (an invalid CNetAddr when the proxy
  *          answered with a domain name), or std::nullopt on failure.
  */
-static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock)
+static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::string& strDest, uint16_t port, const ProxyCredentials* auth, bool require_auth, const Sock& sock)
 {
+    Assume(!require_auth || auth != nullptr);
+    const char* const verb{cmd == SOCKS5Command::RESOLVE ? "resolving" : "connecting"};
     try {
         IntrRecvError recvr;
-        LogDebug(BCLog::NET, "SOCKS5 connecting %s\n", strDest);
+        LogDebug(BCLog::NET, "SOCKS5 %s %s\n", verb, strDest);
         if (strDest.size() > 255) {
             LogError("Hostname too long\n");
             return std::nullopt;
@@ -425,7 +432,7 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
         sock.SendComplete(vSocks5Init, g_socks5_recv_timeout, g_socks5_interrupt);
         uint8_t pchRet1[2];
         if (InterruptibleRecv(pchRet1, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
-            LogInfo("Socks5() connect to %s:%d failed: InterruptibleRecv() timeout or other failure\n", strDest, port);
+            LogInfo("Socks5() %s %s:%d failed: InterruptibleRecv() timeout or other failure\n", verb, strDest, port);
             return std::nullopt;
         }
         if (pchRet1[0] != SOCKSVersion::SOCKS5) {
@@ -456,6 +463,10 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
                 return std::nullopt;
             }
         } else if (pchRet1[1] == SOCKS5Method::NOAUTH) {
+            if (require_auth) {
+                LogError("Proxy did not select username/password authentication\n");
+                return std::nullopt;
+            }
             // Perform no authentication
         } else {
             LogError("Proxy requested wrong authentication method %02x\n", pchRet1[1]);
@@ -490,7 +501,7 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
         if (pchRet2[1] != SOCKS5Reply::SUCCEEDED) {
             // Failures to connect to a peer that are not proxy errors
             LogDebug(BCLog::NET,
-                          "Socks5() connect to %s:%d failed: %s\n", strDest, port, Socks5ErrorString(pchRet2[1]));
+                          "Socks5() %s %s:%d failed: %s\n", verb, strDest, port, Socks5ErrorString(pchRet2[1]));
             return std::nullopt;
         }
         if (pchRet2[2] != 0x00) { // Reserved field must be 0
@@ -541,7 +552,7 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
             LogError("Error reading from proxy\n");
             return std::nullopt;
         }
-        LogDebug(BCLog::NET, "SOCKS5 connected %s\n", strDest);
+        LogDebug(BCLog::NET, "SOCKS5 %s %s\n", cmd == SOCKS5Command::RESOLVE ? "resolved" : "connected", strDest);
         return bound;
     } catch (const std::runtime_error& e) {
         LogError("Error during SOCKS5 proxy handshake: %s\n", e.what());
@@ -549,9 +560,20 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
     }
 }
 
-bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock)
+bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock, bool require_auth)
 {
-    return Socks5Request(SOCKS5Command::CONNECT, strDest, port, auth, sock).has_value();
+    return Socks5Request(SOCKS5Command::CONNECT, strDest, port, auth, require_auth, sock).has_value();
+}
+
+std::optional<CNetAddr> Socks5Resolve(const std::string& name, const ProxyCredentials& auth, const Sock& sock)
+{
+    auto addr{Socks5Request(SOCKS5Command::RESOLVE, name, /*port=*/0, &auth, /*require_auth=*/true, sock)};
+    if (!addr) return std::nullopt;
+    if (!addr->IsValid() || !(addr->IsIPv4() || addr->IsIPv6())) {
+        LogDebug(BCLog::NET, "SOCKS5 RESOLVE of %s did not return a usable IP address\n", name);
+        return std::nullopt;
+    }
+    return addr;
 }
 
 std::unique_ptr<Sock> CreateSockOS(int domain, int type, int protocol)
@@ -813,9 +835,10 @@ public:
 
     /** Return the next unique proxy credentials. */
     ProxyCredentials Generate() {
+        // fetch_add so concurrent callers never receive the same credentials.
+        const uint64_t n{m_counter.fetch_add(1)};
         ProxyCredentials auth;
-        auth.username = auth.password = strprintf("%s%i", m_prefix, m_counter);
-        ++m_counter;
+        auth.username = auth.password = strprintf("%s%i", m_prefix, n);
         return auth;
     }
 
@@ -836,10 +859,18 @@ private:
     }
 };
 
+/** Process-wide generator of Tor stream isolation credentials. */
+static TorStreamIsolationCredentialsGenerator& TorStreamIsolationCredentials()
+{
+    static TorStreamIsolationCredentialsGenerator generator;
+    return generator;
+}
+
 std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
                                           const std::string& dest,
                                           uint16_t port,
-                                          bool& proxy_connection_failed)
+                                          bool& proxy_connection_failed,
+                                          bool require_auth)
 {
     // first connect to proxy server
     auto sock = proxy.Connect();
@@ -849,10 +880,9 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
     }
 
     // do socks negotiation
-    if (proxy.m_tor_stream_isolation) {
-        static TorStreamIsolationCredentialsGenerator generator;
-        ProxyCredentials random_auth{generator.Generate()};
-        if (!Socks5(dest, port, &random_auth, *sock)) {
+    if (proxy.m_tor_stream_isolation || require_auth) {
+        const ProxyCredentials random_auth{TorStreamIsolationCredentials().Generate()};
+        if (!Socks5(dest, port, &random_auth, *sock, require_auth)) {
             return {};
         }
     } else {
@@ -861,6 +891,14 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
         }
     }
     return sock;
+}
+
+std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name)
+{
+    auto sock = proxy.Connect();
+    if (!sock) return std::nullopt;
+    const ProxyCredentials auth{TorStreamIsolationCredentials().Generate()};
+    return Socks5Resolve(name, auth, *sock);
 }
 
 CSubNet LookupSubNet(const std::string& subnet_str)

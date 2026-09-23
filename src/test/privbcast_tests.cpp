@@ -7,6 +7,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <primitives/transaction.h>
+#include <privbcast/discovery.h>
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
@@ -24,6 +25,7 @@
 #include <tinyformat.h>
 #include <univalue.h>
 #include <util/strencodings.h>
+#include <util/threadinterrupt.h>
 #include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
@@ -40,6 +42,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -451,6 +454,189 @@ BOOST_AUTO_TEST_CASE(session_failures_are_classified_by_announcement)
         BOOST_CHECK(h.session.GetOutcome() == Outcome::POST_ANNOUNCEMENT_FAILURE);
         BOOST_CHECK_EQUAL(h.session.Reason(), "malformed pong");
     }
+}
+
+BOOST_AUTO_TEST_CASE(discovery_freeze)
+{
+    DiscoveryPlan plan;
+    plan.dns_seeds = {"a.seed.", "b.seed.", "c.seed."};
+    plan.port = 8333;
+    const auto ip = [](const std::string& s) { return LookupHost(s, /*fAllowLookup=*/false).value(); };
+    SeedAnswers answers(3);
+    // Seed a: one repeat within the seed. Seed b: a public IPv6 and one endpoint shared with a.
+    // The RFC5737 and RFC3849 documentation ranges are non-routable and must be rejected.
+    answers[0] = {ip("8.0.0.1"), ip("8.0.0.2"), ip("192.0.2.9"), ip("8.0.0.1")};
+    answers[1] = {ip("8.0.0.1"), ip("8.0.1.1"), ip("8.0.1.2"), ip("8.0.1.3"), ip("8.0.1.4"), ip("2606:4700:4700::1111")};
+    answers[2] = {};
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const std::vector<size_t> tie_order{1, 0, 2};
+    const DiscoveryResult r{Freeze(plan, answers, tie_order, rng)};
+    BOOST_CHECK_EQUAL(r.seeds[1].answers, 6U);
+    BOOST_CHECK_EQUAL(r.seeds[1].accepted, 6U); // a public IPv6 is a valid answer
+    BOOST_CHECK_EQUAL(r.seeds[1].kept, disc::MAX_PER_SEED);
+    BOOST_CHECK_EQUAL(r.seeds[0].answers, 4U);
+    BOOST_CHECK_EQUAL(r.seeds[0].accepted, 1U); // only 8.0.0.2 is new: 8.0.0.1 went to seed b, 192.0.2.9 rejected, 8.0.0.1 repeated
+    BOOST_CHECK_EQUAL(r.seeds[0].kept, 1U);
+    BOOST_CHECK_EQUAL(r.seeds[2].kept, 0U);
+    BOOST_CHECK_EQUAL(r.duplicates, 2U); // 8.0.0.1 within seed a, and 8.0.0.1 across a/b
+    BOOST_CHECK_EQUAL(r.rejected, 1U);   // 192.0.2.9 (documentation range)
+    BOOST_CHECK_EQUAL(r.NumExitPath(), 4U);
+    for (const auto& per_seed : r.per_seed) {
+        for (const auto& c : per_seed) {
+            BOOST_CHECK_EQUAL(c.addr.GetPort(), 8333);
+            BOOST_CHECK(c.source == Source::DNS_SEED);
+        }
+    }
+    for (const auto& c : r.per_seed[0]) BOOST_CHECK_EQUAL(c.provenance, "a.seed.");
+    BOOST_CHECK(r.tie_order == tie_order);
+}
+
+BOOST_AUTO_TEST_CASE(discovery_freeze_bundled_onions)
+{
+    DiscoveryPlan plan;
+    plan.port = 8333;
+    std::vector<CService> onions;
+    for (int i = 0; i < 10; ++i) {
+        // More distinct torv3 addresses (from distinct pubkeys) than are kept.
+        std::vector<uint8_t> pubkey(32, static_cast<uint8_t>(i + 1));
+        CNetAddr addr;
+        BOOST_REQUIRE(addr.SetSpecial(OnionToString(pubkey)));
+        onions.emplace_back(addr, 8333);
+    }
+    plan.bundled = onions;
+    plan.bundled.push_back(onions[0]);                                        // duplicate
+    plan.bundled.emplace_back(LookupHost("1.2.3.4", false).value(), 8333);    // not onion
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const DiscoveryResult r{Freeze(plan, SeedAnswers{}, std::vector<size_t>{}, rng)};
+    BOOST_CHECK_EQUAL(r.onion.size(), disc::MAX_BUNDLED);
+    for (const auto& c : r.onion) {
+        BOOST_CHECK(c.addr.IsTor());
+        BOOST_CHECK(c.source == Source::BUNDLED);
+        BOOST_CHECK_EQUAL(c.provenance, "bundled");
+    }
+    BOOST_CHECK_EQUAL(r.NumExitPath(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(discovery_queries_in_parallel_within_the_window)
+{
+    // Discover() through its resolver seam, on the mocked node clock: every query starts at once on
+    // a stream of its own, a query still running at the window's end is cut and its answer dropped,
+    // a cancelled job does not wait, and a stalled host skips its queries rather than run them late.
+    BOOST_REQUIRE_EQUAL(TimeDivisor(), 1U);
+    const NodeSeconds t0{1'700'000'000s};
+    SetMockTime(t0);
+    const Proxy tor{LookupNumeric("127.0.0.1", 9050), /*tor_stream_isolation=*/true};
+    DiscoveryPlan plan;
+    plan.dns_seeds = {"a.seed.", "b.seed."};
+    plan.port = 8333;
+    const uint32_t queries{static_cast<uint32_t>(plan.dns_seeds.size()) * disc::QUERIES_PER_SEED};
+    const auto never = [] { return false; };
+    const auto answer = [](uint32_t n) { return std::optional<CNetAddr>{LookupHost(strprintf("9.9.9.%u", n), false).value()}; };
+    // A query that runs until discovery cuts it.
+    std::atomic<uint32_t> started{0};
+    const Resolver until_cut = [&](const std::string&, const Socks5Params& p) {
+        ++started;
+        while (!*p.interrupt) std::this_thread::sleep_for(1ms);
+        return answer(1);
+    };
+
+    {
+        // Every query at once, each with credentials of its own, the plan's bounds and an interrupt that
+        // belongs to this discovery alone; the answers are frozen.
+        std::mutex mutex;
+        std::set<std::pair<std::string, std::string>> credentials;
+        std::set<const CThreadInterrupt*> interrupts;
+        std::vector<std::chrono::steady_clock::time_point> deadlines;
+        uint32_t calls{0};
+        FastRandomContext rng{/*fDeterministic=*/true};
+        const auto before{std::chrono::steady_clock::now()};
+        const DiscoveryResult r{Discover(tor, plan, t0, rng, never, [&](const std::string&, const Socks5Params& p) {
+            std::lock_guard lock{mutex};
+            BOOST_CHECK(p.auth && p.deadline);
+            if (p.deadline) deadlines.push_back(*p.deadline);
+            BOOST_CHECK(p.interrupt && p.interrupt != &g_socks5_interrupt);
+            BOOST_CHECK(p.stage_timeout == std::chrono::duration_cast<std::chrono::milliseconds>(disc::SOCKS_RECV_TIMEOUT));
+            BOOST_CHECK(p.connect_timeout == std::chrono::duration_cast<std::chrono::milliseconds>(disc::CONNECT_TIMEOUT));
+            credentials.emplace(p.auth->username, p.auth->password);
+            interrupts.insert(p.interrupt);
+            return answer(++calls);
+        })};
+        const auto after{std::chrono::steady_clock::now()};
+        BOOST_CHECK_EQUAL(calls, queries);
+        // Every query ends at the plan's query deadline from job start (the clock is frozen at t0).
+        BOOST_CHECK_EQUAL(deadlines.size(), queries);
+        for (const auto d : deadlines) BOOST_CHECK(d >= before + disc::QUERY_DEADLINE && d <= after + disc::QUERY_DEADLINE);
+        BOOST_CHECK_EQUAL(credentials.size(), queries);
+        BOOST_CHECK_EQUAL(interrupts.size(), 1U);
+        for (const SeedStats& st : r.seeds) {
+            BOOST_CHECK_EQUAL(st.queries, disc::QUERIES_PER_SEED);
+            BOOST_CHECK_EQUAL(st.skipped, 0U);
+            BOOST_CHECK_EQUAL(st.answers, disc::QUERIES_PER_SEED);
+            BOOST_CHECK_EQUAL(st.kept, disc::MAX_PER_SEED);
+        }
+    }
+    {
+        // Queries still running at the window's end are cut, and their answers dropped.
+        started = 0;
+        FastRandomContext rng{/*fDeterministic=*/true};
+        std::optional<DiscoveryResult> r;
+        std::thread discovery{[&] { r.emplace(Discover(tor, plan, t0, rng, never, until_cut)); }};
+        while (started < queries) std::this_thread::sleep_for(1ms);
+        SetMockTime(t0 + disc::WINDOW);
+        discovery.join();
+        BOOST_REQUIRE(r);
+        BOOST_CHECK_EQUAL(r->NumExitPath(), 0U);
+        for (const SeedStats& st : r->seeds) BOOST_CHECK_EQUAL(st.queries, disc::QUERIES_PER_SEED);
+        SetMockTime(t0);
+    }
+    {
+        // An answer that comes after the window's end is dropped too.
+        FastRandomContext rng{/*fDeterministic=*/true};
+        const DiscoveryResult r{Discover(tor, plan, t0, rng, never, [&](const std::string&, const Socks5Params&) {
+            SetMockTime(t0 + disc::WINDOW + 1s);
+            return answer(1);
+        })};
+        BOOST_CHECK_EQUAL(r.NumExitPath(), 0U);
+        uint32_t ran{0};
+        for (const SeedStats& st : r.seeds) {
+            // A query that never went out, here because discovery had ended first, is skipped.
+            BOOST_CHECK_EQUAL(st.queries + st.skipped, disc::QUERIES_PER_SEED);
+            ran += st.queries;
+        }
+        BOOST_CHECK(ran >= 1);
+        SetMockTime(t0);
+    }
+    {
+        // A cancelled job cuts its queries at once, without waiting for the window.
+        started = 0;
+        std::atomic<bool> cancelled{false};
+        FastRandomContext rng{/*fDeterministic=*/true};
+        std::optional<DiscoveryResult> r;
+        std::thread discovery{[&] { r.emplace(Discover(tor, plan, t0, rng, [&] { return cancelled.load(); }, until_cut)); }};
+        while (started < queries) std::this_thread::sleep_for(1ms);
+        cancelled = true;
+        discovery.join();
+        BOOST_REQUIRE(r);
+        BOOST_CHECK_EQUAL(r->NumExitPath(), 0U);
+        for (const SeedStats& st : r->seeds) BOOST_CHECK_EQUAL(st.queries + st.skipped, disc::QUERIES_PER_SEED);
+        BOOST_CHECK(Clock::now() < t0 + disc::WINDOW);
+    }
+    {
+        // A host that stalled past the query grace skips every query instead of running it late.
+        SetMockTime(t0 + disc::QUERY_GRACE + 1s);
+        std::atomic<bool> called{false};
+        FastRandomContext rng{/*fDeterministic=*/true};
+        const DiscoveryResult r{Discover(tor, plan, t0, rng, never, [&](const std::string&, const Socks5Params&) {
+            called = true;
+            return answer(1);
+        })};
+        BOOST_CHECK(!called);
+        for (const SeedStats& st : r.seeds) {
+            BOOST_CHECK_EQUAL(st.queries, 0U);
+            BOOST_CHECK_EQUAL(st.skipped, disc::QUERIES_PER_SEED);
+        }
+    }
+    SetMockTime(0s);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

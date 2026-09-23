@@ -409,6 +409,7 @@ endif()
 
 # Bounded private transaction broadcast over Tor, sharing nothing with a running node.
 add_library(bitcoin_privbcast STATIC EXCLUDE_FROM_ALL
+  privbcast/discovery.cpp
   privbcast/session.cpp
   privbcast/timing.cpp
 )

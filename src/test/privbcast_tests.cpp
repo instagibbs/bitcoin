@@ -7,6 +7,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <primitives/transaction.h>
+#include <privbcast/discovery.h>
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
@@ -451,6 +452,67 @@ BOOST_AUTO_TEST_CASE(session_failures_are_classified_by_announcement)
         BOOST_CHECK(h.session.GetOutcome() == Outcome::POST_ANNOUNCEMENT_FAILURE);
         BOOST_CHECK_EQUAL(h.session.Reason(), "malformed pong");
     }
+}
+
+BOOST_AUTO_TEST_CASE(discovery_freeze)
+{
+    DiscoveryPlan plan;
+    plan.dns_seeds = {"a.seed.", "b.seed.", "c.seed."};
+    plan.port = 8333;
+    const auto ip = [](const std::string& s) { return LookupHost(s, /*fAllowLookup=*/false).value(); };
+    SeedAnswers answers(3);
+    // Seed a: one repeat within the seed. Seed b: a public IPv6 and one endpoint shared with a.
+    // The RFC5737 and RFC3849 documentation ranges are non-routable and must be rejected.
+    answers[0] = {ip("8.0.0.1"), ip("8.0.0.2"), ip("192.0.2.9"), ip("8.0.0.1")};
+    answers[1] = {ip("8.0.0.1"), ip("8.0.1.1"), ip("8.0.1.2"), ip("8.0.1.3"), ip("8.0.1.4"), ip("2606:4700:4700::1111")};
+    answers[2] = {};
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const std::vector<size_t> tie_order{1, 0, 2};
+    const DiscoveryResult r{Freeze(plan, answers, tie_order, rng)};
+    BOOST_CHECK_EQUAL(r.seeds[1].answers, 6U);
+    BOOST_CHECK_EQUAL(r.seeds[1].accepted, 6U); // a public IPv6 is a valid answer
+    BOOST_CHECK_EQUAL(r.seeds[1].kept, disc::MAX_PER_SEED);
+    BOOST_CHECK_EQUAL(r.seeds[0].answers, 4U);
+    BOOST_CHECK_EQUAL(r.seeds[0].accepted, 1U); // only 8.0.0.2 is new: 8.0.0.1 went to seed b, 192.0.2.9 rejected, 8.0.0.1 repeated
+    BOOST_CHECK_EQUAL(r.seeds[0].kept, 1U);
+    BOOST_CHECK_EQUAL(r.seeds[2].kept, 0U);
+    BOOST_CHECK_EQUAL(r.duplicates, 2U); // 8.0.0.1 within seed a, and 8.0.0.1 across a/b
+    BOOST_CHECK_EQUAL(r.rejected, 1U);   // 192.0.2.9 (documentation range)
+    BOOST_CHECK_EQUAL(r.NumExitPath(), 4U);
+    for (const auto& per_seed : r.per_seed) {
+        for (const auto& c : per_seed) {
+            BOOST_CHECK_EQUAL(c.addr.GetPort(), 8333);
+            BOOST_CHECK(c.source == Source::DNS_SEED);
+        }
+    }
+    for (const auto& c : r.per_seed[0]) BOOST_CHECK_EQUAL(c.provenance, "a.seed.");
+    BOOST_CHECK(r.tie_order == tie_order);
+}
+
+BOOST_AUTO_TEST_CASE(discovery_freeze_bundled_onions)
+{
+    DiscoveryPlan plan;
+    plan.port = 8333;
+    std::vector<CService> onions;
+    for (int i = 0; i < 10; ++i) {
+        // More distinct torv3 addresses (from distinct pubkeys) than are kept.
+        std::vector<uint8_t> pubkey(32, static_cast<uint8_t>(i + 1));
+        CNetAddr addr;
+        BOOST_REQUIRE(addr.SetSpecial(OnionToString(pubkey)));
+        onions.emplace_back(addr, 8333);
+    }
+    plan.bundled = onions;
+    plan.bundled.push_back(onions[0]);                                        // duplicate
+    plan.bundled.emplace_back(LookupHost("1.2.3.4", false).value(), 8333);    // not onion
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const DiscoveryResult r{Freeze(plan, SeedAnswers{}, std::vector<size_t>{}, rng)};
+    BOOST_CHECK_EQUAL(r.onion.size(), disc::MAX_BUNDLED);
+    for (const auto& c : r.onion) {
+        BOOST_CHECK(c.addr.IsTor());
+        BOOST_CHECK(c.source == Source::BUNDLED);
+        BOOST_CHECK_EQUAL(c.provenance, "bundled");
+    }
+    BOOST_CHECK_EQUAL(r.NumExitPath(), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

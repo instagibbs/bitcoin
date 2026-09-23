@@ -411,6 +411,8 @@ endif()
 add_library(bitcoin_privbcast STATIC EXCLUDE_FROM_ALL
   privbcast/attempt.cpp
   privbcast/discovery.cpp
+  privbcast/input.cpp
+  privbcast/job.cpp
   privbcast/session.cpp
   privbcast/timing.cpp
 )

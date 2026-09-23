@@ -315,10 +315,11 @@ enum class IntrRecvError {
  *          IntrRecvError::OK only if all of the specified number of bytes were
  *          read.
  *
- * @see This function can be interrupted by calling g_socks5_interrupt().
- *      Sockets can be made non-blocking with Sock::SetNonBlocking().
+ * @param interrupt Interrupt that ends the read early (`g_socks5_interrupt` for ordinary connections).
+ *
+ * @see Sockets can be made non-blocking with Sock::SetNonBlocking().
  */
-static IntrRecvError InterruptibleRecv(uint8_t* data, size_t len, std::chrono::milliseconds timeout, const Sock& sock)
+static IntrRecvError InterruptibleRecv(uint8_t* data, size_t len, std::chrono::milliseconds timeout, const Sock& sock, const CThreadInterrupt& interrupt)
 {
     auto curTime{Now<SteadyMilliseconds>()};
     const auto endTime{curTime + timeout};
@@ -343,7 +344,7 @@ static IntrRecvError InterruptibleRecv(uint8_t* data, size_t len, std::chrono::m
                 return IntrRecvError::NetworkError;
             }
         }
-        if (g_socks5_interrupt) {
+        if (interrupt) {
             return IntrRecvError::Interrupted;
         }
         curTime = Now<SteadyMilliseconds>();
@@ -407,8 +408,32 @@ static std::string Socks5ErrorString(uint8_t err)
  * @returns The address from the reply's BND.ADDR field (an invalid CNetAddr when the proxy
  *          answered with a domain name), or std::nullopt on failure.
  */
-static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::string& strDest, uint16_t port, const ProxyCredentials* auth, bool require_auth, const Sock& sock)
+static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::string& strDest, uint16_t port, const ProxyCredentials* auth, bool require_auth, const Sock& sock, const Socks5Params& params)
 {
+    const Socks5Deadline& deadline{params.deadline};
+    const std::chrono::milliseconds per_stage{params.stage_timeout.value_or(g_socks5_recv_timeout)};
+    CThreadInterrupt& interrupt{params.interrupt ? *params.interrupt : g_socks5_interrupt};
+    // Local stages (method selection, authentication, sending the command) wait at most the
+    // per-stage timeout. The command reply is where the proxy does its remote work (building a
+    // circuit, connecting, resolving), so with a deadline it may take the whole remaining budget.
+    // Nothing ever waits past the deadline.
+    const auto stage_timeout = [&](bool remote) -> std::optional<std::chrono::milliseconds> {
+        if (!deadline) return per_stage;
+        const auto remaining{std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now())};
+        if (remaining <= 0ms) return std::nullopt;
+        return remote ? remaining : std::min(per_stage, remaining);
+    };
+    const auto send_stage = [&](const std::vector<uint8_t>& data) {
+        const auto timeout{stage_timeout(/*remote=*/false)};
+        if (!timeout) return false;
+        sock.SendComplete(data, *timeout, interrupt);
+        return true;
+    };
+    const auto recv_stage = [&](uint8_t* data, size_t len, bool remote = false) {
+        const auto timeout{stage_timeout(remote)};
+        if (!timeout) return IntrRecvError::Timeout;
+        return InterruptibleRecv(data, len, *timeout, sock, interrupt);
+    };
     Assume(!require_auth || auth != nullptr);
     const char* const verb{cmd == SOCKS5Command::RESOLVE ? "resolving" : "connecting"};
     try {
@@ -429,10 +454,15 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
             vSocks5Init.push_back(0x01); // 1 method identifier follows...
             vSocks5Init.push_back(SOCKS5Method::NOAUTH);
         }
-        sock.SendComplete(vSocks5Init, g_socks5_recv_timeout, g_socks5_interrupt);
+        if (!send_stage(vSocks5Init)) {
+            LogDebug(BCLog::PROXY, "Socks5() %s %s:%d failed: exchange deadline reached\n", verb, strDest, port);
+            return std::nullopt;
+        }
         uint8_t pchRet1[2];
-        if (InterruptibleRecv(pchRet1, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
-            LogInfo("Socks5() %s %s:%d failed: InterruptibleRecv() timeout or other failure\n", verb, strDest, port);
+        if (recv_stage(pchRet1, 2) != IntrRecvError::OK) {
+            // The destination is logged only at debug level, as for the deadline failures above.
+            LogInfo("Socks5() %s failed: InterruptibleRecv() timeout or other failure\n", verb);
+            LogDebug(BCLog::PROXY, "Socks5() %s %s:%d failed: InterruptibleRecv() timeout or other failure\n", verb, strDest, port);
             return std::nullopt;
         }
         if (pchRet1[0] != SOCKSVersion::SOCKS5) {
@@ -452,9 +482,12 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
             vAuth.push_back(auth->password.size());
             vAuth.insert(vAuth.end(), auth->password.begin(), auth->password.end());
             LogDebug(BCLog::PROXY, "SOCKS5 sending username/password authentication\n");
-            sock.SendComplete(vAuth, g_socks5_recv_timeout, g_socks5_interrupt);
+            if (!send_stage(vAuth)) {
+                LogDebug(BCLog::PROXY, "Socks5() %s %s:%d failed: exchange deadline reached\n", verb, strDest, port);
+                return std::nullopt;
+            }
             uint8_t pchRetA[2];
-            if (InterruptibleRecv(pchRetA, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
+            if (recv_stage(pchRetA, 2) != IntrRecvError::OK) {
                 LogError("Error reading proxy authentication response\n");
                 return std::nullopt;
             }
@@ -481,13 +514,17 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
         vSocks5.insert(vSocks5.end(), strDest.begin(), strDest.end());
         vSocks5.push_back((port >> 8) & 0xFF);
         vSocks5.push_back((port >> 0) & 0xFF);
-        sock.SendComplete(vSocks5, g_socks5_recv_timeout, g_socks5_interrupt);
+        if (!send_stage(vSocks5)) {
+            LogDebug(BCLog::PROXY, "Socks5() %s %s:%d failed: exchange deadline reached\n", verb, strDest, port);
+            return std::nullopt;
+        }
         uint8_t pchRet2[4];
-        if ((recvr = InterruptibleRecv(pchRet2, 4, g_socks5_recv_timeout, sock)) != IntrRecvError::OK) {
+        if ((recvr = recv_stage(pchRet2, 4, /*remote=*/true)) != IntrRecvError::OK) {
             if (recvr == IntrRecvError::Timeout) {
                 /* If a timeout happens here, this effectively means we timed out while connecting
                  * to the remote node. This is very common for Tor, so do not print an
                  * error message. */
+                LogDebug(BCLog::PROXY, "Socks5() %s %s:%d failed: no reply before timeout or exchange deadline\n", verb, strDest, port);
                 return std::nullopt;
             } else {
                 LogError("Error while reading proxy response\n");
@@ -512,7 +549,7 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
         uint8_t pchRet3[256];
         switch (pchRet2[3]) {
         case SOCKS5Atyp::IPV4: {
-            recvr = InterruptibleRecv(pchRet3, 4, g_socks5_recv_timeout, sock);
+            recvr = recv_stage(pchRet3, 4, /*remote=*/true);
             if (recvr == IntrRecvError::OK) {
                 struct in_addr addr;
                 std::memcpy(&addr, pchRet3, sizeof(addr));
@@ -521,7 +558,7 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
             break;
         }
         case SOCKS5Atyp::IPV6: {
-            recvr = InterruptibleRecv(pchRet3, 16, g_socks5_recv_timeout, sock);
+            recvr = recv_stage(pchRet3, 16, /*remote=*/true);
             if (recvr == IntrRecvError::OK) {
                 struct in6_addr addr;
                 std::memcpy(&addr, pchRet3, sizeof(addr));
@@ -530,13 +567,13 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
             break;
         }
         case SOCKS5Atyp::DOMAINNAME: {
-            recvr = InterruptibleRecv(pchRet3, 1, g_socks5_recv_timeout, sock);
+            recvr = recv_stage(pchRet3, 1, /*remote=*/true);
             if (recvr != IntrRecvError::OK) {
                 LogError("Error reading from proxy\n");
                 return std::nullopt;
             }
             int nRecv = pchRet3[0];
-            recvr = InterruptibleRecv(pchRet3, nRecv, g_socks5_recv_timeout, sock);
+            recvr = recv_stage(pchRet3, nRecv, /*remote=*/true);
             break;
         }
         default: {
@@ -548,7 +585,7 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
             LogError("Error reading from proxy\n");
             return std::nullopt;
         }
-        if (InterruptibleRecv(pchRet3, 2, g_socks5_recv_timeout, sock) != IntrRecvError::OK) {
+        if (recv_stage(pchRet3, 2, /*remote=*/true) != IntrRecvError::OK) {
             LogError("Error reading from proxy\n");
             return std::nullopt;
         }
@@ -560,14 +597,14 @@ static std::optional<CNetAddr> Socks5Request(SOCKS5Command cmd, const std::strin
     }
 }
 
-bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock, bool require_auth)
+bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& sock, bool require_auth, const Socks5Params& params)
 {
-    return Socks5Request(SOCKS5Command::CONNECT, strDest, port, auth, require_auth, sock).has_value();
+    return Socks5Request(SOCKS5Command::CONNECT, strDest, port, auth, require_auth, sock, params).has_value();
 }
 
-std::optional<CNetAddr> Socks5Resolve(const std::string& name, const ProxyCredentials& auth, const Sock& sock)
+std::optional<CNetAddr> Socks5Resolve(const std::string& name, const ProxyCredentials& auth, const Sock& sock, const Socks5Params& params)
 {
-    auto addr{Socks5Request(SOCKS5Command::RESOLVE, name, /*port=*/0, &auth, /*require_auth=*/true, sock)};
+    auto addr{Socks5Request(SOCKS5Command::RESOLVE, name, /*port=*/0, &auth, /*require_auth=*/true, sock, params)};
     if (!addr) return std::nullopt;
     if (!addr->IsValid() || !(addr->IsIPv4() || addr->IsIPv6())) {
         LogDebug(BCLog::NET, "SOCKS5 RESOLVE of %s did not return a usable IP address\n", name);
@@ -736,9 +773,14 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
 
 std::unique_ptr<Sock> Proxy::Connect() const
 {
+    return Connect(std::chrono::milliseconds{nConnectTimeout});
+}
+
+std::unique_ptr<Sock> Proxy::Connect(std::chrono::milliseconds timeout) const
+{
     if (!IsValid()) return {};
 
-    if (!m_is_unix_socket) return ConnectDirectly(proxy, /*manual_connection=*/true);
+    if (!m_is_unix_socket) return ConnectDirectly(proxy, /*manual_connection=*/true, timeout);
 
 #ifdef HAVE_SOCKADDR_UN
     auto sock = CreateSock(AF_UNIX, SOCK_STREAM, 0);
@@ -761,7 +803,7 @@ std::unique_ptr<Sock> Proxy::Connect() const
                          len,
                          path,
                          /*manual_connection=*/true,
-                         std::chrono::milliseconds{nConnectTimeout})) {
+                         timeout)) {
         return {};
     }
 
@@ -870,10 +912,12 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
                                           const std::string& dest,
                                           uint16_t port,
                                           bool& proxy_connection_failed,
-                                          bool require_auth)
+                                          bool require_auth,
+                                          const Socks5Params& params)
 {
     // first connect to proxy server
-    auto sock = proxy.Connect();
+    // The process-wide default is read only when no explicit timeout was given.
+    auto sock = params.connect_timeout ? proxy.Connect(*params.connect_timeout) : proxy.Connect();
     if (!sock) {
         proxy_connection_failed = true;
         return {};
@@ -881,24 +925,24 @@ std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
 
     // do socks negotiation
     if (proxy.m_tor_stream_isolation || require_auth) {
-        const ProxyCredentials random_auth{TorStreamIsolationCredentials().Generate()};
-        if (!Socks5(dest, port, &random_auth, *sock, require_auth)) {
+        const ProxyCredentials random_auth{params.auth ? *params.auth : TorStreamIsolationCredentials().Generate()};
+        if (!Socks5(dest, port, &random_auth, *sock, require_auth, params)) {
             return {};
         }
     } else {
-        if (!Socks5(dest, port, nullptr, *sock)) {
+        if (!Socks5(dest, port, nullptr, *sock, /*require_auth=*/false, params)) {
             return {};
         }
     }
     return sock;
 }
 
-std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name)
+std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name, const Socks5Params& params)
 {
-    auto sock = proxy.Connect();
+    auto sock = params.connect_timeout ? proxy.Connect(*params.connect_timeout) : proxy.Connect();
     if (!sock) return std::nullopt;
-    const ProxyCredentials auth{TorStreamIsolationCredentials().Generate()};
-    return Socks5Resolve(name, auth, *sock);
+    const ProxyCredentials auth{params.auth ? *params.auth : TorStreamIsolationCredentials().Generate()};
+    return Socks5Resolve(name, auth, *sock, params);
 }
 
 CSubNet LookupSubNet(const std::string& subnet_str)

@@ -240,7 +240,7 @@ FUZZ_TARGET(connman, .init = initialize_connman)
                 }
 
                 std::optional<Proxy> proxy_override;
-                if (conn_type == ConnectionType::PRIVATE_BROADCAST || fuzzed_data_provider.ConsumeBool()) {
+                if (fuzzed_data_provider.ConsumeBool()) {
                     proxy_override.emplace(ConsumeService(fuzzed_data_provider));
                 }
 

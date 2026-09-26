@@ -7,6 +7,7 @@
 #define BITCOIN_SCRIPT_SIGCACHE_H
 
 #include <consensus/amount.h>
+#include <cstdint>
 #include <crypto/sha256.h>
 #include <cuckoocache.h>
 #include <script/interpreter.h>
@@ -61,14 +62,27 @@ public:
     void Set(const uint256& entry);
 };
 
+/**
+ * How a validation step treats a validity cache (the signature cache or the script execution
+ * cache). The cache is always consulted; the policy decides what the step leaves behind.
+ */
+enum class CachePolicy : uint8_t {
+    /** Insert what was verified; leave hits in place (mempool acceptance). */
+    STORE,
+    /** Insert nothing; a hit is consumed, marking the entry for eviction (block connection, where the entry will not be needed again). */
+    CONSUME,
+    /** Insert nothing and mark nothing: the cache is left exactly as found (a test_accept must leave no trace). */
+    READ_ONLY,
+};
+
 class CachingTransactionSignatureChecker : public TransactionSignatureChecker
 {
 private:
-    bool store;
+    CachePolicy m_cache_policy;
     SignatureCache& m_signature_cache;
 
 public:
-    CachingTransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, bool storeIn, SignatureCache& signature_cache, PrecomputedTransactionData& txdataIn) : TransactionSignatureChecker(txToIn, nInIn, amountIn, txdataIn, MissingDataBehavior::ASSERT_FAIL), store(storeIn), m_signature_cache(signature_cache)  {}
+    CachingTransactionSignatureChecker(const CTransaction* txToIn, unsigned int nInIn, const CAmount& amountIn, CachePolicy cache_policy, SignatureCache& signature_cache, PrecomputedTransactionData& txdataIn) : TransactionSignatureChecker(txToIn, nInIn, amountIn, txdataIn, MissingDataBehavior::ASSERT_FAIL), m_cache_policy(cache_policy), m_signature_cache(signature_cache)  {}
 
     bool VerifyECDSASignature(const std::vector<unsigned char>& vchSig, const CPubKey& vchPubKey, const uint256& sighash) const override;
     bool VerifySchnorrSignature(std::span<const unsigned char> sig, const XOnlyPubKey& pubkey, const uint256& sighash) const override;

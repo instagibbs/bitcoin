@@ -22,6 +22,14 @@
 #include <vector>
 
 extern int nConnectTimeout;
+
+/**
+ * Optional absolute bound on a whole SOCKS5 exchange. Each stage (every send and receive of
+ * the negotiation) still waits at most the per-stage timeout, and never past the deadline;
+ * once it has passed the exchange fails at the next stage. The TCP connection to the proxy
+ * itself is bounded separately by the connect timeout.
+ */
+using Socks5Deadline = std::optional<std::chrono::steady_clock::time_point>;
 extern bool fNameLookup;
 
 //! -timeout default
@@ -89,6 +97,8 @@ public:
     }
 
     std::unique_ptr<Sock> Connect() const;
+    /** As above, with an explicit connect timeout instead of `nConnectTimeout`. */
+    std::unique_ptr<Sock> Connect(std::chrono::milliseconds timeout) const;
 };
 
 /** Credentials for proxy authentication */
@@ -96,6 +106,30 @@ struct ProxyCredentials
 {
     std::string username;
     std::string password;
+};
+
+/**
+ * Per-operation bounds for a SOCKS5 exchange. Every field left unset means the process-wide
+ * setting (`nConnectTimeout`, `g_socks5_recv_timeout`, `g_socks5_interrupt`, the process-wide
+ * isolation credentials). A caller that must not touch or observe those, such as a private
+ * broadcast job running inside the node, sets all of them.
+ */
+struct Socks5Params {
+    /** Absolute bound on the whole exchange; see `Socks5Deadline`. */
+    Socks5Deadline deadline{};
+    /** Longest any single local stage (method selection, authentication, sending the command) waits. */
+    std::optional<std::chrono::milliseconds> stage_timeout{};
+    /** Interrupt consulted while waiting on the proxy socket. */
+    CThreadInterrupt* interrupt{nullptr};
+    /** TCP or unix-socket connect timeout to the proxy (`ConnectThroughProxy`, `ResolveThroughProxy` only). */
+    std::optional<std::chrono::milliseconds> connect_timeout{};
+    /** Isolation credentials to present instead of the process-wide generator's next pair (same two functions only). */
+    std::optional<ProxyCredentials> auth{};
+
+    Socks5Params() = default;
+    /** A deadline alone; everything else process-wide. */
+    Socks5Params(Socks5Deadline d) : deadline{d} {}
+    Socks5Params(std::chrono::steady_clock::time_point d) : deadline{d} {}
 };
 
 /**
@@ -325,7 +359,19 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
 std::unique_ptr<Sock> ConnectThroughProxy(const Proxy& proxy,
                                           const std::string& dest,
                                           uint16_t port,
-                                          bool& proxy_connection_failed);
+                                          bool& proxy_connection_failed,
+                                          bool require_auth = false,
+                                          const Socks5Params& params = {});
+
+/**
+ * Resolve a hostname through a Tor SOCKS5 proxy with the RESOLVE extension, on a fresh
+ * stream with fresh isolation credentials.
+ *
+ * @param[in] proxy The SOCKS5 proxy; must be a Tor SocksPort.
+ * @param[in] name The hostname to resolve.
+ * @returns the single numeric answer, or std::nullopt on failure.
+ */
+std::optional<CNetAddr> ResolveThroughProxy(const Proxy& proxy, const std::string& name, const Socks5Params& params = {});
 
 /**
  * Interrupt SOCKS5 reads or writes.
@@ -342,6 +388,8 @@ extern CThreadInterrupt g_socks5_interrupt;
  *             SOCKS5 proxy.
  * @param socket The SOCKS5 proxy socket.
  *
+ * @param[in] require_auth Fail unless the proxy selects username/password authentication
+ *                         (Tor derives stream isolation from the credentials).
  * @returns Whether or not the operation succeeded.
  *
  * @note The specified SOCKS5 proxy socket must already be connected to the
@@ -350,7 +398,20 @@ extern CThreadInterrupt g_socks5_interrupt;
  * @see <a href="https://www.ietf.org/rfc/rfc1928.txt">RFC1928: SOCKS Protocol
  *      Version 5</a>
  */
-bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& socket);
+bool Socks5(const std::string& strDest, uint16_t port, const ProxyCredentials* auth, const Sock& socket, bool require_auth = false, const Socks5Params& params = {});
+
+/**
+ * Resolve a hostname through the Tor SOCKS5 RESOLVE extension.
+ *
+ * @param[in] name The hostname to resolve.
+ * @param[in] auth Credentials for stream isolation; the call fails unless the proxy selects
+ *                 username/password authentication.
+ * @param[in] socket Socket already connected to the proxy.
+ * @returns the IPv4 or IPv6 answer, or std::nullopt on failure or a non-numeric reply.
+ *
+ * @see <a href="https://spec.torproject.org/socks-extensions.html">Tor SOCKS extensions</a>
+ */
+std::optional<CNetAddr> Socks5Resolve(const std::string& name, const ProxyCredentials& auth, const Sock& socket, const Socks5Params& params = {});
 
 /**
  * Determine if a port is "bad" from the perspective of attempting to connect

@@ -9,6 +9,7 @@
 #include <net_processing.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
+#include <node/privbcast_manager.h>
 #include <node/types.h>
 #include <txmempool.h>
 #include <validation.h>
@@ -133,7 +134,8 @@ TransactionError BroadcastTransaction(NodeContext& node,
         node.peerman->InitiateTxBroadcastToAll(wtxid);
         break;
     case TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST:
-        return node.peerman->InitiateTxBroadcastPrivate(tx);
+        assert(node.privbcast);
+        return node.privbcast->Submit(tx) ? TransactionError::OK : TransactionError::PRIVATE_BROADCAST_FULL;
     }
 
     return TransactionError::OK;

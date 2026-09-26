@@ -1,429 +1,424 @@
 #!/usr/bin/env python3
-# Copyright (c) 2017-present The Bitcoin Core developers
+# Copyright (c) 2026-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""
-Test how locally submitted transactions are sent to the network when private broadcast is used.
-"""
+"""Test -privatebroadcast: transactions submitted with sendrawtransaction run as bounded
+bitcoin-privbcast jobs inside the node.
 
-import time
+The node reaches the network only through its Tor SOCKS5 proxy; here that is the framework's
+SOCKS5 server, which answers RESOLVE for the test seed name from a fixed script and redirects
+CONNECT requests to Python recipients or to a second bitcoind. The wire behaviour itself is
+covered by tool_privbcast.py; this test covers the node side: queueing, concurrency, the RPCs,
+abort, the report, and that the node's own mempool only learns the transaction from the network.
+
+The clock is mocked on both nodes: setmocktime moves a job's schedule (privbcast::Clock is the
+node clock) together with the recipient's own timers (its request delays, its INV trickle). A job
+is driven to its delivery start, where its prompt slots announce over real sockets in real time,
+and then past its last opportunity; whatever the mid and late slots have not reached by then is
+missed. The schedule itself is asserted exactly in src/test/privbcast_tests.cpp.
+"""
+import base64
+from decimal import Decimal
+import hashlib
 import threading
+import time
 
+from test_framework.messages import (
+    CInv,
+    MSG_WTX,
+    msg_getdata,
+)
 from test_framework.p2p import (
-    P2PDataStore,
     P2PInterface,
     P2P_SERVICES,
     start_p2p_listener,
 )
-from test_framework.messages import (
-    CAddress,
-    CInv,
-    MSG_WTX,
-    malleate_tx_to_invalid_witness,
-    msg_inv,
-    msg_tx,
-)
-from test_framework.netutil import (
-    format_addr_port
-)
-from test_framework.script_util import build_malleated_tx_package
 from test_framework.socks5 import (
+    Command,
     start_socks5_server,
 )
-from test_framework.test_framework import (
-    BitcoinTestFramework,
-)
+from test_framework.test_framework import BitcoinTestFramework
+from test_framework.authproxy import JSONRPCException
 from test_framework.util import (
     assert_equal,
     assert_greater_than_or_equal,
-    assert_not_equal,
     assert_raises_rpc_error,
-    tor_port,
+    p2p_port,
 )
-from test_framework.wallet import (
-    MiniWallet,
-)
+from test_framework.v2_p2p import EncryptedP2PState
+from test_framework.wallet import MiniWallet
 
-P2P_PRIVATE_VERSION = 70016
-NUM_PRIVATE_BROADCAST_PER_TX = 3
-MAX_PRIVATE_BROADCAST_ATTEMPTS = 1000
+# Mirrors src/privbcast/{discovery,job}.h.
+DISCOVERY_WINDOW_S = 18  # disc::WINDOW: delivery starts this long after the job
+PROMPT_SLOTS = 3  # plan::SLOT_SPECS: the slots whose first opportunity opens at delivery start
+SCHEDULED_BOUND_S = 568  # plan::SCHEDULED_BOUND: no opportunity opens later than this after the job
+MAX_CONCURRENT_JOBS = 2  # node::PrivateBroadcastManager::MAX_CONCURRENT_JOBS
+MAX_QUEUED_JOBS = 100
+MAX_FINISHED_JOBS = 100
+NOT_ENABLED = "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1."
 
 
-class NoRelayP2PInterface(P2PInterface):
-    def peer_connect_send_version(self, services):
-        super().peer_connect_send_version(services)
-        self.on_connection_send_msg.relay = 0
+def make_onion(seed: int) -> str:
+    pubkey = bytes([seed]) * 32
+    checksum = hashlib.sha3_256(b".onion checksum" + pubkey + b"\x03").digest()[:2]
+    return base64.b32encode(pubkey + checksum + b"\x03").decode().lower() + ".onion"
+
+
+class Recipient(P2PInterface):
+    """An honest recipient: negotiates wtxid relay (BIP339), as P2PInterface does by default,
+    requests the announced transaction by wtxid and answers PING."""
+
+    def __init__(self):
+        super().__init__()
+        self.txs_received = []
+
+    def on_inv(self, message):
+        want = msg_getdata()
+        for i in message.inv:
+            if i.type == MSG_WTX:
+                want.inv.append(CInv(MSG_WTX, i.hash))
+        self.send_without_ping(want)
+
+    def on_tx(self, message):
+        self.txs_received.append(message.tx)
 
 
 class P2PPrivateBroadcast(BitcoinTestFramework):
     def set_test_params(self):
-        self.disable_autoconnect = False
         self.num_nodes = 2
+        self.setup_clean_chain = True
 
     def setup_nodes(self):
-        self.destinations = []
+        self.listeners = {}
+        self.lock = threading.Lock()
+        self.exit_path = [f"11.22.33.{i}" for i in range(1, 9)]  # routable, as discovery requires
+        self.onions = [make_onion(i) for i in range(1, 4)]
+        # The seed answers the bitcoind recipient's endpoints unless a section says otherwise, so a
+        # job's prompt exit-path slots reach it; the last two endpoints are Python recipients.
+        node_endpoints = set(self.exit_path[:6])
 
-        self.destinations_lock = threading.Lock()
+        self.resolve_count = 0
+        self.exit_path_active = self.exit_path[:6]  # a test section may change the answers
 
-        self.trigger_no_relay_peer = False
-        self.no_relay_peer = None
+        def resolve_factory(name):
+            # One answer per query, cycling through the active exit-path endpoints.
+            if name != "a.seed.":
+                return None
+            with self.lock:
+                answer = self.exit_path_active[self.resolve_count % len(self.exit_path_active)]
+                self.resolve_count += 1
+            return answer
 
         def destinations_factory(requested_to_addr, requested_to_port, proxy_client):
-            """
-            Instruct the SOCKS5 proxy to redirect connections:
-            * The first automatic outbound connection -> P2PDataStore
-            * The first private broadcast connection -> nodes[1]
-            * Anything else -> P2PInterface
+            with self.lock:
+                if requested_to_addr in node_endpoints:
+                    return {"actual_to_addr": "127.0.0.1", "actual_to_port": p2p_port(1)}
+                # A fresh listener per connection: the framework's listeners accept once, and later
+                # jobs dial the same endpoints again.
+                listener = Recipient()
+                listener.peer_connect_helper(dstaddr="0.0.0.0", dstport=0, net=self.chain, timeout_factor=self.options.timeout_factor)
+                listener.peer_connect_send_version(services=P2P_SERVICES)
+                listener.v2_state = EncryptedP2PState(initiating=False, net=self.chain)
+                addr, port = start_p2p_listener(self.network_thread, listener)
+                self.listeners.setdefault(requested_to_addr, []).append(listener)
+                return {"actual_to_addr": addr, "actual_to_port": port}
 
-            proxy_client is the client's socket address as seen by the proxy (host:port),
-            equal to the node's addrbind for this connection.
-            """
-            conn_type = None
-            # SOCKS handlers run in separate threads, so each needs its own RPC connection.
-            rpc = self.nodes[0].create_new_rpc_connection()
-
-            def connection_type_found():
-                nonlocal conn_type
-                # The proxy has already replied SUCCESS to the SOCKS5 request, so the node
-                # has finished ConnectNode and registered the peer (or is about to).
-                # The proxy client address equals the node's addrbind for this connection.
-                for peer in rpc.getpeerinfo():
-                    if peer.get("addrbind") == proxy_client:
-                        conn_type = peer["connection_type"]
-                        return True
-                return False
-
-            self.wait_until(connection_type_found)
-
-            with self.destinations_lock:
-                i = len(self.destinations)
-                actual_to_addr = ""
-                actual_to_port = 0
-                listener = None
-                target_name = ""
-                if conn_type == "private-broadcast" and not any(dest["conn_type"] == "private-broadcast" for dest in self.destinations):
-                    # Instruct the SOCKS5 server to redirect the first private
-                    # broadcast connection from nodes[0] to nodes[1]
-                    actual_to_addr = "127.0.0.1" # nodes[1] listen address
-                    actual_to_port = tor_port(1) # nodes[1] listen port for Tor
-                    target_name = "nodes[1]"
-                else:
-                    # Create a Python P2P listening node and instruct the SOCKS5 proxy to
-                    # redirect the connection to it. The first outbound connection is used
-                    # later to serve GETDATA, thus make it P2PDataStore().
-                    if conn_type == "outbound-full-relay" and not any(dest["conn_type"] == "outbound-full-relay" for dest in self.destinations):
-                        listener = P2PDataStore()
-                        target_name = "Python P2PDataStore"
-                    elif conn_type == "private-broadcast" and self.trigger_no_relay_peer:
-                        listener = NoRelayP2PInterface()
-                        target_name = "Python NoRelayP2PInterface"
-                        self.trigger_no_relay_peer = False
-                        self.no_relay_peer = listener
-                    else:
-                        listener = P2PInterface()
-                        target_name = "Python P2PInterface"
-                    listener.peer_connect_helper(dstaddr="0.0.0.0", dstport=0, net=self.chain, timeout_factor=self.options.timeout_factor)
-                    listener.peer_connect_send_version(services=P2P_SERVICES)
-
-                    actual_to_addr, actual_to_port = start_p2p_listener(self.network_thread, listener)
-
-                self.log.debug(f"Instructing the SOCKS5 proxy to redirect connection i={i} ({conn_type}) for "
-                               f"{format_addr_port(requested_to_addr, requested_to_port)} to "
-                               f"{format_addr_port(actual_to_addr, actual_to_port)} ({target_name})")
-
-                self.destinations.append({
-                    "requested_to": format_addr_port(requested_to_addr, requested_to_port),
-                    "conn_type": conn_type,
-                    "node": listener,
-                })
-                assert_equal(len(self.destinations), i + 1)
-
-                return {
-                    "actual_to_addr": actual_to_addr,
-                    "actual_to_port": actual_to_port,
-                }
-
-        self.socks5_server = start_socks5_server(destinations_factory)
-
+        self.socks5_server = start_socks5_server(destinations_factory, resolve_factory, auth=True, unauth=True)
         self.extra_args = [
             [
-                # Needed to be able to add CJDNS addresses to addrman (otherwise they are unroutable).
-                "-cjdnsreachable",
-                # Connecting, sending garbage, being disconnected messes up with this test's
-                # check_broadcasts() which waits for a particular Python node to receive a connection.
-                "-v2transport=0",
-                "-test=addrman",
                 "-privatebroadcast",
-                f"-proxy={self.socks5_server.conf.addr[0]}:{self.socks5_server.conf.addr[1]}",
-                # To increase coverage, make it think that the I2P network is reachable so that it
-                # selects such addresses as well. Pick a proxy address where nobody is listening
-                # and connection attempts fail quickly.
-                "-i2psam=127.0.0.1:1",
+                f"-onion=127.0.0.1:{self.socks5_server.conf.addr[1]}",
+                "-privatebroadcastseed=a.seed.",
+                *[f"-privatebroadcastfixedseed={o}:18444" for o in self.onions],
+                "-v2transport=1",
+                "-proxyrandomize=0",  # private broadcast authenticates every stream regardless
+                "-debug=privatebroadcast",
             ],
-            [
-                "-connect=0",
-                f"-bind=127.0.0.1:{tor_port(1)}=onion",
-            ],
+            ["-v2transport=1"],
         ]
         super().setup_nodes()
 
-    def setup_network(self):
-        self.setup_nodes()
+    def jobs(self):
+        return {j["id"]: j for j in self.nodes[0].getprivatebroadcastinfo()["jobs"]}
 
-    def check_broadcasts(self, label, tx, broadcasts_to_expect, skip_destinations):
-        def wait_and_get_destination(n):
-            """Wait for self.destinations[] to have at least n elements and return the 'n'th."""
-            def get_destinations_len():
-                with self.destinations_lock:
-                    return len(self.destinations)
-            self.wait_until(lambda: get_destinations_len() > n)
-            with self.destinations_lock:
-                return self.destinations[n]
+    def jobs_after_submit(self, hex_tx):
+        before = set(self.jobs())
+        self.nodes[0].sendrawtransaction(hex_tx)
+        new = set(self.jobs()) - before
+        assert_equal(len(new), 1)
+        return new.pop()
 
-        broadcasts_done = 0
-        i = skip_destinations - 1
-        while broadcasts_done < broadcasts_to_expect:
-            i += 1
-            self.log.debug(f"{label}: waiting for outbound connection i={i}")
-            # At this point the connection may not yet have been established (A),
-            # may be active (B), or may have already been closed (C).
-            dest = wait_and_get_destination(i)
-            peer = dest["node"]
-            if peer is None:
-                continue # That is the first private broadcast connection, redirected to nodes[1]
-            peer.wait_until(lambda: peer.message_count["version"] == 1, check_connected=False)
-            # Now it is either (B) or (C).
-            if peer.last_message["version"].nServices != 0:
-                self.log.debug(f"{label}: outbound connection i={i} to {dest['requested_to']} not a private broadcast, ignoring it (maybe feeler or extra block only)")
-                continue
-            self.log.debug(f"{label}: outbound connection i={i} to {dest['requested_to']} must be a private broadcast, checking it")
-            peer.wait_for_disconnect()
-            # Now it is (C).
-            assert_equal(peer.message_count, {
-                "version": 1,
-                "verack": 1,
-                "inv": 1,
-                "tx": 1,
-                "ping": 1
-            })
-            dummy_address = CAddress()
-            dummy_address.nServices = 0
-            assert_equal(peer.last_message["version"].nVersion, P2P_PRIVATE_VERSION)
-            assert_equal(peer.last_message["version"].nServices, 0)
-            assert_equal(peer.last_message["version"].nTime, 0)
-            assert_equal(peer.last_message["version"].addrTo, dummy_address)
-            assert_equal(peer.last_message["version"].addrFrom, dummy_address)
-            assert_equal(peer.last_message["version"].strSubVer, "/pynode:0.0.1/")
-            assert_equal(peer.last_message["version"].nStartingHeight, 0)
-            assert_equal(peer.last_message["version"].relay, 0)
-            assert_equal(peer.last_message["tx"].tx.txid_hex, tx["txid"])
-            self.log.info(f"{label}: ok: outbound connection i={i} is private broadcast of txid={tx['txid']}")
-            broadcasts_done += 1
+    def wait_for_state(self, job_id, state, timeout=60):
+        self.wait_until(lambda: self.jobs()[job_id]["state"] == state, timeout=timeout)
+        return self.jobs()[job_id]
 
-        # Verify the tx we just observed is tracked in getprivatebroadcastinfo.
-        pbinfo = self.nodes[0].getprivatebroadcastinfo()
-        pending = [t for t in pbinfo["transactions"] if t["txid"] == tx["txid"] and t["wtxid"] == tx["wtxid"]]
-        assert_equal(len(pending), 1)
-        assert_equal(pending[0]["hex"].lower(), tx["hex"].lower())
-        peers = pending[0]["peers"]
-        assert_greater_than_or_equal(len(peers), NUM_PRIVATE_BROADCAST_PER_TX)
-        assert_equal(pending[0]["attempts_remaining"], MAX_PRIVATE_BROADCAST_ATTEMPTS - len(peers))
-        assert all("address" in p and "sent" in p for p in peers)
-        assert_greater_than_or_equal(sum(1 for p in peers if "received" in p), broadcasts_to_expect)
+    def advance(self, seconds):
+        """Move both nodes' clocks forward together."""
+        self.mocktime += seconds
+        for node in self.nodes:
+            node.setmocktime(self.mocktime)
+
+    def progress(self, job_id):
+        return self.jobs()[job_id]["progress"]
+
+    def start_delivery(self, batch):
+        """Take the running jobs (they started together, on the frozen clock) to their delivery start
+        once their discovery is over: the prompt slots then dial in real time."""
+        jobs = self.jobs()
+        assert_equal(sorted(batch), sorted(i for i, j in jobs.items() if j["state"] == "running"))
+        starts = {jobs[i]["time_started"] for i in batch}
+        assert_equal(len(starts), 1)
+        t0 = starts.pop()
+        assert_greater_than_or_equal(t0 + DISCOVERY_WINDOW_S, self.mocktime)
+        self.wait_until(lambda: all(self.progress(i)["discovery_done"] for i in batch))
+        self.advance(t0 + DISCOVERY_WINDOW_S - self.mocktime)
+
+    def tick_until(self, condition):
+        """Let the clock tick a second at a time until `condition`: the recipient's own delays (its
+        request timers) then pass while a job's next opportunity stays far ahead."""
+        def step():
+            if condition():
+                return True
+            self.advance(1)
+            return False
+        self.wait_until(step)
+
+    def wait_for_prompt_slots(self, batch):
+        """Tick until every prompt slot's first opportunity has ended: dialled and over, missed, or
+        without a candidate. No later opportunity is due for another 35 s of the schedule."""
+        self.tick_until(lambda: all(self.progress(i)["opportunities_ended"] >= PROMPT_SLOTS for i in batch))
+
+    def end_jobs(self, batch):
+        """Jump past the last opportunity of these jobs and wait for them to end."""
+        t0 = max(self.jobs()[i]["time_started"] for i in batch)
+        self.advance(max(t0 + SCHEDULED_BOUND_S - self.mocktime, 0))
+        return [self.wait_for_state(i, "done") for i in batch]
+
+    def finish(self, ids):
+        """Run these queued or running jobs to their end, batch by batch."""
+        ids = list(ids)
+        while ids:
+            self.wait_until(lambda: any(self.jobs()[i]["state"] == "running" for i in ids))
+            batch = [i for i in ids if self.jobs()[i]["state"] == "running"]
+            self.start_delivery(batch)
+            self.wait_for_prompt_slots(batch)
+            self.end_jobs(batch)
+            ids = [i for i in ids if i not in batch]
+
+    def test_package(self):
+        self.log.info("submitpackage with a low-fee parent and its child queues one job that serves the parent on request")
+        # The recipient asks for a missing parent after its orphan-resolution delays: 2 s for a non-preferred
+        # announcer plus 2 s because it has wtxid-relay peers (the private broadcast connection is one), well
+        # inside the 30 s parent hold. Take the ordinary node0-node1 link away for this part. And let node1
+        # be reached through one endpoint only: with several connections from the same job, node1 may ask
+        # a connection that has not served the child for the parent, which the protocol does not answer
+        # (one parent, one child, on one connection).
+        self.disconnect_nodes(0, 1)
+        with self.lock:
+            self.exit_path_active = [self.exit_path[0]]
+        parent = self.wallet.create_self_transfer(fee_rate=Decimal("0"))
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
+        res = self.nodes[0].submitpackage([parent["hex"], child["hex"]])
+        assert_equal(res["package_msg"], "parent-reconsiderable")
+        assert "min relay fee not met" in res["tx-results"][parent["wtxid"]]["error"]
+        assert_equal(res["tx-results"][child["wtxid"]]["error"], "package-not-validated")
+        job_id = res["private_broadcast_job"]
+        assert_equal(self.jobs()[job_id]["parent_txid"], parent["txid"])
+        assert parent["txid"] not in self.nodes[0].getrawmempool()
+        self.start_delivery([job_id])
+        self.tick_until(lambda: child["txid"] in self.nodes[1].getrawmempool() and parent["txid"] in self.nodes[1].getrawmempool())
+        job = self.end_jobs([job_id])[0]
+        assert_greater_than_or_equal(job["report"]["summary"]["parents_served"], 1)
+        assert child["txid"] not in self.nodes[0].getrawmempool()
+        # node1 does not announce transactions it already had when a peer connects, so node0 is not
+        # expected to learn these two; receipt-back is covered above.
+        self.connect_nodes(0, 1)
+        with self.lock:
+            self.exit_path_active = self.exit_path[:6]
 
     def run_test(self):
-        tx_originator = self.nodes[0]
-        tx_receiver = self.nodes[1]
-        far_observer = tx_receiver.add_p2p_connection(P2PInterface())
+        self.mocktime = int(time.time())
+        self.advance(0)
+        self.wallet = MiniWallet(self.nodes[0])
+        self.generate(self.wallet, 260)  # enough mature coins for the queue-full section
 
-        self.log.info("Test getprivatebroadcastinfo and abortprivatebroadcast fails if the node is running without -privatebroadcast set")
-        assert_raises_rpc_error(-32601, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.",
-            tx_receiver.getprivatebroadcastinfo)
-        assert_raises_rpc_error(-32601, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.",
-            tx_receiver.abortprivatebroadcast, "00" * 32)
+        self.log.info("The RPCs are unavailable without -privatebroadcast")
+        assert_raises_rpc_error(-32601, NOT_ENABLED, self.nodes[1].getprivatebroadcastinfo)
+        assert_raises_rpc_error(-32601, NOT_ENABLED, self.nodes[1].abortprivatebroadcast, 1)
 
-        self.fill_node_addrman(node_index=0, address_types_to_add=[CAddress.NET_IPV4, CAddress.NET_IPV6, CAddress.NET_TORV3, CAddress.NET_I2P, CAddress.NET_CJDNS])
+        self.log.info("A submitted transaction becomes a job that announces it over the proxy and never enters the mempool directly")
+        tx = self.wallet.create_self_transfer()
+        assert_equal(self.nodes[0].sendrawtransaction(tx["hex"]), tx["txid"])
+        assert tx["txid"] not in self.nodes[0].getrawmempool()
+        jobs = self.jobs()
+        assert_equal(list(jobs), [1])
+        assert_equal(jobs[1]["txid"], tx["txid"])
+        assert jobs[1]["state"] in ("queued", "running")
+        self.finish([1])
+        job = self.jobs()[1]
+        assert_equal(job["announced"], True)
+        report = job["report"]
+        assert_equal(report["txid"], tx["txid"])
+        assert_greater_than_or_equal(report["summary"]["announcements_written"], 1)
+        assert "time_started" in job and "time_ended" in job
+        # The bitcoind recipient took it, and this node only saw it once the network relayed it back:
+        # node1's INV trickle and node0's request delay pass on the ticking clock.
+        self.wait_until(lambda: tx["txid"] in self.nodes[1].getrawmempool())
+        self.tick_until(lambda: tx["txid"] in self.nodes[0].getrawmempool())
+        self.wait_until(lambda: "seen_in_mempool" in self.jobs()[1])
+        served = [a for s in report["slots"] for a in s["attempts"] if a["tx_written_ms"] is not None]
+        assert_greater_than_or_equal(len(served), 1)
 
-        wallet = MiniWallet(tx_originator)
+        self.log.info("Jobs run two at a time; the queue advances in order; queued and running jobs can be aborted")
+        txs = [self.wallet.create_self_transfer() for _ in range(MAX_CONCURRENT_JOBS + 1)]
+        for t in txs:
+            self.nodes[0].sendrawtransaction(t["hex"])
+        ids = [2, 3, 4]
+        self.wait_until(lambda: [self.jobs()[i]["state"] for i in ids[:MAX_CONCURRENT_JOBS]] == ["running"] * MAX_CONCURRENT_JOBS)
+        assert_equal(self.jobs()[4]["state"], "queued")
+        # Aborting a running job ends it early with a report of what it did, and lets the queued one start.
+        running = self.nodes[0].abortprivatebroadcast(2)
+        assert_equal(running["state"], "running")
+        job = self.wait_for_state(2, "aborted", timeout=30)
+        assert_equal(job["report"]["summary"]["interrupted"], True)
+        self.wait_for_state(4, "running", timeout=30)
+        # A queued job aborted before it runs ends with no report.
+        extra = self.wallet.create_self_transfer()
+        self.nodes[0].sendrawtransaction(extra["hex"])
+        assert_equal(self.jobs()[5]["state"], "queued")
+        aborted = self.nodes[0].abortprivatebroadcast(5)
+        assert_equal(aborted["state"], "aborted")
+        assert_equal(aborted["txid"], extra["txid"])
+        assert "report" not in self.jobs()[5]
+        assert_raises_rpc_error(-8, "No queued or running private broadcast job", self.nodes[0].abortprivatebroadcast, 5)
+        assert_raises_rpc_error(-8, "No queued or running private broadcast job", self.nodes[0].abortprivatebroadcast, 99)
+        # The same transaction may be queued again as a new job.
+        assert_equal(self.nodes[0].sendrawtransaction(extra["hex"]), extra["txid"])
+        assert_equal(self.jobs()[6]["txid"], extra["txid"])
+        self.finish([3, 4, 6])
 
-        txs = wallet.create_self_transfer_chain(chain_length=3)
-        self.log.info(f"Created txid={txs[0]['txid']}: for basic test")
-        self.log.info(f"Created txid={txs[1]['txid']}: for broadcast with dependency in mempool + rebroadcast")
-        self.log.info(f"Created txid={txs[2]['txid']}: for broadcast with dependency not in mempool")
-        tx_originator.sendrawtransaction(hexstring=txs[0]["hex"], maxfeerate=0.1)
+        self.log.info("Receipt from the network while a job runs is recorded, and does not stop the job")
+        # This job announces to the Python recipients only, so node1 still lacks the transaction when it
+        # hands it to node0 through the ordinary link.
+        with self.lock:
+            self.exit_path_active = self.exit_path[6:]
+        seen = self.wallet.create_self_transfer()
+        self.nodes[0].sendrawtransaction(seen["hex"])
+        job_id = 7
+        assert_equal(self.jobs()[job_id]["txid"], seen["txid"])
+        self.start_delivery([job_id])
+        self.wait_for_prompt_slots([job_id])
+        progress = self.progress(job_id)
+        assert_greater_than_or_equal(progress["connections"], 1)
+        assert_greater_than_or_equal(progress["announcements_written"], 1)
+        self.nodes[1].sendrawtransaction(seen["hex"])
+        self.tick_until(lambda: seen["txid"] in self.nodes[0].getrawmempool())  # the job's late slots are still ahead
+        self.wait_until(lambda: "seen_in_mempool" in self.jobs()[job_id])
+        assert_equal(self.jobs()[job_id]["state"], "running")
+        job = self.end_jobs([job_id])[0]
+        assert_equal(job["announced"], True)
+        assert_equal(job["report"]["summary"]["interrupted"], False)
+        assert_greater_than_or_equal(job["report"]["summary"]["announcements_written"], 1)
+        with self.lock:
+            self.exit_path_active = self.exit_path[:6]
 
-        self.log.info("First private broadcast: waiting for the transaction to reach the recipient")
-        self.wait_until(lambda: len(tx_receiver.getrawmempool()) > 0)
-        self.log.info("First private broadcast: the recipient received the transaction")
-        far_observer.wait_for_tx(txs[0]["txid"])
-        self.log.info("First private broadcast: the recipient further relayed the transaction")
+        self.log.info("Under -privatebroadcast a package is at most one parent and its child, and a valid single transaction also works")
+        p1 = self.wallet.create_self_transfer()
+        p2 = self.wallet.create_self_transfer()
+        c = self.wallet.create_self_transfer_multi(utxos_to_spend=[p1["new_utxo"], p2["new_utxo"]])
+        assert_raises_rpc_error(-8, "one parent and its child", self.nodes[0].submitpackage, [p1["hex"], p2["hex"], c["hex"]])
+        single = self.wallet.create_self_transfer()
+        res = self.nodes[0].submitpackage([single["hex"]])
+        assert_equal(res["package_msg"], "success")
+        assert "fees" in res["tx-results"][single["wtxid"]]
+        assert single["txid"] not in self.nodes[0].getrawmempool()
+        self.finish([res["private_broadcast_job"]])
 
-        # One already checked above, check the other NUM_PRIVATE_BROADCAST_PER_TX - 1 broadcasts.
-        self.check_broadcasts("Basic", txs[0], NUM_PRIVATE_BROADCAST_PER_TX - 1, 0)
+        self.test_package()
 
-        self.log.info("Resending the same transaction via RPC again (it is not in the mempool yet)")
-        ignoring_msg = f"Ignoring unnecessary request to schedule an already scheduled transaction: txid={txs[0]['txid']}, wtxid={txs[0]['wtxid']}"
-        with tx_originator.busy_wait_for_debug_log(expected_msgs=[ignoring_msg.encode()]):
-            tx_originator.sendrawtransaction(hexstring=txs[0]["hex"], maxfeerate=0)
+        self.log.info("Disabling networking aborts running and queued jobs for good; re-enabling admits new ones")
+        txs = [self.wallet.create_self_transfer() for _ in range(MAX_CONCURRENT_JOBS + 1)]
+        ids = [self.jobs_after_submit(t["hex"]) for t in txs]
+        self.wait_until(lambda: [self.jobs()[i]["state"] for i in ids[:MAX_CONCURRENT_JOBS]] == ["running"] * MAX_CONCURRENT_JOBS)
+        assert_equal(self.jobs()[ids[-1]]["state"], "queued")
+        self.nodes[0].setnetworkactive(False)
+        assert_equal(self.jobs()[ids[-1]]["state"], "aborted")
+        assert_equal(self.jobs()[ids[-1]]["error"], "networking deactivated")
+        assert_raises_rpc_error(None, "Private broadcast job not queued", self.nodes[0].sendrawtransaction, self.wallet.create_self_transfer()["hex"])
+        self.nodes[0].setnetworkactive(True)
+        for i in ids[:MAX_CONCURRENT_JOBS]:
+            job = self.wait_for_state(i, "aborted", timeout=30)
+            assert_equal(job["error"], "networking deactivated")
+            assert_equal(job["report"]["summary"]["interrupted"], True)
+        # setnetworkactive dropped node0's peers asynchronously; restore the ordinary link explicitly.
+        self.disconnect_nodes(0, 1)
+        self.connect_nodes(0, 1)
+        revived = self.wallet.create_self_transfer()
+        self.finish([self.jobs_after_submit(revived["hex"])])
 
-        self.log.info("Sending a malleated transaction with an invalid witness via RPC")
-        malleated_invalid = malleate_tx_to_invalid_witness(txs[0])
-        assert_raises_rpc_error(-26, "mempool-script-verify-flag-failed",
-                                tx_originator.sendrawtransaction,
-                                hexstring=malleated_invalid.serialize_with_witness().hex(),
-                                maxfeerate=0.1)
+        self.log.info("The queue is bounded; finished jobs are retained up to a bound, oldest dropped first")
+        queued = []
+        while True:
+            t = self.wallet.create_self_transfer()
+            try:
+                queued.append(self.jobs_after_submit(t["hex"]))
+            except JSONRPCException as e:
+                assert "Private broadcast job not queued" in e.error["message"]
+                break
+        states = [j["state"] for j in self.jobs().values()]
+        assert_equal(states.count("running"), MAX_CONCURRENT_JOBS)
+        assert_equal(states.count("queued"), MAX_QUEUED_JOBS)
+        for i in queued:
+            if self.jobs()[i]["state"] == "queued":
+                self.nodes[0].abortprivatebroadcast(i)
+        jobs = self.jobs()
+        assert 1 not in jobs  # the first job's report has been trimmed
+        assert_greater_than_or_equal(MAX_FINISHED_JOBS + MAX_CONCURRENT_JOBS, len(jobs))
+        self.finish([i for i in queued if jobs[i]["state"] == "running"])
 
-        self.log.info("Checking that the transaction is not in the originator node's mempool")
-        assert_equal(len(tx_originator.getrawmempool()), 0)
+        self.log.info("Every proxy stream authenticated with its own credentials, with -proxyrandomize=0")
+        creds = set()
+        streams = 0
+        while not self.socks5_server.queue.empty():
+            item = self.socks5_server.queue.get()
+            if isinstance(item, Exception):
+                raise item
+            assert item.username is not None
+            creds.add((item.username, item.password))
+            streams += 1
+        assert_greater_than_or_equal(streams, 20)
+        assert_equal(len(creds), streams)
 
-        wtxid_int = int(txs[0]["wtxid"], 16)
-        inv = CInv(MSG_WTX, wtxid_int)
+        self.log.info("With a proxy that is not Tor, a job reaches no one: no RESOLVE answers, no onion")
+        not_tor = start_socks5_server(None, auth=True, unauth=True, tor=False)
+        self.restart_node(0, extra_args=[a if not a.startswith("-onion=") else f"-onion=127.0.0.1:{not_tor.conf.addr[1]}"
+                                         for a in self.extra_args[0]])
+        self.advance(0)  # the restarted node is back on the mocked clock
+        t = self.wallet.create_self_transfer()
+        job_id = self.jobs_after_submit(t["hex"])
+        self.finish([job_id])
+        job = self.jobs()[job_id]
+        assert_equal(job["announced"], False)
+        assert_equal(job["report"]["summary"]["announcements_written"], 0)
+        assert_equal(job["report"]["discovery"]["exit_path_candidates"], 0)
+        commands = []
+        while not not_tor.queue.empty():
+            item = not_tor.queue.get()
+            if isinstance(item, Exception):
+                raise item
+            commands.append(item)
+        assert any(c.cmd == Command.RESOLVE for c in commands)
+        assert all(c.cmd == Command.RESOLVE or c.addr.decode().endswith(".onion") for c in commands)
+        not_tor.stop()
+        self.restart_node(0)
+        self.advance(0)
 
-        tx_returner = None # First outbound-full-relay, will be P2PDataStore.
-        other_peer = None # Any other outbound-full-relay, we use the second one.
-
-        def set_tx_returner_and_other():
-            nonlocal tx_returner
-            nonlocal other_peer
-            tx_returner = None
-            other_peer = None
-            with self.destinations_lock:
-                for dest in self.destinations:
-                    if dest["conn_type"] == "outbound-full-relay" and dest["node"] is not None:
-                        if tx_returner is None:
-                            assert(type(dest["node"]) is P2PDataStore)
-                            tx_returner = dest["node"]
-                        else:
-                            assert(type(dest["node"]) is P2PInterface)
-                            other_peer = dest["node"]
-                            return True
-            return False
-
-        self.wait_until(set_tx_returner_and_other)
-
-        tx_returner.wait_for_connect()
-        other_peer.wait_for_connect()
-
-        self.log.info("Sending INV and waiting for GETDATA from node")
-        tx_returner.tx_store[wtxid_int] = txs[0]["tx"]
-        assert "getdata" not in tx_returner.last_message
-        received_back_msg = f"Received our privately broadcast transaction (txid={txs[0]['txid']}) from the network"
-        with tx_originator.assert_debug_log(expected_msgs=[received_back_msg]):
-            tx_returner.send_without_ping(msg_inv([inv]))
-            tx_returner.wait_until(lambda: "getdata" in tx_returner.last_message)
-            self.wait_until(lambda: len(tx_originator.getrawmempool()) > 0)
-
-        self.log.info("Waiting for normal broadcast to another peer")
-        other_peer.wait_for_inv([inv])
-
-        self.log.info("Checking getprivatebroadcastinfo no longer reports the transaction after it is received back")
-        pbinfo = tx_originator.getprivatebroadcastinfo()
-        pending = [t for t in pbinfo["transactions"] if t["txid"] == txs[0]["txid"] and t["wtxid"] == txs[0]["wtxid"]]
-        assert_equal(len(pending), 0)
-
-        self.log.info("Sending a transaction that is already in the mempool")
-        skip_destinations = len(self.destinations)
-        tx_originator.sendrawtransaction(hexstring=txs[0]["hex"], maxfeerate=0)
-        self.check_broadcasts("Broadcast of mempool transaction", txs[0], NUM_PRIVATE_BROADCAST_PER_TX, skip_destinations)
-
-        self.log.info("Sending a transaction with a dependency in the mempool")
-        skip_destinations = len(self.destinations)
-        tx_originator.sendrawtransaction(hexstring=txs[1]["hex"], maxfeerate=0.1)
-        self.check_broadcasts("Dependency in mempool", txs[1], NUM_PRIVATE_BROADCAST_PER_TX, skip_destinations)
-
-        self.log.info("Sending a transaction with a dependency not in the mempool (should be rejected)")
-        assert_equal(len(tx_originator.getrawmempool()), 1)
-        assert_raises_rpc_error(-25, "bad-txns-inputs-missingorspent",
-                                tx_originator.sendrawtransaction, hexstring=txs[2]["hex"], maxfeerate=0.1)
-        assert_raises_rpc_error(-25, "bad-txns-inputs-missingorspent",
-                                tx_originator.sendrawtransaction, hexstring=txs[2]["hex"], maxfeerate=0)
-
-        # Since txs[1] has not been received back by tx_originator,
-        # it should be re-broadcast after a while. Advance tx_originator's clock
-        # to trigger a re-broadcast. Should be more than the maximum returned by
-        # NextTxBroadcast() in net_processing.cpp.
-        self.log.info("Checking that rebroadcast works")
-        delta = 20 * 60 # 20min
-        skip_destinations = len(self.destinations)
-        rebroadcast_msg = f"Reattempting broadcast of stale txid={txs[1]['txid']}"
-        with tx_originator.busy_wait_for_debug_log(expected_msgs=[rebroadcast_msg.encode()]):
-            tx_originator.setmocktime(int(time.time()) + delta)
-            tx_originator.mockscheduler(delta)
-        self.check_broadcasts("Rebroadcast", txs[1], 1, skip_destinations)
-        tx_originator.setmocktime(0) # Let the clock tick again (it will go backwards due to this).
-
-        self.log.info("Sending a pair of transactions with the same txid but different valid wtxids via RPC")
-        parent = wallet.create_self_transfer()["tx"]
-        parent_amount = parent.vout[0].nValue - 10000
-        child_amount = parent_amount - 10000
-        siblings_parent, sibling1, sibling2 = build_malleated_tx_package(
-            parent=parent,
-            rebalance_parent_output_amount=parent_amount,
-            child_amount=child_amount)
-        self.log.info(f"  - sibling1: txid={sibling1.txid_hex}, wtxid={sibling1.wtxid_hex}")
-        self.log.info(f"  - sibling2: txid={sibling2.txid_hex}, wtxid={sibling2.wtxid_hex}")
-        assert_equal(sibling1.txid_hex, sibling2.txid_hex)
-        assert_not_equal(sibling1.wtxid_hex, sibling2.wtxid_hex)
-        assert_equal(len(tx_originator.getrawmempool()), 1)
-        tx_returner.send_without_ping(msg_tx(siblings_parent))
-        self.wait_until(lambda: len(tx_originator.getrawmempool()) > 1)
-        self.log.info("  - siblings' parent added to the mempool")
-        tx_originator.sendrawtransaction(hexstring=sibling1.serialize_with_witness().hex(), maxfeerate=0.1)
-        self.log.info("  - sent sibling1: ok")
-        tx_originator.sendrawtransaction(hexstring=sibling2.serialize_with_witness().hex(), maxfeerate=0.1)
-        self.log.info("  - sent sibling2: ok")
-
-        self.log.info("Checking abortprivatebroadcast removes a pending private-broadcast transaction")
-        tx_abort = wallet.create_self_transfer()
-        tx_originator.sendrawtransaction(hexstring=tx_abort["hex"], maxfeerate=0.1)
-        assert tx_abort["wtxid"] in [t["wtxid"] for t in tx_originator.getprivatebroadcastinfo()["transactions"]]
-        abort_res = tx_originator.abortprivatebroadcast(tx_abort["txid"])
-        assert_equal(len(abort_res["removed_transactions"]), 1)
-        assert_equal(abort_res["removed_transactions"][0]["txid"], tx_abort["txid"])
-        assert_equal(abort_res["removed_transactions"][0]["wtxid"], tx_abort["wtxid"])
-        assert_equal(abort_res["removed_transactions"][0]["hex"].lower(), tx_abort["hex"].lower())
-        assert all(t["wtxid"] != tx_abort["wtxid"] for t in tx_originator.getprivatebroadcastinfo()["transactions"])
-
-        self.log.info("Checking abortprivatebroadcast fails for non-existent transaction")
-        assert_raises_rpc_error(
-            -5,
-            "Transaction not in private broadcast queue",
-            tx_originator.abortprivatebroadcast,
-            "0" * 64,
-        )
-
-        self.log.info("Checking that a private broadcast destination signaling relay=false gets disconnected")
-        tx_no_relay = wallet.create_self_transfer()
-        disconnect_msg = "Disconnecting: does not support transaction relay (connected in vain)"
-        with tx_originator.assert_debug_log(expected_msgs=[disconnect_msg]):
-            with self.destinations_lock:
-                self.no_relay_peer = None
-                self.trigger_no_relay_peer = True
-            tx_originator.sendrawtransaction(hexstring=tx_no_relay["hex"], maxfeerate=0.1)
-            self.wait_until(lambda: self.no_relay_peer is not None)
-            self.no_relay_peer.wait_until(lambda: self.no_relay_peer.message_count["version"] == 1, check_connected=False)
-            self.no_relay_peer.wait_for_disconnect()
-        assert_equal(self.no_relay_peer.message_count, {"version": 1})
-
-        # Stop the SOCKS5 proxy server to avoid it being upset by the bitcoin
-        # node disconnecting in the middle of the SOCKS5 handshake when we
-        # restart below.
+        self.log.info("The node shuts down cleanly with a job running")
+        last = self.wallet.create_self_transfer()
+        self.wait_for_state(self.jobs_after_submit(last["hex"]), "running")
+        # The framework stops both nodes now; a hang or crash here fails the test.
         self.socks5_server.stop()
 
-        self.log.info("Trying to send a transaction when none of Tor or I2P is reachable")
-        self.restart_node(0, extra_args=[
-            "-privatebroadcast",
-            "-v2transport=0",
-            # A location where definitely a Tor control is not listening. This would allow
-            # Bitcoin Core to start, hoping/assuming that the location of the Tor proxy
-            # may be retrieved after startup from the Tor control, but it will not be, so
-            # the RPC should throw.
-            "-torcontrol=127.0.0.1:1",
-            "-listenonion",
-        ])
-        assert_raises_rpc_error(-1, "none of the Tor or I2P networks is reachable",
-                                tx_originator.sendrawtransaction, hexstring=txs[0]["hex"], maxfeerate=0.1)
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     P2PPrivateBroadcast(__file__).main()

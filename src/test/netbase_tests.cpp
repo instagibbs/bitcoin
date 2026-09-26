@@ -11,12 +11,15 @@
 #include <serialize.h>
 #include <streams.h>
 #include <test/util/common.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 
-#include <string>
+#include <chrono>
 #include <numeric>
+#include <string>
+#include <thread>
 
 #include <boost/test/unit_test.hpp>
 
@@ -659,6 +662,113 @@ BOOST_AUTO_TEST_CASE(asmap_test_vectors)
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("dff5:8021:61d:b17d:406d:7888:fdac:4a20", false)), 969411);
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("e888:6791:2960:d723:bcfd:47e1:2d8c:599f", false)), 824019);
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("ffff:d499:8c4b:4941:bc81:d5b9:b51e:85a8", false)), 824019);
+}
+
+BOOST_AUTO_TEST_CASE(socks5_resolve)
+{
+    // Other suites may leave the shared SOCKS interrupt triggered; InterruptibleRecv checks it.
+    g_socks5_interrupt.reset();
+    const ProxyCredentials creds{"user", "pass"};
+    // Method selection reply choosing username/password, then a successful auth reply.
+    const std::string auth_ok("\x05\x02\x01\x00", 4);
+    // Method selection reply choosing no authentication.
+    const std::string noauth("\x05\x00", 2);
+    const std::string ipv4_reply("\x05\x00\x00\x01\x01\x02\x03\x04\x00\x00", 10);
+
+    // IPv4 answer.
+    {
+        const auto addr{Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply})};
+        BOOST_REQUIRE(addr.has_value());
+        BOOST_CHECK_EQUAL(addr->ToStringAddr(), "1.2.3.4");
+    }
+    // IPv6 answer.
+    {
+        std::string reply("\x05\x00\x00\x04", 4);
+        reply += std::string("\x26\x06\x47\x00\x47\x00", 6) + std::string(8, '\0') + std::string("\x11\x11", 2);
+        reply += std::string("\x00\x00", 2);
+        const auto addr{Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + reply})};
+        BOOST_REQUIRE(addr.has_value());
+        BOOST_CHECK_EQUAL(addr->ToStringAddr(), "2606:4700:4700::1111");
+    }
+    // The proxy selected no authentication: no stream isolation, so RESOLVE refuses. A plain
+    // Socks5() still accepts that unless told to require authentication.
+    {
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{noauth + ipv4_reply}));
+        BOOST_CHECK(Socks5("seed.example.", 8333, &creds, StaticContentsSock{noauth + ipv4_reply}));
+        BOOST_CHECK(!Socks5("seed.example.", 8333, &creds, StaticContentsSock{noauth + ipv4_reply}, /*require_auth=*/true));
+        BOOST_CHECK(Socks5("seed.example.", 8333, &creds, StaticContentsSock{auth_ok + ipv4_reply}, /*require_auth=*/true));
+    }
+    // Error reply.
+    {
+        const std::string reply("\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00", 10);
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + reply}));
+    }
+    // A domain name is not a numeric answer.
+    {
+        const std::string reply = std::string("\x05\x00\x00\x03\x03", 5) + "foo" + std::string("\x00\x00", 2);
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + reply}));
+        BOOST_CHECK(Socks5("foo", 8333, &creds, StaticContentsSock{auth_ok + reply}));
+    }
+    // Unspecified address and truncated replies.
+    {
+        const std::string zero("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00", 10);
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + zero}));
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply.substr(0, 6)}));
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok.substr(0, 2)}));
+    }
+    // An exchange deadline already past fails at the first stage, whatever the proxy would have said.
+    {
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply}, std::chrono::steady_clock::now() - std::chrono::seconds{1}));
+        BOOST_CHECK(Socks5Resolve("seed.example.", creds, StaticContentsSock{auth_ok + ipv4_reply}, std::chrono::steady_clock::now() + std::chrono::seconds{10}).has_value());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(socks5_exchange_deadline_is_cumulative)
+{
+    using namespace std::chrono_literals;
+    // A proxy that answers each SOCKS5 stage within its own timeout but is slow enough that the
+    // stages together run past the absolute exchange deadline: the exchange must fail, and no
+    // further stage is sent once the deadline has passed.
+    struct SlowSock : StaticContentsSock {
+        SlowSock(const std::string& contents, std::chrono::milliseconds step) : StaticContentsSock{contents}, m_step{step} {}
+        SlowSock& operator=(Sock&&) override { assert(false && "Move of Sock into SlowSock not allowed."); return *this; }
+        ssize_t Recv(void* buf, size_t len, int flags) const override
+        {
+            std::this_thread::sleep_for(m_step);
+            return StaticContentsSock::Recv(buf, len, flags);
+        }
+        ssize_t Send(const void*, size_t len, int) const override
+        {
+            std::this_thread::sleep_for(m_step);
+            ++m_sends;
+            return static_cast<ssize_t>(len);
+        }
+        const std::chrono::milliseconds m_step;
+        mutable int m_sends{0};
+    };
+    const ProxyCredentials creds{"user", "pass"};
+    const std::string auth_ok("\x05\x02\x01\x00", 4);
+    const std::string ipv4_reply("\x05\x00\x00\x01\x01\x02\x03\x04\x00\x00", 10);
+    const std::string canned{auth_ok + ipv4_reply};
+    const auto step{20ms}; // each stage is well within the 8 s (or larger) per-stage timeout
+
+    // With no deadline the slow exchange still completes: greeting, auth and request are all sent.
+    int sends_completing{0};
+    {
+        SlowSock sock{canned, step};
+        BOOST_CHECK(Socks5Resolve("seed.example.", creds, sock).has_value());
+        sends_completing = sock.m_sends;
+        BOOST_CHECK(sends_completing >= 3);
+    }
+    // A deadline shorter than the whole exchange but longer than any single stage: it fails, and
+    // strictly fewer sends happen because the exchange stops once the deadline has passed.
+    {
+        SlowSock sock{canned, step};
+        const auto deadline{std::chrono::steady_clock::now() + 50ms};
+        BOOST_CHECK(!Socks5Resolve("seed.example.", creds, sock, deadline).has_value());
+        BOOST_CHECK(sock.m_sends >= 1);                  // the greeting still went out
+        BOOST_CHECK(sock.m_sends < sends_completing);    // but a later stage was cut at the deadline
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

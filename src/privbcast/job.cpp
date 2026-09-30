@@ -180,9 +180,6 @@ UniValue DiscoveryJson(const DiscoveryResult& discovery, bool addresses)
         for (const Candidate& c : discovery.onion) onion.push_back(c.addr.ToStringAddrPort());
         out.pushKV("onion", std::move(onion));
     }
-    UniValue tie{UniValue::VARR};
-    for (const size_t i : discovery.tie_order) tie.push_back(static_cast<uint64_t>(i));
-    out.pushKV("tie_order", std::move(tie));
     out.pushKV("duplicates", discovery.duplicates);
     out.pushKV("rejected", discovery.rejected);
     out.pushKV("exit_path_candidates", static_cast<uint64_t>(discovery.NumExitPath()));

@@ -94,12 +94,14 @@ static RPCMethod sendrawtransaction()
         "job starts, with no reaction to what the network does. This provides best-effort\n"
         "concealment of the transaction's origin. Private broadcast is experimental and may\n"
         "change in future releases. The transaction will only enter the local mempool when it\n"
-        "is received back from the network. The queue is bounded: when it is full, this RPC\n"
-        "fails and the transaction is not queued. Jobs start in submission order, at least " +
+        "is received back from the network. If the mempool already has a transaction with the\n"
+        "same txid, the given one is queued as it is, without being checked. The queue is\n"
+        "bounded: when it is full, or networking is off, this RPC fails and the transaction is\n"
+        "not queued. Jobs start in submission order, at least " +
             strprintf("%d to %d\n", count_seconds(node::PrivateBroadcastManager::START_SPACING_MIN), count_seconds(node::PrivateBroadcastManager::START_SPACING_MAX)) +
-        "seconds apart, and a transaction whose job is still queued or running is not queued\n"
-        "again. A job runs until its fixed schedule has run, at most ten minutes. Success\n"
-        "means only that the job was queued: a job does not retry, so if\n"
+        "seconds apart, and a transaction whose job (matched by wtxid) is still queued or\n"
+        "running is not queued again. A job runs until its fixed schedule has run, at most ten\n"
+        "minutes. Success means only that the job was queued: a job does not retry, so if\n"
         "getprivatebroadcastinfo shows it finished with announced false, submit the\n"
         "transaction again. Use getprivatebroadcastinfo to inspect the jobs and their\n"
         "reports, and abortprivatebroadcast to abort one.\n"
@@ -211,7 +213,10 @@ static RPCMethod getprivatebroadcastinfo()
 {
     return RPCMethod{
         "getprivatebroadcastinfo",
-        "Returns the private broadcast jobs: queued, running, and the most recent finished ones.\n"
+        "Returns the private broadcast jobs: the most recent finished ones (up to " +
+            strprintf("%d", node::PrivateBroadcastManager::MAX_FINISHED_JOBS) +
+        ", oldest first),\n"
+        "then the running and the queued ones, in order. Jobs are kept in memory only.\n"
         "A job is one bounded broadcast of one transaction; it is done when its fixed schedule has run,\n"
         "which says nothing about whether the network accepted the transaction. seen_in_mempool is when\n"
         "this node's own mempool first accepted the transaction, from any source.\n"
@@ -232,7 +237,7 @@ static RPCMethod getprivatebroadcastinfo()
                                 {RPCResult::Type::NUM_TIME, "time_started", /*optional=*/true, "When the job started (seconds since epoch)"},
                                 {RPCResult::Type::NUM_TIME, "time_ended", /*optional=*/true, "When the job ended (seconds since epoch)"},
                                 {RPCResult::Type::NUM_TIME, "seen_in_mempool", /*optional=*/true, "When this node's mempool first accepted the transaction after the job was queued (seconds since epoch); absent for one already in the mempool then"},
-                                {RPCResult::Type::STR, "error", /*optional=*/true, "Why the job could not run"},
+                                {RPCResult::Type::STR, "error", /*optional=*/true, "Why the job could not run, or what stopped it: networking being disabled, or still running at the ten-minute cap"},
                                 {RPCResult::Type::OBJ, "progress", /*optional=*/true, "How far a running job has got",
                                     {
                                         {RPCResult::Type::BOOL, "discovery_done", "Whether the peers to announce to have been chosen"},
@@ -1560,8 +1565,9 @@ static RPCMethod submitpackage()
         "is test-accepted on its own, as sendrawtransaction does, so it may replace a mempool transaction. A new parent\n"
         "that fails on its own only for its fee (TX_RECONSIDERABLE) is allowed, with the child left unvalidated, since a\n"
         "test accept applies no package feerate: the fees are still worked out, maxfeerate holds for the child and the\n"
-        "package must meet the mempool's minimum feerate, but a child that is otherwise invalid is still sent.\n"
-        "package_msg is then \"parent-reconsiderable\". The job is listed by getprivatebroadcastinfo.\n"
+        "package must pay at least the higher of the mempool minimum feerate and the minimum relay feerate, but a child\n"
+        "that is otherwise invalid is still sent. package_msg is then \"parent-reconsiderable\". A package whose job is\n"
+        "already queued or running queues nothing more. The job is listed by getprivatebroadcastinfo.\n"
         ,
         {
             {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.\n"

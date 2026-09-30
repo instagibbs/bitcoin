@@ -139,6 +139,14 @@ class SignetBasicTest(BitcoinTestFramework):
         self.nodes[0].assert_start_raises_init_error(extra_args=["-signetchallenge=abc"], expected_msg="Error: -signetchallenge must be hex, not 'abc'.")
         self.nodes[0].assert_start_raises_init_error(extra_args=["-signetchallenge=abc"] * 2, expected_msg="Error: -signetchallenge cannot be multiple values.")
 
+        self.log.info("Private broadcast's regtest-only options are refused on signet")
+        args = self.signets[0].shared_args + ["-privatebroadcast", "-onion=127.0.0.1:9050"]
+        onion = "a4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dwc6ad.onion"
+        for option in ("-privatebroadcastseed=a.seed.", f"-privatebroadcastfixedseed={onion}:38333"):
+            self.nodes[0].assert_start_raises_init_error(extra_args=args + [option], expected_msg=None)
+        self.start_node(0, extra_args=args)  # without them it starts
+        self.stop_node(0)
+
 
     def test_cli_signetchallenge_hint(self):
         if not self.is_cli_compiled():

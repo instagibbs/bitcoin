@@ -15,6 +15,9 @@ The clock is mocked on both nodes: setmocktime moves a job's schedule (a job run
 clock) together with the recipient's own timers (its request delays, its INV trickle). A job is
 driven to its delivery start, where its prompt slots announce over real sockets in real time, and
 then past its last opportunity; whatever the mid and late slots have not reached by then is missed.
+While it waits on the network, the test ticks the clock a second per poll, some twenty seconds a
+second, so a prompt attempt has a few real seconds to get through the proxy, BIP324 and VERSION
+before its 45 s handshake budget runs out.
 """
 import base64
 from decimal import Decimal
@@ -26,6 +29,7 @@ from test_framework.address import address_to_scriptpubkey
 from test_framework.messages import (
     CInv,
     MSG_WTX,
+    NODE_WITNESS,
     msg_getdata,
     msg_tx,
     tx_from_hex,
@@ -55,6 +59,12 @@ SCHEDULED_BOUND_S = 568  # no opportunity opens later than this after the job
 START_SPACING_MIN_S = 35
 START_SPACING_MAX_S = 55
 MAX_FINISHED_JOBS = 100
+MID_MIN_S, MID_MAX_S = 35, 180
+LATE_MIN_S, LATE_MAX_S = 185, 240
+BACKUP_MIN_S, BACKUP_MAX_S = 50, 60
+PRIMARY_SEPARATION_S = 5
+PRIVATE_VERSION = 70017
+PRIVATE_USER_AGENT = "/pynode:0.0.1/"
 
 
 def make_onion(seed: int) -> str:
@@ -94,10 +104,10 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
     def setup_nodes(self):
         self.listeners = {}
         self.lock = threading.Lock()
-        self.exit_path = [f"11.22.33.{i}" for i in range(1, 9)]  # routable, as discovery requires
+        self.exit_path = [f"11.22.33.{i}" for i in range(1, 13)]  # routable, as discovery requires
         self.onions = [make_onion(i) for i in range(1, 4)]
         # The seed answers the bitcoind recipient's endpoints unless a section says otherwise, so a
-        # job's prompt exit-path slots reach it; the last two endpoints are Python recipients.
+        # job's prompt exit-path slots reach it; the other six endpoints are Python recipients.
         node_endpoints = set(self.exit_path[:6])
 
         self.resolve_count = 0
@@ -141,6 +151,41 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         ]
         super().setup_nodes()
 
+    def check_wire(self, wtxid):
+        """Every Python recipient so far saw the profile tool_privbcast.py checks for the tool: the fixed
+        VERSION, one INV naming the job's wtxid, and only the messages the profile sends."""
+        with self.lock:
+            listeners = [listener for ls in self.listeners.values() for listener in ls if "version" in listener.last_message]
+        assert listeners
+        for listener in listeners:
+            v = listener.last_message["version"]
+            assert_equal((v.nVersion, v.nServices, v.strSubVer), (PRIVATE_VERSION, NODE_WITNESS, PRIVATE_USER_AGENT))
+            assert_equal((v.nTime, v.nStartingHeight, v.relay), (0, 0, 0))
+            assert_equal((v.addrTo.ip, v.addrTo.port, v.addrTo.nServices), ("0.0.0.0", 0, 0))
+            assert_equal((v.addrFrom.ip, v.addrFrom.port, v.addrFrom.nServices), ("0.0.0.0", 0, NODE_WITNESS))
+            assert set(listener.last_message) <= {"version", "wtxidrelay", "verack", "inv", "tx", "ping"}, listener.last_message
+            inv = listener.last_message.get("inv")
+            if inv is not None:
+                assert_equal([(i.type, i.hash) for i in inv.inv], [(MSG_WTX, int(wtxid, 16))])
+
+    @staticmethod
+    def check_schedule(report):
+        """The schedule's shape, as tool_privbcast.py checks it for the tool, unscaled."""
+        delivery_ms = DISCOVERY_WINDOW_S * 1000
+        late = []
+        for slot in report["slots"]:
+            sched = slot["scheduled_ms"]
+            if slot["stratum"] == "prompt":
+                assert_equal(sched[0], delivery_ms)
+            else:
+                lo, hi = (MID_MIN_S, MID_MAX_S) if slot["stratum"] == "mid" else (LATE_MIN_S, LATE_MAX_S)
+                assert delivery_ms + lo * 1000 <= sched[0] <= delivery_ms + hi * 1000, sched
+            if slot["stratum"] == "late":
+                late.append(sched[0])
+            for k in range(1, len(sched)):
+                assert BACKUP_MIN_S * 1000 <= sched[k] - sched[k - 1] <= BACKUP_MAX_S * 1000, sched
+        assert_greater_than_or_equal(abs(late[0] - late[1]), PRIMARY_SEPARATION_S * 1000)
+
     def node_state(self):
         """What a job must leave alone: the node's peers, bans and address manager."""
         return sorted(p["addr"] for p in self.nodes[0].getpeerinfo()), self.nodes[0].listbanned(), self.nodes[0].getaddrmaninfo()
@@ -176,7 +221,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
     def start_delivery(self, batch):
         """Take the running jobs (they started together, on the frozen clock) to their delivery start
         once their discovery is over: the prompt slots then dial in real time."""
-        # A submission only queues the job and wakes a worker, which starts it a moment later.
+        # A submission only queues the job, which starts a moment later.
         self.wait_until(lambda: sorted(batch) == sorted(i for i, j in self.jobs().items() if j["state"] == "running"))
         jobs = self.jobs()
         starts = {jobs[i]["time_started"] for i in batch}
@@ -199,7 +244,10 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
     def wait_for_prompt_slots(self, batch):
         """Tick until every prompt slot's first opportunity has ended: dialled and over, missed, or
         without a candidate. No later opportunity is due for another 35 s of the schedule."""
-        self.tick_until(lambda: all(self.progress(i)["opportunities_ended"] >= PROMPT_SLOTS for i in batch))
+        def over():
+            jobs = self.jobs()
+            return all(jobs[i]["state"] != "running" or jobs[i]["progress"]["opportunities_ended"] >= PROMPT_SLOTS for i in batch)
+        self.tick_until(over)
 
     def end_jobs(self, batch):
         """Jump past the last opportunity of these jobs and wait for them to end."""
@@ -455,6 +503,9 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.wait_until(lambda: "seen_in_mempool" in self.jobs()[first])
         served = [a for s in report["slots"] for a in s["attempts"] if a["tx_written_ms"] is not None]
         assert_greater_than_or_equal(len(served), 1)
+        # The job is the tool's: its recipients saw the tool's profile, and its schedule has the tool's shape.
+        self.check_wire(tx["wtxid"])
+        self.check_schedule(report)
 
         self.log.info("Queued jobs start a drawn spacing after the previous start, whatever has ended; queued and running jobs can be aborted")
         txs = [self.wallet.create_self_transfer() for _ in range(3)]
@@ -471,7 +522,11 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         job = self.wait_for_state(w[0], "aborted", timeout=30)
         assert_equal(job["report"]["summary"]["interrupted"], True)
         assert_equal(job["announced"], False)  # stopped before delivery start: no INV written
+        never_announced = txs[0]
+        # Just short of the minimum spacing the next job still waits, however long the node has had to
+        # notice the clock: it must within a second.
         self.advance(started + START_SPACING_MIN_S - 1 - self.mocktime)
+        time.sleep(2)
         assert_equal(self.jobs()[w[1]]["state"], "queued")
         # Once the spacing has passed the next job starts, and the one after it starts while it still runs.
         self.open_gate()
@@ -521,8 +576,8 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.wait_for_state(w[0], "running")
         assert_equal(self.jobs()[w[1]]["state"], "queued")
         # Only node0's clock moves back, then ticks until the next job starts; end_jobs then puts both
-        # nodes' clocks in step again. The gate is pulled in when a worker next reads the clock, a few
-        # ticks at most after the step, so the start comes one maximum spacing after that.
+        # nodes' clocks in step again. The node notices the step within a few ticks, and the next start
+        # comes a spacing after that.
         back = self.mocktime - 3600
         clock = back
 
@@ -535,7 +590,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             return False
         self.wait_until(tick)
         started = self.jobs()[w[1]]["time_started"]
-        assert back + START_SPACING_MAX_S <= started <= back + 2 * START_SPACING_MAX_S, started - back
+        assert back + START_SPACING_MIN_S <= started <= back + 2 * START_SPACING_MAX_S, started - back
         self.end_jobs(w)
 
         self.log.info("Receipt from the network while a job runs is recorded, and does not stop the job")
@@ -552,10 +607,22 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         progress = self.progress(job_id)
         assert_greater_than_or_equal(progress["connections"], 1)
         assert_greater_than_or_equal(progress["announcements_written"], 1)
+        # Announced only by the job, it is in neither node's mempool yet.
+        for node in self.nodes:
+            assert seen["txid"] not in node.getrawmempool()
+        assert "seen_in_mempool" not in self.jobs()[job_id]
         self.nodes[1].sendrawtransaction(seen["hex"])
         self.tick_until(lambda: seen["txid"] in self.nodes[0].getrawmempool())  # the job's late slots are still ahead
         self.wait_until(lambda: "seen_in_mempool" in self.jobs()[job_id])
         assert_equal(self.jobs()[job_id]["state"], "running")
+        # Nothing about the job changes: it keeps running, and its later slots still dial.
+        dialled = self.progress(job_id)["connections"]
+
+        def dialled_again():
+            job = self.jobs()[job_id]
+            assert_equal(job["state"], "running")
+            return job["progress"]["connections"] > dialled
+        self.tick_until(dialled_again)
         job = self.end_jobs([job_id])[0]
         assert_equal(job["announced"], True)
         assert_equal(job["report"]["summary"]["interrupted"], False)
@@ -564,7 +631,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             self.exit_path_active = self.exit_path[:6]
 
 
-        self.log.info("A copy whose txid is in the mempool with another witness is its own job, sent as given")
+        self.log.info("A copy whose txid is in the mempool with another witness is its own job, and is sent as given")
         tx = self.wallet.create_self_transfer()
         self.nodes[0].add_p2p_connection(P2PInterface()).send_and_ping(msg_tx(tx["tx"]))
         other = tx_from_hex(tx["hex"])
@@ -573,9 +640,17 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_equal(self.nodes[0].sendrawtransaction(tx["hex"]), tx["txid"])
         assert_equal(self.nodes[0].sendrawtransaction(other.serialize().hex()), tx["txid"])
         live = {j["wtxid"] for j in self.entries() if j["state"] in ("queued", "running")}
-        assert {tx["wtxid"], other.wtxid_hex} <= live, live  # keyed by wtxid, and each sent as given
-        for w in (tx["wtxid"], other.wtxid_hex):
-            self.nodes[0].abortprivatebroadcast(w)
+        assert {tx["wtxid"], other.wtxid_hex} <= live, live  # keyed by wtxid
+        self.nodes[0].abortprivatebroadcast(tx["wtxid"])
+        # The variant's job announces to Python recipients only: each that asked got the bytes submitted.
+        with self.lock:
+            self.exit_path_active = self.exit_path[6:]
+            before = {e: len(ls) for e, ls in self.listeners.items()}
+        self.finish([other.wtxid_hex])
+        with self.lock:
+            sent = {t.serialize() for e, ls in self.listeners.items() for listener in ls[before.get(e, 0):] for t in listener.txs_received}
+            self.exit_path_active = self.exit_path[:6]
+        assert_equal(sent, {other.serialize()})
         self.nodes[0].disconnect_p2ps()
         self.open_gate()
 
@@ -587,8 +662,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.wait_for_state(ids[1], "running")
         assert_equal(self.jobs()[ids[-1]]["state"], "queued")
         self.nodes[0].setnetworkactive(False)
-        # Every job reads the flag itself: the queued one at the gate, the running ones at their next
-        # interruption check. Networking stays off until all of them have ended.
+        # Running and queued jobs all end within N6's bound. Networking stays off until they have.
         for i in ids:
             job = self.wait_for_state(i, "aborted", timeout=30)
             assert "error" in job
@@ -639,6 +713,36 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_greater_than_or_equal(streams, 20)
         assert_equal(len(creds), streams)
 
+
+        # The job stopped before it announced, many sections ago, left its transaction out of the
+        # mempool for good.
+        assert never_announced["txid"] not in self.nodes[0].getrawmempool()
+
+        self.log.info("Discovery ignores node state: a banned address and one of the node's own addresses are still dialled")
+        own, banned = self.exit_path[10], self.exit_path[11]
+        self.restart_node(0, extra_args=self.extra_args[0] + [f"-externalip={own}"])
+        self.advance(0)
+        self.nodes[0].setban(banned, "add")
+        with self.lock:
+            self.exit_path_active = [own, banned]
+            before = {e: len(self.listeners.get(e, [])) for e in (own, banned)}
+        t = self.wallet.create_self_transfer()
+        job_id = self.jobs_after_submit(t["hex"])
+        self.start_delivery([job_id])
+        self.tick_until(lambda: all(len(self.listeners.get(e, [])) > before[e] for e in (own, banned)))
+        report = self.end_jobs([job_id])[0]["report"]
+        assert {f"{own}:18444", f"{banned}:18444"} <= {a["endpoint"] for s in report["slots"] for a in s["attempts"]}
+        # Nothing brings the transaction back here (Python recipients, and the node has no peer), so it
+        # is not in the mempool, during the job or after it.
+        assert t["txid"] not in self.nodes[0].getrawmempool()
+        self.nodes[0].setban(banned, "remove")
+        with self.lock:
+            self.exit_path_active = self.exit_path[:6]
+
+        self.log.info("With no proxy yet, though onion can become reachable through Tor control, submissions fail")
+        self.restart_node(0, extra_args=[a for a in self.extra_args[0] if not a.startswith("-onion=")] + ["-listenonion=1", "-torcontrol=127.0.0.1:1"])
+        self.advance(0)
+        assert_raises_rpc_error(-1, None, self.nodes[0].sendrawtransaction, self.wallet.create_self_transfer()["hex"])
 
         self.log.info("Jobs are kept in memory only; the default log names no transaction or peer; peer settings do not apply")
         self.restart_node(0, extra_args=self.extra_args[0] + ["-debug=none", "-onlynet=onion", "-dnsseed=0", "-fixedseeds=0"])

@@ -21,6 +21,8 @@ import subprocess
 import threading
 import time
 
+from test_framework.crypto.ellswift import xswiftec
+from test_framework.crypto.secp256k1 import FE
 from test_framework.messages import (
     CInv,
     MSG_TX,
@@ -30,8 +32,11 @@ from test_framework.messages import (
     msg_getdata,
     msg_inv,
     msg_notfound,
+    msg_ping,
+    msg_pong,
     msg_sendtxrcncl,
     msg_tx,
+    msg_wtxidrelay,
     tx_from_hex,
 )
 from test_framework.netutil import format_addr_port
@@ -39,6 +44,7 @@ from test_framework.p2p import (
     P2PInterface,
     P2P_SERVICES,
     P2P_SUBVERSION,
+    P2P_VERSION,
     start_p2p_listener,
 )
 from test_framework.socks5 import (
@@ -80,6 +86,15 @@ PRIMARY_SEPARATION_S = 5
 PARENT_HOLD_S = 30
 MAX_RECV_BYTES = 128 * 1024
 MAX_STANDARD_TX_WEIGHT = 400_000
+MAX_STDIN_BYTES = 8_004_096
+# A package recipient asks for the child this long after the INV: past the point where the parent hold
+# would still fit before the request window's last PONG_WAIT, and before that point itself.
+LATE_CHILD_REQUEST_S = (REQUEST_WINDOW_S - PONG_WAIT_S - PARENT_HOLD_S / 2) / TIME_DIVISOR
+
+
+def ellswift_x(encoding):
+    """The x coordinate a BIP324 public key encoding stands for: every encoding of one key gives the same."""
+    return xswiftec(FE(int.from_bytes(encoding[:32], "big")), FE(int.from_bytes(encoding[32:], "big"))).to_bytes()
 
 
 def make_onion(seed: int) -> str:
@@ -153,6 +168,47 @@ class NoWtxidRecipient(Recipient):
         self.wtxidrelay = False
 
 
+class LateWtxidRecipient(NoWtxidRecipient):
+    """Sends WTXIDRELAY only after its VERACK, too late for BIP339: the tool must leave it unannounced."""
+
+    def on_version(self, message):
+        super().on_version(message)
+        self.send_without_ping(msg_wtxidrelay())
+
+
+class WrongNoncePongRecipient(Recipient):
+    """Requests and receives X, then answers the PING with another nonce, which answers nothing."""
+
+    def on_ping(self, message):
+        self.ping_nonces.append(message.nonce)
+        self.send_without_ping(msg_pong(message.nonce ^ 1))
+
+
+class EarlyRequestRecipient(Recipient):
+    """Asks for X by wtxid right after its VERSION, before any announcement, and never again: the early
+    request must be ignored, not remembered."""
+
+    def __init__(self, wtxid):
+        super().__init__()
+        self.wtxid = wtxid
+
+    def on_version(self, message):
+        self.send_version()
+        self.request([self.wtxid])
+        super().on_version(message)
+
+    def on_inv(self, message):
+        self.invs_received += 1
+
+
+class PingingRecipient(Recipient):
+    """Sends a PING of its own after its VERACK: the tool answers nothing its profile does not send."""
+
+    def on_version(self, message):
+        super().on_version(message)
+        self.send_without_ping(msg_ping(nonce=1))
+
+
 class ProbingRecipient(Recipient):
     """Sends requests the profile does not allow, repeats the request after the transfer, and
     sends a late SENDTXRCNCL. None of it may be answered or change the tool's behaviour."""
@@ -171,7 +227,7 @@ class ProbingRecipient(Recipient):
 
 class WrongFormRecipient(Recipient):
     """Asks for the announced transaction only in forms E5 does not answer: by its wtxid as MSG_WITNESS_TX
-    and as MSG_TX, and twice in one request. It must never be served."""
+    and as MSG_TX, twice in one request, and as MSG_WTX naming another hash. It must never be served."""
 
     def on_inv(self, message):
         self.invs_received += 1
@@ -179,6 +235,7 @@ class WrongFormRecipient(Recipient):
         self.request(hashes, inv_type=MSG_WITNESS_TX)
         self.request(hashes, inv_type=MSG_TX)
         self.request(hashes * 2)
+        self.request([h ^ 1 for h in hashes])
 
 
 class OldVersionRecipient(Recipient):
@@ -198,20 +255,22 @@ class NoWitnessRecipient(Recipient):
 
 class FloodingRecipient(Recipient):
     """Floods the connection with announcements once the handshake is done, well past the receive cap."""
+    MESSAGES = 10  # about 36 kB each
 
     def on_verack(self, message):
         super().on_verack(message)
-        junk = msg_inv([CInv(MSG_TX, i) for i in range(1, 1001)])  # about 36 kB each
-        for _ in range(6):
+        junk = msg_inv([CInv(MSG_TX, i) for i in range(1, 1001)])
+        for _ in range(self.MESSAGES):
             self.send_without_ping(junk)
 
 
 class PackageRecipient(Recipient):
     """A recipient in package mode that knows the parent's and child's ids."""
 
-    def __init__(self, parent_txid, child_txid, child_wtxid):
+    def __init__(self, parent_txid, parent_wtxid, child_txid, child_wtxid):
         super().__init__()
-        self.parent_txid, self.child_txid, self.child_wtxid = parent_txid, child_txid, child_wtxid
+        self.parent_txid, self.parent_wtxid = parent_txid, parent_wtxid
+        self.child_txid, self.child_wtxid = child_txid, child_wtxid
 
 
 class BatchedParentRecipient(PackageRecipient):
@@ -234,7 +293,9 @@ class BatchedParentRecipient(PackageRecipient):
 
 class BothNamedRecipient(PackageRecipient):
     """Asks for the child and the parent in one request before anything was served, which the tool must
-    ignore outright, then for the child alone, then for the parent."""
+    ignore outright, then for the child alone, then for the parent. Once it has the parent it asks for
+    it again, with a transaction the tool does not have: after the parent phase nothing more is served
+    and no NOTFOUND is sent."""
 
     def on_inv(self, message):
         self.invs_received += 1
@@ -245,6 +306,26 @@ class BothNamedRecipient(PackageRecipient):
         super().on_tx(message)
         if len(self.txs_received) == 1:
             self.send_without_ping(msg_getdata([CInv(MSG_WITNESS_TX, self.parent_txid)]))
+        elif len(self.txs_received) == 2:
+            self.send_without_ping(msg_getdata([CInv(MSG_WITNESS_TX, self.parent_txid), CInv(MSG_WITNESS_TX, 0x2000)]))
+
+
+class ParentWrongFormRecipient(PackageRecipient):
+    """After the child, asks for the parent only in forms F2 does not answer: as MSG_TX by txid and as
+    MSG_WTX by wtxid. It is never sent the parent, and gets no NOTFOUND: both name the job's own parent."""
+
+    def on_tx(self, message):
+        super().on_tx(message)
+        self.send_without_ping(msg_getdata([CInv(MSG_TX, self.parent_txid)]))
+        self.send_without_ping(msg_getdata([CInv(MSG_WTX, self.parent_wtxid)]))
+
+
+class LateChildRecipient(PackageRecipient):
+    """Asks for the child late in the request window and never for the parent."""
+
+    def on_inv(self, message):
+        self.invs_received += 1
+        threading.Timer(LATE_CHILD_REQUEST_S, self.request, args=([self.child_wtxid],)).start()
 
 
 class RecordingV2State(EncryptedP2PState):
@@ -359,6 +440,7 @@ class ToolPrivbcast(BitcoinTestFramework):
     def run_tool(self, *extra, stdin="", expected_rc=0, chain="-regtest", timeout=240):
         argv = self.tool_argv(*extra, chain=chain)
         self.log.debug(f"running {argv}")
+        timeout *= self.options.timeout_factor
         try:
             proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -373,7 +455,7 @@ class ToolPrivbcast(BitcoinTestFramework):
         proc = self.run_tool(f"-timedivisor={time_divisor}", *extra, "send", stdin=tx_hex, expected_rc=expected_rc)
         return json.loads(proc.stdout), proc
 
-    def start_send(self, tx_hex, *extra):
+    def start_send(self, tx_hex, *extra, time_divisor=TIME_DIVISOR):
         """Start a send job in the background (transaction from a file, so the process owns no pipe)."""
         path = os.path.join(self.options.tmpdir, f"send_{len(os.listdir(self.options.tmpdir))}.hex")
         with open(path, "w", encoding="utf8") as f:
@@ -381,13 +463,13 @@ class ToolPrivbcast(BitcoinTestFramework):
         # Its own process group on Windows, so that interrupt() can target it alone with Ctrl-Break.
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == "Windows" else 0
         with open(path, encoding="utf8") as stdin:
-            return subprocess.Popen(self.tool_argv(f"-timedivisor={TIME_DIVISOR}", *extra, "send"),
+            return subprocess.Popen(self.tool_argv(f"-timedivisor={time_divisor}", *extra, "send"),
                                     stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                     creationflags=creationflags)
 
     def finish_send(self, proc):
         """Wait for a background send job; returns (returncode, report)."""
-        out, err = proc.communicate(timeout=60)
+        out, err = proc.communicate(timeout=60 * self.options.timeout_factor)
         for line in err.splitlines():
             self.log.debug(f"tool stderr: {line}")
         return proc.returncode, json.loads(out)
@@ -425,6 +507,7 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.test_socks_auth_required()
         self.test_not_tor_proxy()
         self.test_unsuitable_peers()
+        self.test_peer_deviations()
         self.test_assignment()
         self.test_slow_resolve()
         self.test_interrupt_blocked_resolve()
@@ -434,39 +517,78 @@ class ToolPrivbcast(BitcoinTestFramework):
     def test_argument_errors(self):
         self.log.info("Argument and input errors: exit status 1, found before any network activity")
         # Messages are for people and are not checked. Each case is built so that only one check can
-        # fail, and one that got past its check would reach the proxy or run far longer.
-        self.start_proxy({}, {})
+        # fail, and a job that ran anyway would query a seed through the proxy at once: a.seed. on
+        # regtest, the chain's own seeds elsewhere.
+        self.start_proxy({"a.seed.": ["9.0.2.1"]}, {})
+        timeout = 20 * self.options.timeout_factor
+
+        def refused(*args, stdin, chain="-regtest"):
+            try:
+                rc = subprocess.run(self.tool_argv(*args, chain=chain), input=stdin, capture_output=True,
+                                    text=True, timeout=timeout).returncode
+            except subprocess.TimeoutExpired:
+                rc = None
+            assert_equal(self.drain_socks_commands(), [])
+            assert_equal(rc, 1)
+
         tx_hex = self.wallet.create_self_transfer()["hex"]
-        self.run_tool("send", stdin="zz", expected_rc=1, timeout=20)
-        self.run_tool("send", stdin="", expected_rc=1, timeout=20)
+        refused("-seed=a.seed.", "send", stdin="zz")
+        refused("-seed=a.seed.", "send", stdin="")
         # Two transactions must be a parent and its child; the same one twice is refused too.
         other_hex = self.wallet.create_self_transfer()["hex"]
-        self.run_tool("send", stdin=f"{tx_hex}\n{other_hex}", expected_rc=1, timeout=20)
-        self.run_tool("send", stdin=f"{tx_hex} {tx_hex}", expected_rc=1, timeout=20)
+        refused("-seed=a.seed.", "send", stdin=f"{tx_hex}\n{other_hex}")
+        refused("-seed=a.seed.", "send", stdin=f"{tx_hex} {tx_hex}")
         # Regtest-only flags are refused elsewhere.
-        self.run_tool("-seed=a.seed.", "send", stdin=tx_hex, expected_rc=1, chain="-signet", timeout=20)
-        self.run_tool(f"-timedivisor={TIME_DIVISOR}", "send", stdin=tx_hex, expected_rc=1, chain="-chain=main", timeout=20)
+        refused("-seed=a.seed.", "send", stdin=tx_hex, chain="-signet")
+        refused(f"-fixedseed={make_onion(3)}:{REGTEST_PORT}", "send", stdin=tx_hex, chain="-signet")
+        refused(f"-timedivisor={TIME_DIVISOR}", "send", stdin=tx_hex, chain="-chain=main")
+        # No command, or an unknown one, is an error.
+        refused("-seed=a.seed.", stdin=tx_hex)
+        refused("-seed=a.seed.", "frobnicate", stdin=tx_hex)
+        # stdin is read up to its bound and no further: input still open past the bound is refused
+        # without waiting for its end.
+        proc = subprocess.Popen(self.tool_argv("-seed=a.seed.", "send"), stdin=subprocess.PIPE,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def feed():
+            try:
+                proc.stdin.write((tx_hex + " " * MAX_STDIN_BYTES).encode())
+                proc.stdin.flush()
+            except OSError:
+                pass  # the tool stopped reading
+        writer = threading.Thread(target=feed)
+        writer.start()
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            rc = None
+        writer.join()
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        assert_equal(self.drain_socks_commands(), [])
+        assert_equal(rc, 1)
         # A remote SOCKS listener is refused.
         argv = self.get_binaries().privbcast_argv() + ["-regtest", "-tor=10.1.2.3:9050", "send"]
         try:
-            proc = subprocess.run(argv, input=tx_hex, capture_output=True, text=True, timeout=20)
+            proc = subprocess.run(argv, input=tx_hex, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise AssertionError("a remote -tor must be refused before any network activity")
         assert_equal(proc.returncode, 1)
-        # No command, or an unknown one, is an error; no arguments at all prints the usage.
-        self.run_tool(stdin=tx_hex, expected_rc=1, timeout=20)
-        self.run_tool("frobnicate", stdin=tx_hex, expected_rc=1, timeout=20)
-        proc = subprocess.run(self.get_binaries().privbcast_argv(), capture_output=True, text=True, timeout=60)
+        # No arguments at all prints the usage.
+        proc = subprocess.run(self.get_binaries().privbcast_argv(), capture_output=True, text=True, timeout=3 * timeout)
         assert_equal(proc.returncode, 1)
         assert proc.stdout
-        assert_equal(self.drain_socks_commands(), [])
         self.stop_proxy()
 
     def test_bounded_job(self):
         self.log.info("A complete job against scripted recipients")
         # Half the usual pace: discovery opens twelve SOCKS streams at once, and a loaded CI host
-        # (Windows) has taken over the 0.8 s stage timeout that TIME_DIVISOR leaves a RESOLVE to
-        # answer its method selection. This section counts every query, so it gets 1.6 s.
+        # (Windows) has been slow enough at TIME_DIVISOR to cost a query. This section counts every
+        # query.
         divisor = 5
         # Every candidate of a seed shares one behaviour, and the four exit-path primaries cover
         # all three seeds whatever the tie order, so each behaviour is exercised on every run
@@ -542,6 +664,9 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(len(set(creds)), len(creds))
         for _, a in self.attempts(report):
             assert a["endpoint"].endswith(f":{REGTEST_PORT}")
+            # The peer's protocol version and user agent, as it sent them.
+            if a["peer_version"] is not None:
+                assert_equal((a["peer_version"], a["peer_user_agent"]), (P2P_VERSION, P2P_SUBVERSION))
 
         # What follows assumes the host kept up: every query reached the proxy and no opportunity
         # was missed. A CI host that stalled reports otherwise; the tool's answer to a stall (skip
@@ -585,6 +710,10 @@ class ToolPrivbcast(BitcoinTestFramework):
                     # Ended when the request window ran out.
                     assert -5 <= a["ended_ms"] - a["inv_handed_ms"] - REQUEST_WINDOW_S * 1000 / divisor <= 1000, a
             assert_equal(seeds_attempted, set(resolve_script))
+            # Two onions: each onion slot's first attempt is one of them (R5a, R5c).
+            for s in report["slots"]:
+                if s["class"] == "onion":
+                    assert_equal(s["attempts"][0]["source"], "bundled")
             # A refused primary is replaced at the slot's next opportunity by a candidate from another seed.
             replaced = [s for s in report["slots"]
                         if s["class"] == "exit_path" and s["attempts"] and s["attempts"][0]["provenance"] == "b.seed."]
@@ -630,7 +759,7 @@ class ToolPrivbcast(BitcoinTestFramework):
         for listener, _, _ in self.listeners.values():
             state = getattr(listener, "v2_state", None)
             if state is not None and state.peer_ellswift is not None:
-                keys.append(state.peer_ellswift)
+                keys.append(ellswift_x(state.peer_ellswift))
             if "version" in listener.last_message:
                 version_nonces.append(listener.last_message["version"].nNonce)
             ping_nonces.extend(listener.ping_nonces)
@@ -652,7 +781,8 @@ class ToolPrivbcast(BitcoinTestFramework):
             assert_equal(v.relay, 0)
             assert_equal(v.nStartingHeight, 0)
             assert_equal(v.nTime, 0)
-            assert_equal(v.addrFrom.nServices, NODE_WITNESS)
+            assert_equal((v.addrFrom.ip, v.addrFrom.port, v.addrFrom.nServices), ("0.0.0.0", 0, NODE_WITNESS))
+            assert_equal((v.addrTo.ip, v.addrTo.port, v.addrTo.nServices), ("0.0.0.0", 0, 0))
             if not isinstance(listener, NoRelayRecipient):  # refused at its VERSION, before any reply
                 assert "wtxidrelay" in listener.last_message  # BIP339 offered to every 70016+ peer
 
@@ -682,9 +812,11 @@ class ToolPrivbcast(BitcoinTestFramework):
                 assert a["scheduled_start_ms"] in sched, a
                 assert 0 <= a["started_ms"] - a["scheduled_start_ms"] <= grace_ms, a
                 assert a["ended_ms"] <= a["scheduled_start_ms"] + attempt_max_ms + 200, a
-            # A slot never has two connections alive at once: each attempt starts after the previous one ended.
+            # A slot never has two connections alive at once, and dials no opportunity twice: each
+            # attempt starts after the previous one ended, at a later opportunity.
             for prev, nxt in zip(s["attempts"], s["attempts"][1:]):
                 assert_greater_than_or_equal(nxt["started_ms"], prev["ended_ms"])
+                assert_greater_than(sched.index(nxt["scheduled_start_ms"]), sched.index(prev["scheduled_start_ms"]))
         assert_equal(len(late_primaries), 2)
         assert_greater_than_or_equal(abs(late_primaries[1] - late_primaries[0]), PRIMARY_SEPARATION_S * 1000 / divisor - 1)
         # The tool shares nothing with the node: as a bystander it never received the
@@ -723,6 +855,14 @@ class ToolPrivbcast(BitcoinTestFramework):
             assert any(a["outcome"] == "pong_received" for a in served)
             assert_equal(self.attempts_to(report, other), [])  # never touched the other job's recipient
         assert_equal(len(node.getpeerinfo()), peers_before)  # neither job made the node a recipient
+        # Nothing is shared between the two jobs: every proxy stream had its own credentials, each
+        # recipient saw its own BIP324 key and VERSION nonce, and each job drew its own schedule.
+        creds = [(c.username, c.password) for c in self.drain_socks_commands()]
+        assert_equal(len(set(creds)), len(creds))
+        l1, l2 = self.listeners[addr1][0], self.listeners[addr2][0]
+        assert ellswift_x(l1.v2_state.peer_ellswift) != ellswift_x(l2.v2_state.peer_ellswift)
+        assert l1.last_message["version"].nNonce != l2.last_message["version"].nNonce
+        assert [s["scheduled_ms"] for s in report1["slots"]] != [s["scheduled_ms"] for s in report2["slots"]]
         self.stop_proxy()
 
     def test_socks_auth_required(self):
@@ -775,23 +915,39 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(self.connects, {})
         self.stop_proxy()
 
+        self.log.info("With the same resolver a send job still starts delivery at the window")
+        onions = [make_onion(12), make_onion(13)]
+        self.start_proxy({"a.seed.": ["9.1.0.1"]}, {o: (Recipient, True) for o in onions}, resolve_delay=window_s * 2)
+        tx = self.wallet.create_self_transfer()
+        proc = self.start_send(tx["hex"], "-seed=a.seed.", *[f"-fixedseed={o}:{REGTEST_PORT}" for o in onions])
+        self.wait_until(lambda: any(o in self.listeners and self.listeners[o][0].txs_received for o in onions))
+        self.interrupt(proc)
+        _, report = self.finish_send(proc)
+        assert_equal(report["discovery"]["exit_path_candidates"], 0)
+        prompt_onion = next(s for s in report["slots"] if s["class"] == "onion" and s["stratum"] == "prompt")
+        assert_equal(prompt_onion["missed_opportunities"], 0)
+        started_ms = prompt_onion["attempts"][0]["started_ms"]
+        assert 0 <= started_ms - DISCOVERY_WINDOW_S * 1000 / TIME_DIVISOR <= START_GRACE_S * 1000 / TIME_DIVISOR, started_ms
+        self.stop_proxy()
+
     def test_interrupt_blocked_resolve(self):
         self.log.info("SIGINT while workers are blocked in RESOLVE ends the job promptly")
-        self.start_proxy({"a.seed.": ["9.2.0.1"]}, {}, resolve_delay=60)  # never answers within the job
+        self.start_proxy({"a.seed.": ["9.2.0.1"]}, {}, resolve_delay=10)
+        # Unscaled, so that the exchange's own timeouts are seconds away: only abandoning it ends the
+        # job this soon.
         tx = self.wallet.create_self_transfer()
-        started = time.monotonic()
-        proc = self.start_send(tx["hex"], "-seed=a.seed.")
-        # Wait until a RESOLVE has reached the proxy and is stalling, so a worker is genuinely blocked.
+        proc = self.start_send(tx["hex"], "-seed=a.seed.", time_divisor=1)
+        # Wait until a RESOLVE has reached the proxy and is stalling, so a query is genuinely blocked.
         self.wait_until(lambda: self.resolve_counts.get("a.seed.", 0) >= 1)
         self.interrupt(proc)
+        interrupted = time.monotonic()
         rc, report = self.finish_send(proc)
-        elapsed = time.monotonic() - started
+        # The blocked exchanges were abandoned, not waited out.
+        assert_greater_than(3 * self.options.timeout_factor, time.monotonic() - interrupted)
         assert_equal(rc, 2)
         assert_equal(report["summary"]["interrupted"], True)
         assert_equal(report["summary"]["connections"], 0)
         assert_equal(report["summary"]["slots_completed"], 0)
-        # Far below the full schedule (~50 s scaled): the blocked workers were released at once.
-        assert_greater_than(20, elapsed)
         assert_equal(self.connects, {})
         self.stop_proxy()
 
@@ -892,35 +1048,65 @@ class ToolPrivbcast(BitcoinTestFramework):
             listener = self.listeners[endpoint][0]
             assert_equal(listener.invs_received, 0)
             assert not listener.txs_received
+        assert_equal(self.attempts_to(report, old)[0]["peer_version"], 70015)
         asked = self.attempts_to(report, wrong_form)
         assert_equal([a["outcome"] for a in asked], ["announced_not_requested"])
         listener = self.listeners[wrong_form][0]
-        assert_equal(listener.getdatas_sent, 3)
+        assert_equal(listener.getdatas_sent, 4)
         assert not listener.txs_received
         flooded = self.attempts_to(report, flooder)
         assert_equal(len(flooded), 1)
         a = flooded[0]
         assert a["outcome"] in ("not_announced", "post_announcement_failure"), a
-        # Past the cap, then cut: well short of the six announcements it was sent, and early.
-        assert_greater_than(a["bytes_recv"], MAX_RECV_BYTES)
-        assert_greater_than(6 * 36_000, a["bytes_recv"])
+        # Past the cap, then cut: well short of the announcements it was sent, and early.
+        assert_greater_than_or_equal(a["bytes_recv"], MAX_RECV_BYTES)
+        assert_greater_than(FloodingRecipient.MESSAGES * 36_000, a["bytes_recv"])
         assert_greater_than(HANDSHAKE_TIMEOUT_S * 1000 / TIME_DIVISOR, a["ended_ms"] - a["scheduled_start_ms"])
         self.stop_proxy()
 
+    def test_peer_deviations(self):
+        self.log.info("A PONG with another nonce, WTXIDRELAY after VERACK, a request before the announcement, a PING from the peer")
+        tx = self.wallet.create_self_transfer()
+        wrong_nonce, late_wtxid, early, pinging = "9.3.1.1", "9.3.1.2", "9.3.1.3", "9.3.1.4"
+        wtxid = int(tx["wtxid"], 16)
+        self.start_proxy({"y.seed.": [wrong_nonce, late_wtxid], "z.seed.": [early, pinging]},
+                         {wrong_nonce: (WrongNoncePongRecipient, True), late_wtxid: (LateWtxidRecipient, True),
+                          early: (lambda: EarlyRequestRecipient(wtxid), True), pinging: (PingingRecipient, True)})
+        report, _ = self.run_send(tx["hex"], "-seed=y.seed.", "-seed=z.seed.")
+        self.log.debug(json.dumps(report, indent=1))
+        # A PONG without the PING's nonce answers nothing: the attempt ends when the wait runs out.
+        a = self.attempts_to(report, wrong_nonce)
+        assert_equal([x["outcome"] for x in a], ["tx_written_no_pong"])
+        assert -5 <= a[0]["ended_ms"] - a[0]["ping_written_ms"] - PONG_WAIT_S * 1000 / TIME_DIVISOR <= 1000, a[0]
+        # WTXIDRELAY after VERACK is too late.
+        assert_equal([x["outcome"] for x in self.attempts_to(report, late_wtxid)], ["not_announced"])
+        assert_equal(self.listeners[late_wtxid][0].invs_received, 0)
+        # A request before the announcement point is ignored, not remembered.
+        assert_equal([x["outcome"] for x in self.attempts_to(report, early)], ["announced_not_requested"])
+        assert_equal(self.listeners[early][0].invs_received, 1)
+        assert_equal(self.listeners[early][0].txs_received, [])
+        # The peer's own PING gets no PONG, and the attempt goes on as with any other peer.
+        assert_equal([x["outcome"] for x in self.attempts_to(report, pinging)], ["pong_received"])
+        assert "pong" not in self.listeners[pinging][0].last_message
+        self.stop_proxy()
+
     def test_package_requests(self):
-        self.log.info("Package mode against scripted recipients: batched, both-named and unasked parent requests")
+        self.log.info("Package mode against scripted recipients: batched, both-named, wrong-form and unasked parent requests, and a late child request")
         parent = self.wallet.create_self_transfer()
         child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
-        ids = dict(parent_txid=int(parent["txid"], 16), child_txid=int(child["txid"], 16), child_wtxid=int(child["wtxid"], 16))
-        batched, both, unasked = "9.6.0.1", "9.6.0.2", "9.6.0.3"
-        self.start_proxy({"p.seed.": [batched, both, unasked]},
+        ids = dict(parent_txid=int(parent["txid"], 16), parent_wtxid=int(parent["wtxid"], 16),
+                   child_txid=int(child["txid"], 16), child_wtxid=int(child["wtxid"], 16))
+        batched, both, unasked, wrong_form, late = "9.6.0.1", "9.6.0.2", "9.6.0.3", "9.6.1.1", "9.6.1.2"
+        self.start_proxy({"p.seed.": [batched, both, unasked], "q.seed.": [wrong_form, late]},
                          {batched: (lambda: BatchedParentRecipient(**ids), True),
                           both: (lambda: BothNamedRecipient(**ids), True),
-                          unasked: (Recipient, True)})
-        report, _ = self.run_send(child["hex"] + "\n" + parent["hex"], "-seed=p.seed.")
+                          unasked: (Recipient, True),
+                          wrong_form: (lambda: ParentWrongFormRecipient(**ids), True),
+                          late: (lambda: LateChildRecipient(**ids), True)})
+        report, _ = self.run_send(child["hex"] + "\n" + parent["hex"], "-seed=p.seed.", "-seed=q.seed.")
         self.log.debug(json.dumps(report, indent=1))
         # Each was announced the child alone, by wtxid, once; the parent is never announced.
-        for endpoint in (batched, both, unasked):
+        for endpoint in (batched, both, unasked, wrong_form, late):
             listener = self.listeners[endpoint][0]
             assert_equal(listener.invs_received, 1)
             assert_equal([(i.type, i.hash) for i in listener.last_message["inv"].inv], [(MSG_WTX, ids["child_wtxid"])])
@@ -946,6 +1132,19 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert a["parent_hold_expired_ms"] is not None and a["parent_getdata_ms"] is None
         assert_greater_than_or_equal(a["ping_written_ms"] - a["tx_written_ms"], PARENT_HOLD_S * 1000 / TIME_DIVISOR - 100)
         assert_greater_than_or_equal(PARENT_HOLD_S * 1000 / TIME_DIVISOR + 1000, a["ping_written_ms"] - a["tx_written_ms"])
+        # Asked for the parent only in forms F2 does not serve: never sent it, and no NOTFOUND, since
+        # both name the job's own parent. The PING waited out the hold.
+        listener = self.listeners[wrong_form][0]
+        assert_equal([t.txid_hex for t in listener.txs_received], [child["txid"]])
+        assert_equal(listener.notfound, [])
+        a = self.attempts_to(report, wrong_form)[0]
+        assert a["parent_getdata_ms"] is None and a["parent_hold_expired_ms"] is not None
+        # Asked for the child late: the hold was cut so that the PING went out PONG_WAIT before the
+        # request window ends.
+        a = self.attempts_to(report, late)[0]
+        cut_ms = (REQUEST_WINDOW_S - PONG_WAIT_S) * 1000 / TIME_DIVISOR
+        assert -5 <= a["ping_written_ms"] - a["inv_handed_ms"] - cut_ms <= 1000, a
+        assert_greater_than(PARENT_HOLD_S * 1000 / TIME_DIVISOR, a["ping_written_ms"] - a["tx_written_ms"])
         self.stop_proxy()
 
     def test_assignment(self):
@@ -986,10 +1185,13 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.log.info("discover resolves through the proxy and opens no connection")
         # Seed a answers IPv4, IPv6 and a private address, which is rejected (the fourth query repeats
         # the first answer: a duplicate); seed b answers four distinct addresses, of which three are
-        # kept; seed z's queries all fail.
+        # kept; seeds c and d both answer one address, which counts once; seed z's queries all fail.
+        # Half the usual pace, as in test_bounded_job: every query is counted.
         self.start_proxy({"a.seed.": ["1.1.1.1", "2606:4700:4700::1111", "10.0.0.1"],
-                          "b.seed.": ["2.2.2.1", "2.2.2.2", "2.2.2.3", "2.2.2.4"]}, {"1.1.1.1": (Recipient, True)})
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-seed=b.seed.", "-seed=z.seed.", "-noprogress", "discover")
+                          "b.seed.": ["2.2.2.1", "2.2.2.2", "2.2.2.3", "2.2.2.4"],
+                          "c.seed.": ["4.4.4.1"], "d.seed.": ["4.4.4.1"]}, {"1.1.1.1": (Recipient, True)})
+        proc = self.run_tool("-timedivisor=5", "-seed=a.seed.", "-seed=b.seed.", "-seed=c.seed.", "-seed=d.seed.", "-seed=z.seed.",
+                             "-noprogress", "discover")
         out = json.loads(proc.stdout)
         seeds = {s["name"]: s for s in out["seeds"]}
         assert_equal(seeds["a.seed."]["queries"], 4)
@@ -1003,31 +1205,43 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(seeds["z.seed."]["queries"], 4)
         assert_equal(seeds["z.seed."]["answers"], 0)
         assert_equal(seeds["z.seed."]["kept"], 0)
-        assert_equal(out["duplicates"], 1)
+        c, d = seeds["c.seed."], seeds["d.seed."]
+        assert_equal(sorted([c["accepted"], d["accepted"]]), [0, 1])
+        assert_equal(c["candidates"] + d["candidates"], [f"4.4.4.1:{REGTEST_PORT}"])
+        assert_equal(out["duplicates"], 1 + 7)  # a.seed.'s repeat, and all but one answer of 4.4.4.1
         assert_equal(out["rejected"], 1)
         commands = self.drain_socks_commands()
-        assert_equal([c.cmd for c in commands], [Command.RESOLVE] * 12)
+        assert_equal([c.cmd for c in commands], [Command.RESOLVE] * 20)
         assert_equal(self.connects, {})
         self.stop_proxy()
 
     def test_stalled_proxy(self):
         self.log.info("A proxy that stalls every CONNECT: attempts fail within the handshake budget, later opportunities start on time")
-        # The stall ends inside the scaled handshake budget (45 s / TIME_DIVISOR = 4.5 s) with a failure,
-        # and a slot's next opportunity is at least 5 s later, so a backup still starts on time.
+        # Half the usual pace, since nine proxy handlers stall at once. The stall ends inside the scaled
+        # handshake budget (45 s / 5 = 9 s) with a failure, and a slot's next opportunity is at least 10 s
+        # later, so a backup still starts on time.
         # Three seeds of three (discovery keeps at most three candidates per seed): with no onions known the
         # onion slots fall back to exit-path peers, so nine candidates make six primaries and three backups.
-        self.start_proxy({"s.seed.": ["8.1.0.1", "8.1.0.2", "8.1.0.3"], "t.seed.": ["8.1.1.1", "8.1.1.2", "8.1.1.3"],
-                          "u.seed.": ["8.1.2.1", "8.1.2.2", "8.1.2.3"]}, {}, connect_delay=4.0)
+        # The fixed-seed list holds only an IPv4 and an IPv6 entry, which give no candidate.
+        divisor = 5
+        script = {"s.seed.": ["8.1.0.1", "8.1.0.2", "8.1.0.3"], "t.seed.": ["8.1.1.1", "8.1.1.2", "8.1.1.3"],
+                  "u.seed.": ["8.1.2.1", "8.1.2.2", "8.1.2.3"]}
+        self.start_proxy(script, {}, connect_delay=8.0)
         tx = self.wallet.create_self_transfer()
-        report, _ = self.run_send(tx["hex"], "-seed=s.seed.", "-seed=t.seed.", "-seed=u.seed.", expected_rc=2)
+        report, _ = self.run_send(tx["hex"], "-seed=s.seed.", "-seed=t.seed.", "-seed=u.seed.",
+                                  f"-fixedseed=9.9.9.9:{REGTEST_PORT}", f"-fixedseed=[2606:4700::6810:1]:{REGTEST_PORT}",
+                                  expected_rc=2, time_divisor=divisor)
         self.log.debug(json.dumps(report, indent=1))
         assert_equal(report["summary"]["interrupted"], False)
         assert_equal(report["summary"]["slots_completed"], SLOTS)
         assert_equal(report["summary"]["announcements_written"], 0)
+        # Every attempt went to a seed's answer; the fixed seeds gave no candidate.
+        assert_equal(report["discovery"]["onion_candidates"], 0)
+        assert {a["endpoint"] for _, a in self.attempts(report)} <= {f"{ip}:{REGTEST_PORT}" for ips in script.values() for ip in ips}
         # Six primaries and three backups, all stalled and all on time; the rest is empty.
         assert_equal(report["summary"]["connections"], 9)
-        handshake_ms = HANDSHAKE_TIMEOUT_S * 1000 / TIME_DIVISOR
-        grace_ms = START_GRACE_S * 1000 / TIME_DIVISOR
+        handshake_ms = HANDSHAKE_TIMEOUT_S * 1000 / divisor
+        grace_ms = START_GRACE_S * 1000 / divisor
         for s in report["slots"]:
             assert_equal(s["missed_opportunities"], 0)
             for a in s["attempts"]:
@@ -1036,11 +1250,12 @@ class ToolPrivbcast(BitcoinTestFramework):
                 # Failed within the handshake budget, so the slot's next opportunity is not held up.
                 assert a["ended_ms"] - a["scheduled_start_ms"] <= handshake_ms + 200, a
         # Scarce candidates go to first attempts: every slot dialled its first opportunity, and the three
-        # left over went to second ones.
+        # left over went to second ones, of exit-path slots, which draw before the onion slots fall back.
         for s in report["slots"]:
             assert_equal(s["attempts"][0]["scheduled_start_ms"], s["scheduled_ms"][0])
             for a in s["attempts"][1:]:
                 assert_equal(a["scheduled_start_ms"], s["scheduled_ms"][1])
+                assert_equal(s["class"], "exit_path")
         # A stalled primary's backup was tried, at its own scheduled time.
         assert any(len(s["attempts"]) >= 2 for s in report["slots"])
         # The job ends by its scheduled end: nothing stretched.
@@ -1080,7 +1295,7 @@ class ToolPrivbcast(BitcoinTestFramework):
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=w_fd, text=True)
             os.close(w_fd)
             w_fd = None
-            out, _ = proc.communicate(input=tx["hex"], timeout=120)
+            out, _ = proc.communicate(input=tx["hex"], timeout=120 * self.options.timeout_factor)
             elapsed = time.monotonic() - started
             assert_equal(proc.returncode, 0)
             report = json.loads(out)
@@ -1119,7 +1334,9 @@ class ToolPrivbcast(BitcoinTestFramework):
         # Cancel once the recipient has seen our INV: it was fully written by then.
         self.wait_until(lambda: "8.2.0.1" in self.listeners and self.listeners["8.2.0.1"][0].invs_received >= 1)
         self.interrupt(proc)
+        interrupted = time.monotonic()
         rc, report = self.finish_send(proc)
+        assert_greater_than(3 * self.options.timeout_factor, time.monotonic() - interrupted)
         assert_equal(report["summary"]["interrupted"], True)
         assert_greater_than(SLOTS, report["summary"]["slots_completed"])
         assert_greater_than(report["summary"]["announcements_written"], 0)

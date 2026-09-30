@@ -435,11 +435,16 @@ class ConfArgsTest(BitcoinTestFramework):
         self.nodes[0].assert_start_raises_init_error(
             extra_args=["-privatebroadcast"],
             expected_msg=None)  # any error: messages are not part of the interface
-        # The regtest-only knobs are refused elsewhere; -connect is no longer a conflict since private
-        # broadcast does not use addrman.
+        # Onion cannot become reachable when -onlynet leaves it out.
+        self.nodes[0].assert_start_raises_init_error(
+            extra_args=["-privatebroadcast", "-onion=127.0.0.1:9050", "-onlynet=ipv4"],
+            expected_msg=None)
+        # A private broadcast fixed seed that is not an address is refused (off regtest, any is: see
+        # feature_signet.py).
         self.nodes[0].assert_start_raises_init_error(
             extra_args=["-privatebroadcast", "-onion=127.0.0.1:9050", "-privatebroadcastfixedseed=notanaddress"],
             expected_msg=None)
+        # -connect is no conflict: jobs choose their own recipients.
         self.start_node(0, extra_args=["-privatebroadcast", "-onion=127.0.0.1:9050", "-connect=127.0.0.1:8333", "-proxyrandomize=0"])
         self.stop_node(0)
 

@@ -173,7 +173,9 @@ class Socks5Connection():
             elif 0x00 in methods and self.serv.conf.unauth:
                 method = 0x00 # unauthenticated
             if method is None:
-                raise IOError('No supported authentication method was offered')
+                # RFC 1928: no acceptable method. The client closes; that is its answer, not an error.
+                self.conn.sendall(bytearray([0x05, 0xFF]))
+                return
             # Send response
             self.conn.sendall(bytearray([0x05, method]))
             # Read authentication (optional)
@@ -267,7 +269,12 @@ class Socks5Connection():
             self.serv.queue.put(cmdin)
             logger.debug('Proxy: %s', cmdin)
 
-            requested_to_addr = addr.decode("utf-8")
+            if atyp == AddressType.IPV4:
+                requested_to_addr = socket.inet_ntop(socket.AF_INET, addr)
+            elif atyp == AddressType.IPV6:
+                requested_to_addr = socket.inet_ntop(socket.AF_INET6, addr)
+            else:
+                requested_to_addr = addr.decode("utf-8")
             requested_to = format_addr_port(requested_to_addr, port)
 
             if self.serv.is_running():

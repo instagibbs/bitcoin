@@ -6,7 +6,8 @@
 unchanged, rather than evicting jobs already queued.
 
 The clock is mocked and never advanced, so the first job starts and every later one stays queued.
-The proxy is never reached: regtest has no seeds, so the running job has no one to contact.
+The proxy is never reached: the running job's one candidate, a fixed-seed onion, is due at the job's
+delivery start, which the frozen clock never reaches.
 """
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -22,7 +23,8 @@ class PrivateBroadcastCapTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-privatebroadcast", "-onion=127.0.0.1:1"]]
+        self.extra_args = [["-privatebroadcast", "-onion=127.0.0.1:1",
+                            "-privatebroadcastfixedseed=a4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dwc6ad.onion:18444"]]
 
     def jobs(self):
         return self.nodes[0].getprivatebroadcastinfo()["jobs"]

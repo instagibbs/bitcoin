@@ -88,6 +88,9 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.uses_wallet = None  # the wallet section runs when the wallet is compiled
 
+    def add_options(self, parser):
+        parser.add_argument("--package", action="store_true", help="test one-parent-one-child package mode (the extension) only")
+
     def setup_nodes(self):
         self.listeners = {}
         self.lock = threading.Lock()
@@ -276,7 +279,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         # expected to learn these two; receipt-back is covered above.
         self.connect_nodes(0, 1)
 
-        self.log.info("A copy whose txid is in the mempool with another witness is sent as given, by either RPC")
+        self.log.info("submitpackage sends a copy whose txid is in the mempool with another witness as given")
         tx = self.wallet.create_self_transfer()
         self.nodes[0].add_p2p_connection(P2PInterface()).send_and_ping(msg_tx(tx["tx"]))
         other = tx_from_hex(tx["hex"])
@@ -285,10 +288,6 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         res = self.nodes[0].submitpackage([other.serialize().hex()])
         assert_equal(res["tx-results"][other.wtxid_hex]["other-wtxid"], tx["wtxid"])
         assert_equal(self.jobs()[other.wtxid_hex]["txid"], tx["txid"])
-        self.nodes[0].abortprivatebroadcast(other.wtxid_hex)
-        assert_equal(self.nodes[0].sendrawtransaction(other.serialize().hex()), tx["txid"])
-        assert self.jobs()[other.wtxid_hex]["state"] in ("queued", "running")
-        assert tx["wtxid"] not in self.jobs()
         self.nodes[0].abortprivatebroadcast(other.wtxid_hex)
         self.nodes[0].disconnect_p2ps()
 
@@ -398,6 +397,34 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.advance(0)
         self.wallet = MiniWallet(self.nodes[0])
         self.generate(self.wallet, 260)  # enough mature coins for the retention section
+        if self.options.package:
+            self.log.info("Under -privatebroadcast a package is at most one parent and its child, and a valid single transaction also works")
+            p1 = self.wallet.create_self_transfer()
+            p2 = self.wallet.create_self_transfer()
+            c = self.wallet.create_self_transfer_multi(utxos_to_spend=[p1["new_utxo"], p2["new_utxo"]])
+            assert_raises_rpc_error(-8, None, self.nodes[0].submitpackage, [p1["hex"], p2["hex"], c["hex"]])
+            single = self.wallet.create_self_transfer()
+            res = self.nodes[0].submitpackage([single["hex"]])
+            assert_equal(res["package_msg"], "success")
+            assert "fees" in res["tx-results"][single["wtxid"]]
+            assert "parent_txid" not in self.jobs()[single["wtxid"]]
+            assert single["txid"] not in self.nodes[0].getrawmempool()
+            self.finish([single["wtxid"]])
+
+            self.log.info("A package that validation rejects as a whole, before any per-transaction result, queues no job")
+            before = set(self.jobs())
+            coin = self.wallet.get_utxo()
+            parent = self.wallet.create_self_transfer(utxo_to_spend=coin)
+            double_spend = self.wallet.create_self_transfer_multi(utxos_to_spend=[parent["new_utxo"], coin])
+            res = self.nodes[0].submitpackage([parent["hex"], double_spend["hex"]])
+            assert_equal(res["package_msg"].split(",")[0], "conflict-in-package")
+            for t in (parent, double_spend):
+                assert res["tx-results"][t["wtxid"]]["error"]
+            assert_equal(set(self.jobs()), before)
+
+            self.test_package()
+            self.socks5_server.stop()
+            return
 
         self.log.info("The RPCs are unavailable without -privatebroadcast")
         assert_raises_rpc_error(-32601, None, self.nodes[1].getprivatebroadcastinfo)
@@ -536,31 +563,21 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         with self.lock:
             self.exit_path_active = self.exit_path[:6]
 
-        self.log.info("Under -privatebroadcast a package is at most one parent and its child, and a valid single transaction also works")
-        p1 = self.wallet.create_self_transfer()
-        p2 = self.wallet.create_self_transfer()
-        c = self.wallet.create_self_transfer_multi(utxos_to_spend=[p1["new_utxo"], p2["new_utxo"]])
-        assert_raises_rpc_error(-8, None, self.nodes[0].submitpackage, [p1["hex"], p2["hex"], c["hex"]])
-        single = self.wallet.create_self_transfer()
-        res = self.nodes[0].submitpackage([single["hex"]])
-        assert_equal(res["package_msg"], "success")
-        assert "fees" in res["tx-results"][single["wtxid"]]
-        assert "parent_txid" not in self.jobs()[single["wtxid"]]
-        assert single["txid"] not in self.nodes[0].getrawmempool()
-        self.finish([single["wtxid"]])
 
-        self.log.info("A package that validation rejects as a whole, before any per-transaction result, queues no job")
-        before = set(self.jobs())
-        coin = self.wallet.get_utxo()
-        parent = self.wallet.create_self_transfer(utxo_to_spend=coin)
-        double_spend = self.wallet.create_self_transfer_multi(utxos_to_spend=[parent["new_utxo"], coin])
-        res = self.nodes[0].submitpackage([parent["hex"], double_spend["hex"]])
-        assert_equal(res["package_msg"].split(",")[0], "conflict-in-package")
-        for t in (parent, double_spend):
-            assert res["tx-results"][t["wtxid"]]["error"]
-        assert_equal(set(self.jobs()), before)
-
-        self.test_package()
+        self.log.info("A copy whose txid is in the mempool with another witness is its own job, sent as given")
+        tx = self.wallet.create_self_transfer()
+        self.nodes[0].add_p2p_connection(P2PInterface()).send_and_ping(msg_tx(tx["tx"]))
+        other = tx_from_hex(tx["hex"])
+        other.wit.vtxinwit[0].scriptWitness.stack.insert(0, b"\x01")  # the same txid, a witness the node never validated
+        assert_equal(other.txid_hex, tx["txid"])
+        assert_equal(self.nodes[0].sendrawtransaction(tx["hex"]), tx["txid"])
+        assert_equal(self.nodes[0].sendrawtransaction(other.serialize().hex()), tx["txid"])
+        live = {j["wtxid"] for j in self.entries() if j["state"] in ("queued", "running")}
+        assert {tx["wtxid"], other.wtxid_hex} <= live, live  # keyed by wtxid, and each sent as given
+        for w in (tx["wtxid"], other.wtxid_hex):
+            self.nodes[0].abortprivatebroadcast(w)
+        self.nodes[0].disconnect_p2ps()
+        self.open_gate()
 
         self.log.info("Disabling networking aborts running and queued jobs for good; re-enabling admits new ones")
         txs = [self.wallet.create_self_transfer() for _ in range(3)]

@@ -169,6 +169,18 @@ class ProbingRecipient(Recipient):
         self.send_without_ping(msg_sendtxrcncl())
 
 
+class WrongFormRecipient(Recipient):
+    """Asks for the announced transaction only in forms E5 does not answer: by its wtxid as MSG_WITNESS_TX
+    and as MSG_TX, and twice in one request. It must never be served."""
+
+    def on_inv(self, message):
+        self.invs_received += 1
+        hashes = [i.hash for i in message.inv if i.type == MSG_WTX]
+        self.request(hashes, inv_type=MSG_WITNESS_TX)
+        self.request(hashes, inv_type=MSG_TX)
+        self.request(hashes * 2)
+
+
 class OldVersionRecipient(Recipient):
     """Announces protocol 70015, below the 70016 that BIP339 needs: the tool must leave it unannounced."""
 
@@ -265,6 +277,9 @@ class ToolPrivbcast(BitcoinTestFramework):
         # receives the transaction as an exit-path recipient must accept v2 (the mainnet default).
         self.extra_args = [["-v2transport=1"]]
 
+    def add_options(self, parser):
+        parser.add_argument("--package", action="store_true", help="test one-parent-one-child package mode (the extension) only")
+
     def skip_test_if_missing_module(self):
         self.skip_if_no_bitcoin_privbcast()
 
@@ -344,7 +359,10 @@ class ToolPrivbcast(BitcoinTestFramework):
     def run_tool(self, *extra, stdin="", expected_rc=0, chain="-regtest", timeout=240):
         argv = self.tool_argv(*extra, chain=chain)
         self.log.debug(f"running {argv}")
-        proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
+        try:
+            proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise AssertionError(f"{argv} did not exit within {timeout} s")
         for line in proc.stderr.splitlines():
             self.log.debug(f"tool stderr: {line}")
         if expected_rc is not None:
@@ -393,6 +411,11 @@ class ToolPrivbcast(BitcoinTestFramework):
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
         self.generate(self.wallet, 120)  # >100 for COINBASE_MATURITY, plus a margin of spendable UTXOs for every scenario
+        if self.options.package:
+            self.test_package_requests()
+            self.test_package_node_recipient()
+            self.test_package_existing_orphan()
+            return
         self.test_argument_errors()
         self.test_bounded_job()
         self.test_concurrent_invocations()
@@ -402,13 +425,10 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.test_socks_auth_required()
         self.test_not_tor_proxy()
         self.test_unsuitable_peers()
-        self.test_package_requests()
         self.test_assignment()
         self.test_slow_resolve()
         self.test_interrupt_blocked_resolve()
         self.test_node_recipient()
-        self.test_package_node_recipient()
-        self.test_package_existing_orphan()
         self.test_discover()
 
     def test_argument_errors(self):
@@ -417,22 +437,25 @@ class ToolPrivbcast(BitcoinTestFramework):
         # fail, and one that got past its check would reach the proxy or run far longer.
         self.start_proxy({}, {})
         tx_hex = self.wallet.create_self_transfer()["hex"]
-        self.run_tool("send", stdin="zz", expected_rc=1)
-        self.run_tool("send", stdin="", expected_rc=1)
+        self.run_tool("send", stdin="zz", expected_rc=1, timeout=20)
+        self.run_tool("send", stdin="", expected_rc=1, timeout=20)
         # Two transactions must be a parent and its child; the same one twice is refused too.
         other_hex = self.wallet.create_self_transfer()["hex"]
-        self.run_tool("send", stdin=f"{tx_hex}\n{other_hex}", expected_rc=1)
-        self.run_tool("send", stdin=f"{tx_hex} {tx_hex}", expected_rc=1)
+        self.run_tool("send", stdin=f"{tx_hex}\n{other_hex}", expected_rc=1, timeout=20)
+        self.run_tool("send", stdin=f"{tx_hex} {tx_hex}", expected_rc=1, timeout=20)
         # Regtest-only flags are refused elsewhere.
-        self.run_tool("-seed=a.seed.", "send", stdin=tx_hex, expected_rc=1, chain="-signet")
-        self.run_tool(f"-timedivisor={TIME_DIVISOR}", "send", stdin=tx_hex, expected_rc=1, chain="-chain=main")
+        self.run_tool("-seed=a.seed.", "send", stdin=tx_hex, expected_rc=1, chain="-signet", timeout=20)
+        self.run_tool(f"-timedivisor={TIME_DIVISOR}", "send", stdin=tx_hex, expected_rc=1, chain="-chain=main", timeout=20)
         # A remote SOCKS listener is refused.
         argv = self.get_binaries().privbcast_argv() + ["-regtest", "-tor=10.1.2.3:9050", "send"]
-        proc = subprocess.run(argv, input=tx_hex, capture_output=True, text=True, timeout=60)
+        try:
+            proc = subprocess.run(argv, input=tx_hex, capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            raise AssertionError("a remote -tor must be refused before any network activity")
         assert_equal(proc.returncode, 1)
         # No command, or an unknown one, is an error; no arguments at all prints the usage.
-        self.run_tool(stdin=tx_hex, expected_rc=1)
-        self.run_tool("frobnicate", stdin=tx_hex, expected_rc=1)
+        self.run_tool(stdin=tx_hex, expected_rc=1, timeout=20)
+        self.run_tool("frobnicate", stdin=tx_hex, expected_rc=1, timeout=20)
         proc = subprocess.run(self.get_binaries().privbcast_argv(), capture_output=True, text=True, timeout=60)
         assert_equal(proc.returncode, 1)
         assert proc.stdout
@@ -548,6 +571,8 @@ class ToolPrivbcast(BitcoinTestFramework):
                     assert a["tx_written_ms"] is not None
                     assert a["ping_written_ms"] is not None
                     assert a["pong_ms"] is None
+                    # Ended when the PONG wait ran out.
+                    assert -5 <= a["ended_ms"] - a["ping_written_ms"] - PONG_WAIT_S * 1000 / divisor <= 1000, a
                 elif seed == "b.seed.":  # relay=false: refused before any announcement
                     assert_equal(a["outcome"], "not_announced")
                     assert a["inv_handed_ms"] is None
@@ -557,6 +582,8 @@ class ToolPrivbcast(BitcoinTestFramework):
                     assert_equal(a["peer_user_agent"], P2P_SUBVERSION)
                     assert a["inv_written_ms"] is not None
                     assert a["getdata_ms"] is None
+                    # Ended when the request window ran out.
+                    assert -5 <= a["ended_ms"] - a["inv_handed_ms"] - REQUEST_WINDOW_S * 1000 / divisor <= 1000, a
             assert_equal(seeds_attempted, set(resolve_script))
             # A refused primary is replaced at the slot's next opportunity by a candidate from another seed.
             replaced = [s for s in report["slots"]
@@ -848,14 +875,16 @@ class ToolPrivbcast(BitcoinTestFramework):
         node.disconnect_p2ps()
 
     def test_unsuitable_peers(self):
-        self.log.info("Peers below protocol 70016, without NODE_WITNESS or without WTXIDRELAY are left unannounced; a flooding peer is cut at the receive cap")
-        old, no_witness, no_wtxid, flooder = "9.3.0.1", "9.3.0.2", "9.3.0.3", "9.3.0.4"
-        self.start_proxy({"v.seed.": [old, no_witness], "w.seed.": [no_wtxid, flooder]},
+        self.log.info("Peers below protocol 70016, without NODE_WITNESS or without WTXIDRELAY are left unannounced; "
+                      "requests in the wrong form go unanswered; a flooding peer is cut at the receive cap")
+        old, no_witness, no_wtxid, flooder, wrong_form = "9.3.0.1", "9.3.0.2", "9.3.0.3", "9.3.0.4", "9.3.0.5"
+        self.start_proxy({"v.seed.": [old, no_witness], "w.seed.": [no_wtxid, flooder], "x.seed.": [wrong_form]},
                          {old: (OldVersionRecipient, True), no_witness: (NoWitnessRecipient, True),
-                          no_wtxid: (NoWtxidRecipient, True), flooder: (FloodingRecipient, True)})
+                          no_wtxid: (NoWtxidRecipient, True), flooder: (FloodingRecipient, True),
+                          wrong_form: (WrongFormRecipient, True)})
         tx = self.wallet.create_self_transfer()
         # Whether the flooder was sent the INV before the cap cut it is a race, and with it the exit status.
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=v.seed.", "-seed=w.seed.", "send", stdin=tx["hex"], expected_rc=None)
+        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=v.seed.", "-seed=w.seed.", "-seed=x.seed.", "send", stdin=tx["hex"], expected_rc=None)
         report = json.loads(proc.stdout)
         self.log.debug(json.dumps(report, indent=1))
         for endpoint in (old, no_witness, no_wtxid):
@@ -863,6 +892,11 @@ class ToolPrivbcast(BitcoinTestFramework):
             listener = self.listeners[endpoint][0]
             assert_equal(listener.invs_received, 0)
             assert not listener.txs_received
+        asked = self.attempts_to(report, wrong_form)
+        assert_equal([a["outcome"] for a in asked], ["announced_not_requested"])
+        listener = self.listeners[wrong_form][0]
+        assert_equal(listener.getdatas_sent, 3)
+        assert not listener.txs_received
         flooded = self.attempts_to(report, flooder)
         assert_equal(len(flooded), 1)
         a = flooded[0]
@@ -911,16 +945,18 @@ class ToolPrivbcast(BitcoinTestFramework):
         a = self.attempts_to(report, unasked)[0]
         assert a["parent_hold_expired_ms"] is not None and a["parent_getdata_ms"] is None
         assert_greater_than_or_equal(a["ping_written_ms"] - a["tx_written_ms"], PARENT_HOLD_S * 1000 / TIME_DIVISOR - 100)
+        assert_greater_than_or_equal(PARENT_HOLD_S * 1000 / TIME_DIVISOR + 1000, a["ping_written_ms"] - a["tx_written_ms"])
         self.stop_proxy()
 
     def test_assignment(self):
         self.log.info("Assignment: seeds spread over slots; onion slots take onions")
         # No endpoint is reachable, so every assigned opportunity is dialled and fails before announcing.
-        # Four seeds of three and eight onions: every exit-path slot's opportunities come from distinct
-        # seeds, the four first attempts from four seeds, and the onion slots dial onions only.
+        # Four seeds of three and ten onions, of which eight are kept: every exit-path slot's opportunities
+        # come from distinct seeds, the four first attempts from four seeds, and the onion slots dial
+        # the eight kept onions, each once.
         tx = self.wallet.create_self_transfer()
         seeds = {f"q{n}.seed.": [f"9.8.{n}.{i}" for i in range(1, 4)] for n in range(1, 5)}
-        onions = [make_onion(20 + i) for i in range(8)]
+        onions = [make_onion(20 + i) for i in range(10)]
         self.start_proxy(seeds, {})
         report, _ = self.run_send(tx["hex"], *[f"-seed={name}" for name in seeds],
                                   *[f"-fixedseed={o}:{REGTEST_PORT}" for o in onions], expected_rc=2)
@@ -940,29 +976,37 @@ class ToolPrivbcast(BitcoinTestFramework):
         for s in report["slots"]:
             for a in s["attempts"]:
                 assert_equal(a["source"], "bundled" if s["class"] == "onion" else "dns_seed")
+        assert_equal(report["discovery"]["onion_candidates"], 8)
         onion_endpoints = [a["endpoint"] for s, a in self.attempts(report) if s["class"] == "onion"]
-        assert_equal(len(set(onion_endpoints)), len(onion_endpoints))
+        assert_equal(len(set(onion_endpoints)), 8)
+        assert_equal(len(onion_endpoints), 8)
         self.stop_proxy()
 
     def test_discover(self):
         self.log.info("discover resolves through the proxy and opens no connection")
         # Seed a answers IPv4, IPv6 and a private address, which is rejected (the fourth query repeats
-        # the first answer: a duplicate); seed z's queries all fail.
-        self.start_proxy({"a.seed.": ["1.1.1.1", "2606:4700:4700::1111", "10.0.0.1"]}, {"1.1.1.1": (Recipient, True)})
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-seed=z.seed.", "-noprogress", "discover")
+        # the first answer: a duplicate); seed b answers four distinct addresses, of which three are
+        # kept; seed z's queries all fail.
+        self.start_proxy({"a.seed.": ["1.1.1.1", "2606:4700:4700::1111", "10.0.0.1"],
+                          "b.seed.": ["2.2.2.1", "2.2.2.2", "2.2.2.3", "2.2.2.4"]}, {"1.1.1.1": (Recipient, True)})
+        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-seed=b.seed.", "-seed=z.seed.", "-noprogress", "discover")
         out = json.loads(proc.stdout)
         seeds = {s["name"]: s for s in out["seeds"]}
         assert_equal(seeds["a.seed."]["queries"], 4)
         assert_equal(seeds["a.seed."]["answers"], 4)
         assert_equal(seeds["a.seed."]["kept"], 2)
         assert_equal(sorted(seeds["a.seed."]["candidates"]), [f"1.1.1.1:{REGTEST_PORT}", f"[2606:4700:4700::1111]:{REGTEST_PORT}"])
+        assert_equal((seeds["b.seed."]["answers"], seeds["b.seed."]["accepted"], seeds["b.seed."]["kept"]), (4, 4, 3))
+        b_kept = seeds["b.seed."]["candidates"]
+        assert_equal(len(set(b_kept)), 3)
+        assert set(b_kept) <= {f"2.2.2.{i}:{REGTEST_PORT}" for i in range(1, 5)}, b_kept
         assert_equal(seeds["z.seed."]["queries"], 4)
         assert_equal(seeds["z.seed."]["answers"], 0)
         assert_equal(seeds["z.seed."]["kept"], 0)
         assert_equal(out["duplicates"], 1)
         assert_equal(out["rejected"], 1)
         commands = self.drain_socks_commands()
-        assert_equal([c.cmd for c in commands], [Command.RESOLVE] * 8)
+        assert_equal([c.cmd for c in commands], [Command.RESOLVE] * 12)
         assert_equal(self.connects, {})
         self.stop_proxy()
 

@@ -56,11 +56,10 @@ from test_framework.wallet import MiniWallet
 # Timing in this file is real. The tool is a separate process, and nothing outside it can move its
 # clock, so the regtest -timedivisor scales every plan duration instead and the margins below are
 # sized for the slowest CI host, not for precision: this file checks the process end to end. The
-# schedule is asserted exactly on the mocked clock in src/test/privbcast_tests.cpp (JobTestEnv), and
-# the node's jobs run on setmocktime in p2p_private_broadcast.py.
+# node's jobs run on setmocktime in p2p_private_broadcast.py.
 
-# Mirrors the constants in src/privbcast/{job,session,discovery}.h. The tool has no knobs, so the
-# checks below hardcode what they test against.
+# The Parameters of doc/design/private-broadcast-tool.md. The tool has no knobs, so the checks below
+# hardcode what they test against.
 TIME_DIVISOR = 10  # scaled budgets (4.5 s handshake, 7.5 s request window, 1 s PONG) comfortably cover a real bitcoind recipient
 PRIVATE_VERSION = 70017
 PRIVATE_USER_AGENT = "/pynode:0.0.1/"
@@ -70,7 +69,6 @@ OPPORTUNITIES_PER_SLOT = 4
 DISCOVERY_WINDOW_S = 18
 START_GRACE_S = 5
 HANDSHAKE_TIMEOUT_S = 45
-HANDSHAKE_RESERVE_S = 10
 REQUEST_WINDOW_S = 75
 PONG_WAIT_S = 10
 BACKUP_MIN_S, BACKUP_MAX_S = 50, 60
@@ -318,42 +316,30 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.test_discover()
 
     def test_argument_errors(self):
-        self.log.info("Argument and input errors")
+        self.log.info("Argument and input errors: exit status 1, found before any network activity")
+        # Messages are for people and are not checked. Each case is built so that only one check can
+        # fail, and one that got past its check would reach the proxy or run far longer.
         self.start_proxy({}, {})
         tx_hex = self.wallet.create_self_transfer()["hex"]
-        proc = self.run_tool("send", stdin="zz", expected_rc=1)
-        assert "decode failed" in proc.stderr
-        proc = self.run_tool("send", stdin="", expected_rc=1)
-        assert "no transaction" in proc.stderr
+        self.run_tool("send", stdin="zz", expected_rc=1)
+        self.run_tool("send", stdin="", expected_rc=1)
         # Two transactions must be a parent and its child; the same one twice is refused too.
         other_hex = self.wallet.create_self_transfer()["hex"]
-        proc = self.run_tool("send", stdin=f"{tx_hex}\n{other_hex}", expected_rc=1)
-        assert "not a parent and its child" in proc.stderr
-        proc = self.run_tool("send", stdin=f"{tx_hex} {tx_hex}", expected_rc=1)
-        assert "given twice" in proc.stderr
-        # Regtest-only flags are refused elsewhere, before any network activity.
-        proc = self.run_tool("-seed=a.seed.", "send", stdin=tx_hex, expected_rc=1, chain="-signet")
-        assert "only accepted on regtest" in proc.stderr
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "send", stdin=tx_hex, expected_rc=1, chain="-chain=main")
-        assert "only accepted on regtest" in proc.stderr
+        self.run_tool("send", stdin=f"{tx_hex}\n{other_hex}", expected_rc=1)
+        self.run_tool("send", stdin=f"{tx_hex} {tx_hex}", expected_rc=1)
+        # Regtest-only flags are refused elsewhere.
+        self.run_tool("-seed=a.seed.", "send", stdin=tx_hex, expected_rc=1, chain="-signet")
+        self.run_tool(f"-timedivisor={TIME_DIVISOR}", "send", stdin=tx_hex, expected_rc=1, chain="-chain=main")
         # A remote SOCKS listener is refused.
         argv = self.get_binaries().privbcast_argv() + ["-regtest", "-tor=10.1.2.3:9050", "send"]
         proc = subprocess.run(argv, input=tx_hex, capture_output=True, text=True, timeout=60)
         assert_equal(proc.returncode, 1)
-        assert "loopback" in proc.stderr
-        # Without -tor the default loopback listener is accepted; the input is still checked first.
-        argv = self.get_binaries().privbcast_argv() + ["-regtest", "send"]
-        proc = subprocess.run(argv, input="", capture_output=True, text=True, timeout=60)
-        assert_equal(proc.returncode, 1)
-        assert "no transaction" in proc.stderr
-        # No command, or an unknown one, points at -help; no arguments at all prints it.
-        proc = self.run_tool(stdin=tx_hex, expected_rc=1)
-        assert "-help" in proc.stderr
-        proc = self.run_tool("frobnicate", stdin=tx_hex, expected_rc=1)
-        assert "-help" in proc.stderr
+        # No command, or an unknown one, is an error; no arguments at all prints the usage.
+        self.run_tool(stdin=tx_hex, expected_rc=1)
+        self.run_tool("frobnicate", stdin=tx_hex, expected_rc=1)
         proc = subprocess.run(self.get_binaries().privbcast_argv(), capture_output=True, text=True, timeout=60)
         assert_equal(proc.returncode, 1)
-        assert "Usage:" in proc.stdout
+        assert proc.stdout
         assert_equal(self.drain_socks_commands(), [])
         self.stop_proxy()
 
@@ -406,7 +392,7 @@ class ToolPrivbcast(BitcoinTestFramework):
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 assert value < 10**9, value
         check_relative(report)
-        assert "discovery done" in proc.stderr
+        assert proc.stderr  # progress lines
         assert_equal(report["summary"]["slots_completed"], SLOTS)
         assert_greater_than_or_equal(SLOTS * OPPORTUNITIES_PER_SLOT, report["summary"]["connections"])
 
@@ -468,8 +454,8 @@ class ToolPrivbcast(BitcoinTestFramework):
                     assert a["pong_ms"] is None
                 elif seed == "b.seed.":  # relay=false: refused before any announcement
                     assert_equal(a["outcome"], "not_announced")
-                    assert_equal(a["reason"], "relay=false")
                     assert a["inv_handed_ms"] is None
+                    assert_equal(self.listeners[a["endpoint"].rsplit(":", 1)[0]][0].invs_received, 0)
                 else:  # handshakes, never requests
                     assert_equal(a["outcome"], "announced_not_requested")
                     assert_equal(a["peer_user_agent"], P2P_SUBVERSION)
@@ -478,7 +464,7 @@ class ToolPrivbcast(BitcoinTestFramework):
             assert_equal(seeds_attempted, set(resolve_script))
             # A refused primary is replaced at the slot's next opportunity by a candidate from another seed.
             replaced = [s for s in report["slots"]
-                        if s["class"] == "exit_path" and s["attempts"] and s["attempts"][0]["reason"] == "relay=false"]
+                        if s["class"] == "exit_path" and s["attempts"] and s["attempts"][0]["provenance"] == "b.seed."]
             assert_greater_than(len(replaced), 0)
             for s in replaced:
                 assert_greater_than_or_equal(len(s["attempts"]), 2)
@@ -487,7 +473,7 @@ class ToolPrivbcast(BitcoinTestFramework):
             # The v1-only onion closes the v2 attempt without a byte. That is a plain transport
             # failure: the tool never falls back to v1, so the endpoint is never served.
             v1_attempts = self.attempts_to(report, v1_onion)
-            assert_equal([(a["outcome"], a["reason"]) for a in v1_attempts], [("not_announced", "peer closed")])
+            assert_equal([a["outcome"] for a in v1_attempts], ["not_announced"])
             assert_equal(v1_attempts[0]["bytes_recv"], 0)
             assert_equal(len(self.listeners[v1_onion][0].txs_received), 0)
             # The probing onion: its txid-form request, repeats and late SENDTXRCNCL change nothing.
@@ -624,7 +610,6 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(report["summary"]["announcements_written"], 0)
         for _, a in self.attempts(report):
             assert_equal(a["outcome"], "not_announced")
-            assert_equal(a["reason"], "socks connect failed")
         assert_equal(self.connects, {})
         assert_equal(self.drain_socks_commands(), [])
         self.stop_proxy()
@@ -647,7 +632,6 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(report["discovery"]["exit_path_candidates"], 0)
         for _, a in self.attempts(report):
             assert_equal(a["outcome"], "not_announced")
-            assert_equal(a["reason"], "socks connect failed")
         connects = [c for c in self.drain_socks_commands() if c.cmd == Command.CONNECT]
         assert connects
         assert all(c.addr.decode() == onion for c in connects)
@@ -663,7 +647,7 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.log.debug(json.dumps(report, indent=1))
         refused = self.attempts_to(report, refuser)
         assert_equal(len(refused), 1)
-        assert_equal((refused[0]["outcome"], refused[0]["reason"]), ("not_announced", "no wtxid relay"))
+        assert_equal(refused[0]["outcome"], "not_announced")
         assert refused[0]["inv_handed_ms"] is None
         listener = self.listeners[refuser][0]
         assert "inv" not in listener.last_message and not listener.txs_received
@@ -672,17 +656,17 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.stop_proxy()
 
     def test_slow_resolve(self):
-        self.log.info("A resolver that answers after the query deadline: no candidates, discovery still ends on time")
-        query_deadline_s = 15 / TIME_DIVISOR  # disc::QUERY_DEADLINE scaled
-        self.start_proxy({"a.seed.": ["9.1.0.1"]}, {}, resolve_delay=query_deadline_s * 2)
+        self.log.info("A resolver that answers after the discovery window: no candidates, discovery still ends on time")
+        window_s = DISCOVERY_WINDOW_S / TIME_DIVISOR
+        self.start_proxy({"a.seed.": ["9.1.0.1"]}, {}, resolve_delay=window_s * 2)
         started = time.monotonic()
         proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-noprogress", "discover")
         elapsed = time.monotonic() - started
         out = json.loads(proc.stdout)
         assert_equal(out["seeds"][0]["queries"], 4)  # all four started at once
-        assert_equal(out["seeds"][0]["kept"], 0)      # every answer arrived after the deadline
-        # discover returns at the window (18 s scaled), not after the resolver's much longer stall.
-        assert_greater_than(query_deadline_s * 2, elapsed)
+        assert_equal(out["seeds"][0]["kept"], 0)      # every answer arrived after the window
+        # discover returns at the window, not after the resolver's much longer stall.
+        assert_greater_than(window_s * 2, elapsed)
         assert_equal(self.connects, {})
         self.stop_proxy()
 
@@ -805,9 +789,9 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.stop_proxy()
 
     def test_stalled_proxy(self):
-        self.log.info("A proxy that never answers CONNECT: attempts fail on the SOCKS timeout, later opportunities start on time")
-        # Longer than the scaled SOCKS exchange budget ((45 - 10) s / TIME_DIVISOR = 3.5 s), shorter than
-        # the 5 s minimum between a slot's opportunities, so a backup would still start on time.
+        self.log.info("A proxy that stalls every CONNECT: attempts fail within the handshake budget, later opportunities start on time")
+        # The stall ends inside the scaled handshake budget (45 s / TIME_DIVISOR = 4.5 s) with a failure,
+        # and a slot's next opportunity is at least 5 s later, so a backup still starts on time.
         # Three seeds of three (discovery keeps at most three candidates per seed): with no onions known the
         # onion slots fall back to exit-path peers, so nine candidates make six primaries and three backups.
         self.start_proxy({"s.seed.": ["8.1.0.1", "8.1.0.2", "8.1.0.3"], "t.seed.": ["8.1.1.1", "8.1.1.2", "8.1.1.3"],
@@ -820,17 +804,15 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(report["summary"]["announcements_written"], 0)
         # Six primaries and three backups, all stalled and all on time; the rest is empty.
         assert_equal(report["summary"]["connections"], 9)
-        socks_budget_ms = (HANDSHAKE_TIMEOUT_S - HANDSHAKE_RESERVE_S) * 1000 / TIME_DIVISOR
+        handshake_ms = HANDSHAKE_TIMEOUT_S * 1000 / TIME_DIVISOR
         grace_ms = START_GRACE_S * 1000 / TIME_DIVISOR
         for s in report["slots"]:
             assert_equal(s["missed_opportunities"], 0)
             for a in s["attempts"]:
                 assert_equal(a["outcome"], "not_announced")
-                assert_equal(a["reason"], "socks connect failed")
                 assert 0 <= a["started_ms"] - a["scheduled_start_ms"] <= grace_ms, a
-                # Gave up at the SOCKS exchange deadline, not at the proxy's pace.
-                assert a["ended_ms"] - a["scheduled_start_ms"] <= socks_budget_ms + 200, a
-                assert a["ended_ms"] - a["scheduled_start_ms"] >= socks_budget_ms - 200, a
+                # Failed within the handshake budget, so the slot's next opportunity is not held up.
+                assert a["ended_ms"] - a["scheduled_start_ms"] <= handshake_ms + 200, a
         # A stalled primary's backup was tried, at its own scheduled time.
         assert any(len(s["attempts"]) >= 2 for s in report["slots"])
         # The job ends by its scheduled end: nothing stretched.

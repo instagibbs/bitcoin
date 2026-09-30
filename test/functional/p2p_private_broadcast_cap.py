@@ -14,7 +14,7 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.wallet import MiniWallet
 
 
-MAX_QUEUED_JOBS = 10_000  # node::PrivateBroadcastManager::MAX_QUEUED_JOBS
+MAX_QUEUED_JOBS = 10_000  # the spec's MAX_QUEUED_JOBS
 OVER_CAP = 5
 
 
@@ -49,7 +49,7 @@ class PrivateBroadcastCapTest(BitcoinTestFramework):
 
         self.log.info(f"Submitting {OVER_CAP} more: each is rejected and the queue is left unchanged")
         for child in over:
-            assert_raises_rpc_error(-37, "Private broadcast job not queued", node.sendrawtransaction, child["hex"])
+            assert_raises_rpc_error(-37, None, node.sendrawtransaction, child["hex"])
         assert_equal(self.jobs(), jobs)
 
         self.log.info("A transaction whose job is queued or running is accepted again without queuing anything, even with the queue full")

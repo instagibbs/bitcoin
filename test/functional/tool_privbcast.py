@@ -23,10 +23,12 @@ import time
 
 from test_framework.messages import (
     CInv,
+    MSG_TX,
     MSG_WITNESS_TX,
     MSG_WTX,
     NODE_WITNESS,
     msg_getdata,
+    msg_inv,
     msg_notfound,
     msg_sendtxrcncl,
     msg_tx,
@@ -75,6 +77,9 @@ BACKUP_MIN_S, BACKUP_MAX_S = 50, 60
 MID_MIN_S, MID_MAX_S = 35, 180
 LATE_MIN_S, LATE_MAX_S = 185, 240
 PRIMARY_SEPARATION_S = 5
+PARENT_HOLD_S = 30
+MAX_RECV_BYTES = 128 * 1024
+MAX_STANDARD_TX_WEIGHT = 400_000
 
 
 def make_onion(seed: int) -> str:
@@ -93,6 +98,8 @@ class Recipient(P2PInterface):
         self.txs_received = []
         self.getdatas_sent = 0
         self.invs_received = 0
+        self.ping_nonces = []
+        self.notfound = []
 
     def request(self, hashes, inv_type=MSG_WTX):
         want = msg_getdata()
@@ -107,6 +114,13 @@ class Recipient(P2PInterface):
 
     def on_tx(self, message):
         self.txs_received.append(message.tx)
+
+    def on_ping(self, message):
+        self.ping_nonces.append(message.nonce)
+        super().on_ping(message)
+
+    def on_notfound(self, message):
+        self.notfound.extend(i.hash for i in message.vec)
 
 
 class SilentRecipient(Recipient):
@@ -128,7 +142,7 @@ class NoPongRecipient(Recipient):
     """Requests and receives X but never answers the PING."""
 
     def on_ping(self, message):
-        pass
+        self.ping_nonces.append(message.nonce)
 
 
 class NoWtxidRecipient(Recipient):
@@ -153,6 +167,86 @@ class ProbingRecipient(Recipient):
         self.request([message.tx.wtxid_int])
         self.request([message.tx.wtxid_int])
         self.send_without_ping(msg_sendtxrcncl())
+
+
+class OldVersionRecipient(Recipient):
+    """Announces protocol 70015, below the 70016 that BIP339 needs: the tool must leave it unannounced."""
+
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services)
+        self.on_connection_send_msg.nVersion = 70015
+
+
+class NoWitnessRecipient(Recipient):
+    """Does not offer NODE_WITNESS: the tool must leave it unannounced."""
+
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services & ~NODE_WITNESS)
+
+
+class FloodingRecipient(Recipient):
+    """Floods the connection with announcements once the handshake is done, well past the receive cap."""
+
+    def on_verack(self, message):
+        super().on_verack(message)
+        junk = msg_inv([CInv(MSG_TX, i) for i in range(1, 1001)])  # about 36 kB each
+        for _ in range(6):
+            self.send_without_ping(junk)
+
+
+class PackageRecipient(Recipient):
+    """A recipient in package mode that knows the parent's and child's ids."""
+
+    def __init__(self, parent_txid, child_txid, child_wtxid):
+        super().__init__()
+        self.parent_txid, self.child_txid, self.child_wtxid = parent_txid, child_txid, child_wtxid
+
+
+class BatchedParentRecipient(PackageRecipient):
+    """Resolves the child as a node lacking its parent does when the child's other inputs are confirmed
+    coins it no longer remembers: it asks for every one of them by txid, ours last, in GETDATAs of up
+    to 1000 entries, for as many inputs as a child of maximum standard weight can have. The request
+    names the child's txid too, which the tool must neither serve nor call not found."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unknown = [0x1000 + i for i in range(MAX_STANDARD_TX_WEIGHT // (4 * 41) - 2)]
+
+    def on_tx(self, message):
+        super().on_tx(message)
+        if len(self.txs_received) == 1:
+            wanted = [CInv(MSG_WITNESS_TX, h) for h in self.unknown + [self.child_txid, self.parent_txid]]
+            for i in range(0, len(wanted), 1000):
+                self.send_without_ping(msg_getdata(wanted[i:i + 1000]))
+
+
+class BothNamedRecipient(PackageRecipient):
+    """Asks for the child and the parent in one request before anything was served, which the tool must
+    ignore outright, then for the child alone, then for the parent."""
+
+    def on_inv(self, message):
+        self.invs_received += 1
+        self.send_without_ping(msg_getdata([CInv(MSG_WTX, self.child_wtxid), CInv(MSG_WITNESS_TX, self.parent_txid)]))
+        self.send_without_ping(msg_getdata([CInv(MSG_WTX, self.child_wtxid)]))
+
+    def on_tx(self, message):
+        super().on_tx(message)
+        if len(self.txs_received) == 1:
+            self.send_without_ping(msg_getdata([CInv(MSG_WITNESS_TX, self.parent_txid)]))
+
+
+class RecordingV2State(EncryptedP2PState):
+    """Keeps the initiator's ellswift key, so that a test can check each attempt used its own."""
+
+    peer_ellswift = None
+
+    def complete_handshake(self, response):
+        start = response.tell()
+        theirs = self.received_prefix + response.read(64 - len(self.received_prefix))
+        response.seek(start)
+        if len(theirs) == 64:
+            self.peer_ellswift = theirs
+        return super().complete_handshake(response)
 
 
 class ChildOnlyPeer(P2PInterface):
@@ -215,7 +309,7 @@ class ToolPrivbcast(BitcoinTestFramework):
                     listener.peer_connect_helper(dstaddr="0.0.0.0", dstport=0, net=self.chain, timeout_factor=self.options.timeout_factor)
                     listener.peer_connect_send_version(services=P2P_SERVICES)
                     if v2:
-                        listener.v2_state = EncryptedP2PState(initiating=False, net=self.chain)
+                        listener.v2_state = RecordingV2State(initiating=False, net=self.chain)
                     else:
                         # A v1-only peer closes on the v2 handshake bytes; mark it so the framework does
                         # not log that expected close as an error. The tool never comes back over v1.
@@ -253,7 +347,8 @@ class ToolPrivbcast(BitcoinTestFramework):
         proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=timeout)
         for line in proc.stderr.splitlines():
             self.log.debug(f"tool stderr: {line}")
-        assert_equal(proc.returncode, expected_rc)
+        if expected_rc is not None:
+            assert_equal(proc.returncode, expected_rc)
         return proc
 
     def run_send(self, tx_hex, *extra, expected_rc=0, time_divisor=TIME_DIVISOR):
@@ -308,6 +403,9 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.test_socks_auth_required()
         self.test_not_tor_proxy()
         self.test_no_wtxid_relay()
+        self.test_unsuitable_peers()
+        self.test_package_requests()
+        self.test_assignment()
         self.test_slow_resolve()
         self.test_interrupt_blocked_resolve()
         self.test_node_recipient()
@@ -486,6 +584,37 @@ class ToolPrivbcast(BitcoinTestFramework):
         # Each endpoint is connected exactly once for the whole job.
         for endpoint, n in self.connects.items():
             assert_equal(n, 1)
+
+        # An announcement ends its slot: no attempt follows one whose INV the transport took.
+        for s in report["slots"]:
+            for prev in s["attempts"][:-1]:
+                assert prev["inv_handed_ms"] is None, s
+
+        # Every recipient got at most one INV, naming the transaction's wtxid alone, and only messages
+        # the profile sends.
+        for listener, _, _ in self.listeners.values():
+            assert_greater_than_or_equal(1, listener.invs_received)
+            inv = listener.last_message.get("inv")
+            if inv is not None:
+                assert_equal([(i.type, i.hash) for i in inv.inv], [(MSG_WTX, int(tx["wtxid"], 16))])
+            assert set(listener.last_message) <= {"version", "wtxidrelay", "verack", "inv", "tx", "ping"}, listener.last_message
+
+        # Nothing is shared between attempts but the transaction and the profile: each recipient saw
+        # its own BIP324 key and VERSION nonce, and each PING carried its own nonce.
+        keys, version_nonces, ping_nonces = [], [], []
+        for listener, _, _ in self.listeners.values():
+            state = getattr(listener, "v2_state", None)
+            if state is not None and state.peer_ellswift is not None:
+                keys.append(state.peer_ellswift)
+            if "version" in listener.last_message:
+                version_nonces.append(listener.last_message["version"].nNonce)
+            ping_nonces.extend(listener.ping_nonces)
+        assert_greater_than(len(keys), 1)
+        for values in (keys, version_nonces, ping_nonces):
+            assert_equal(len(set(values)), len(values))
+
+        # The report names what was dialled and carries no transaction bytes.
+        assert tx["hex"] not in json.dumps(report)
 
         # The VERSION every recipient saw is the fixed profile.
         for endpoint, (listener, _, _) in self.listeners.items():
@@ -767,10 +896,115 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.stop_proxy()
         node.disconnect_p2ps()
 
+    def test_unsuitable_peers(self):
+        self.log.info("Peers below protocol 70016 or without NODE_WITNESS are left unannounced; a flooding peer is cut at the receive cap")
+        old, no_witness, flooder = "9.3.0.1", "9.3.0.2", "9.3.0.3"
+        self.start_proxy({"v.seed.": [old, no_witness, flooder]},
+                         {old: (OldVersionRecipient, True), no_witness: (NoWitnessRecipient, True), flooder: (FloodingRecipient, True)})
+        tx = self.wallet.create_self_transfer()
+        # Whether the flooder was sent the INV before the cap cut it is a race, and with it the exit status.
+        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=v.seed.", "send", stdin=tx["hex"], expected_rc=None)
+        report = json.loads(proc.stdout)
+        self.log.debug(json.dumps(report, indent=1))
+        for endpoint in (old, no_witness):
+            assert_equal([a["outcome"] for a in self.attempts_to(report, endpoint)], ["not_announced"])
+            listener = self.listeners[endpoint][0]
+            assert_equal(listener.invs_received, 0)
+            assert not listener.txs_received
+        flooded = self.attempts_to(report, flooder)
+        assert_equal(len(flooded), 1)
+        a = flooded[0]
+        assert a["outcome"] in ("not_announced", "post_announcement_failure"), a
+        # Past the cap, then cut: well short of the six announcements it was sent, and early.
+        assert_greater_than(a["bytes_recv"], MAX_RECV_BYTES)
+        assert_greater_than(6 * 36_000, a["bytes_recv"])
+        assert_greater_than(HANDSHAKE_TIMEOUT_S * 1000 / TIME_DIVISOR, a["ended_ms"] - a["scheduled_start_ms"])
+        self.stop_proxy()
+
+    def test_package_requests(self):
+        self.log.info("Package mode against scripted recipients: batched, both-named and unasked parent requests")
+        parent = self.wallet.create_self_transfer()
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"])
+        ids = dict(parent_txid=int(parent["txid"], 16), child_txid=int(child["txid"], 16), child_wtxid=int(child["wtxid"], 16))
+        batched, both, unasked = "9.6.0.1", "9.6.0.2", "9.6.0.3"
+        self.start_proxy({"p.seed.": [batched, both, unasked]},
+                         {batched: (lambda: BatchedParentRecipient(**ids), True),
+                          both: (lambda: BothNamedRecipient(**ids), True),
+                          unasked: (Recipient, True)})
+        report, _ = self.run_send(child["hex"] + "\n" + parent["hex"], "-seed=p.seed.")
+        self.log.debug(json.dumps(report, indent=1))
+        # Each was announced the child alone, by wtxid, once; the parent is never announced.
+        for endpoint in (batched, both, unasked):
+            listener = self.listeners[endpoint][0]
+            assert_equal(listener.invs_received, 1)
+            assert_equal([(i.type, i.hash) for i in listener.last_message["inv"].inv], [(MSG_WTX, ids["child_wtxid"])])
+            assert set(listener.last_message) <= {"version", "wtxidrelay", "verack", "inv", "tx", "ping", "notfound"}, listener.last_message
+            assert_equal([a["outcome"] for a in self.attempts_to(report, endpoint)], ["pong_received"])
+        # The batched request: the parent served once, NOTFOUND for exactly the entries that are not ours,
+        # and a request larger than a 64 KiB cap would have allowed.
+        listener = self.listeners[batched][0]
+        assert_equal([t.txid_hex for t in listener.txs_received], [child["txid"], parent["txid"]])
+        assert_equal(sorted(listener.notfound), listener.unknown)
+        a = self.attempts_to(report, batched)[0]
+        assert a["parent_tx_written_ms"] is not None
+        assert_greater_than(a["bytes_recv"], 64 * 1024)
+        # Both named before the child was served: ignored outright, no NOTFOUND; then served in turn.
+        listener = self.listeners[both][0]
+        assert_equal([t.txid_hex for t in listener.txs_received], [child["txid"], parent["txid"]])
+        assert_equal(listener.notfound, [])
+        assert_greater_than_or_equal(self.attempts_to(report, both)[0]["extra_requests"], 1)
+        # Never asked for the parent: the PING waited out the hold, then went.
+        listener = self.listeners[unasked][0]
+        assert_equal([t.txid_hex for t in listener.txs_received], [child["txid"]])
+        a = self.attempts_to(report, unasked)[0]
+        assert a["parent_hold_expired_ms"] is not None and a["parent_getdata_ms"] is None
+        assert_greater_than_or_equal(a["ping_written_ms"] - a["tx_written_ms"], PARENT_HOLD_S * 1000 / TIME_DIVISOR - 100)
+        self.stop_proxy()
+
+    def test_assignment(self):
+        self.log.info("Assignment: first attempts before backups; seeds spread over slots; onion slots take onions")
+        # No endpoint is reachable, so every assigned opportunity is dialled and fails before announcing.
+        # Scarce candidates: two exit-path candidates go to two first attempts, not to a backup.
+        self.start_proxy({"s1.seed.": ["9.7.0.1", "9.7.0.2"]}, {})
+        tx = self.wallet.create_self_transfer()
+        report, _ = self.run_send(tx["hex"], "-seed=s1.seed.", expected_rc=2)
+        attempts = [(s, a) for s, a in self.attempts(report)]
+        assert_equal(len(attempts), report["discovery"]["exit_path_candidates"])
+        for s, a in attempts:
+            assert_equal(a["scheduled_start_ms"], s["scheduled_ms"][0])
+        self.stop_proxy()
+        # Four seeds of three and eight onions: every exit-path slot's opportunities come from distinct
+        # seeds, the four first attempts from four seeds, and the onion slots dial onions only.
+        seeds = {f"q{n}.seed.": [f"9.8.{n}.{i}" for i in range(1, 4)] for n in range(1, 5)}
+        onions = [make_onion(20 + i) for i in range(8)]
+        self.start_proxy(seeds, {})
+        report, _ = self.run_send(tx["hex"], *[f"-seed={name}" for name in seeds],
+                                  *[f"-fixedseed={o}:{REGTEST_PORT}" for o in onions], expected_rc=2)
+        self.log.debug(json.dumps(report, indent=1))
+        kept = {st["name"]: st["kept"] for st in report["discovery"]["seeds"]}
+        if kept != {name: 3 for name in seeds}:
+            self.log.warning(f"host lost discovery answers ({kept}): spread checks not applicable")
+        else:
+            first = []
+            for s in report["slots"]:
+                if s["class"] != "exit_path":
+                    continue
+                provenance = [a["provenance"] for a in s["attempts"]]
+                assert_equal(len(set(provenance)), len(provenance))
+                first.append(provenance[0])
+            assert_equal(len(set(first)), 4)
+        for s in report["slots"]:
+            for a in s["attempts"]:
+                assert_equal(a["source"], "bundled" if s["class"] == "onion" else "dns_seed")
+        onion_endpoints = [a["endpoint"] for s, a in self.attempts(report) if s["class"] == "onion"]
+        assert_equal(len(set(onion_endpoints)), len(onion_endpoints))
+        self.stop_proxy()
+
     def test_discover(self):
         self.log.info("discover resolves through the proxy and opens no connection")
-        # Seed a answers IPv4 and IPv6 (repeats are duplicates); seed z's queries all fail.
-        self.start_proxy({"a.seed.": ["1.1.1.1", "2606:4700:4700::1111"]}, {"1.1.1.1": (Recipient, True)})
+        # Seed a answers IPv4, IPv6 and a private address, which is rejected (the fourth query repeats
+        # the first answer: a duplicate); seed z's queries all fail.
+        self.start_proxy({"a.seed.": ["1.1.1.1", "2606:4700:4700::1111", "10.0.0.1"]}, {"1.1.1.1": (Recipient, True)})
         proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-seed=z.seed.", "-noprogress", "discover")
         out = json.loads(proc.stdout)
         seeds = {s["name"]: s for s in out["seeds"]}
@@ -781,8 +1015,8 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(seeds["z.seed."]["queries"], 4)
         assert_equal(seeds["z.seed."]["answers"], 0)
         assert_equal(seeds["z.seed."]["kept"], 0)
-        assert_equal(out["duplicates"], 2)
-        assert_equal(out["rejected"], 0)
+        assert_equal(out["duplicates"], 1)
+        assert_equal(out["rejected"], 1)
         commands = self.drain_socks_commands()
         assert_equal([c.cmd for c in commands], [Command.RESOLVE] * 8)
         assert_equal(self.connects, {})

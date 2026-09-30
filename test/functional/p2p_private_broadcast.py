@@ -673,6 +673,21 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.restart_node(0)
         self.advance(0)
 
+        self.log.info("Jobs are kept in memory only; the default log names no transaction or peer; peer settings do not apply")
+        assert_equal(self.entries(), [])
+        self.restart_node(0, extra_args=self.extra_args[0] + ["-debug=none", "-onlynet=onion", "-dnsseed=0", "-fixedseeds=0"])
+        self.advance(0)
+        t = self.wallet.create_self_transfer()
+        with self.nodes[0].assert_debug_log(expected_msgs=[], unexpected_msgs=[t["txid"], t["wtxid"], "11.22.33.", ".onion"]):
+            job_id = self.jobs_after_submit(t["hex"])
+            self.finish([job_id])
+        report = self.jobs()[job_id]["report"]
+        assert_greater_than(report["discovery"]["exit_path_candidates"], 0)
+        assert_equal(report["discovery"]["onion_candidates"], len(self.onions))
+        assert any(a["source"] == "dns_seed" for s in report["slots"] for a in s["attempts"])
+        self.restart_node(0)
+        self.advance(0)
+
         self.log.info("Stopping the node cuts short a job blocked in a SOCKS exchange, in discovery or in delivery")
         # Proxies that hold every RESOLVE, or every CONNECT, an hour. With the clock frozen only the stop
         # can end the job, and well before the SOCKS deadlines (15 s for a RESOLVE, 35 s for a CONNECT)

@@ -708,6 +708,32 @@ BOOST_AUTO_TEST_CASE(discovery_freeze)
     BOOST_CHECK(r.tie_order == tie_order);
 }
 
+BOOST_AUTO_TEST_CASE(discovery_freeze_ignores_arrival_order)
+{
+    // What a seed contributes depends on its answers and the job's randomness, not on the order in
+    // which the answers arrived.
+    DiscoveryPlan plan;
+    plan.dns_seeds = {"a.seed.", "b.seed."};
+    plan.port = 8333;
+    const auto ip = [](const std::string& s) { return LookupHost(s, /*fAllowLookup=*/false).value(); };
+    SeedAnswers answers(2);
+    answers[0] = {ip("8.0.0.1"), ip("8.0.0.2"), ip("8.0.0.3"), ip("8.0.0.4")};
+    answers[1] = {ip("8.0.1.1"), ip("8.0.1.2"), ip("8.0.1.3"), ip("8.0.1.4"), ip("8.0.0.1")};
+    SeedAnswers reversed{answers};
+    for (auto& a : reversed) std::reverse(a.begin(), a.end());
+    const auto freeze = [&](const SeedAnswers& in) {
+        FastRandomContext rng{/*fDeterministic=*/true};
+        const DiscoveryResult r{Freeze(plan, in, /*tie_order=*/{0, 1}, rng)};
+        std::vector<std::vector<CService>> kept;
+        for (const auto& per_seed : r.per_seed) {
+            kept.emplace_back();
+            for (const auto& c : per_seed) kept.back().push_back(c.addr);
+        }
+        return kept;
+    };
+    BOOST_CHECK(freeze(answers) == freeze(reversed));
+}
+
 BOOST_AUTO_TEST_CASE(discovery_freeze_bundled_onions)
 {
     DiscoveryPlan plan;

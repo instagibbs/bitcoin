@@ -85,6 +85,8 @@ DiscoveryResult Freeze(const DiscoveryPlan& plan, const SeedAnswers& answers, co
     }
     for (size_t i = 0; i < n; ++i) {
         auto& kept{result.per_seed[i]};
+        // Sorted first, so what is kept depends on the answers and the rng, not on their arrival order.
+        std::sort(kept.begin(), kept.end(), [](const Candidate& a, const Candidate& b) { return a.addr < b.addr; });
         std::shuffle(kept.begin(), kept.end(), rng);
         if (kept.size() > disc::MAX_PER_SEED) kept.resize(disc::MAX_PER_SEED);
         result.seeds[i].kept = kept.size();

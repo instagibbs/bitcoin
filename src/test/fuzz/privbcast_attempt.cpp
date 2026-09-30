@@ -233,7 +233,7 @@ private:
             if (m_fdp.ConsumeIntegralInRange<int>(0, 15) == 0) {
                 // Flood a single well-framed INV larger than the raw receive cap: the tool ignores
                 // its contents but must end the attempt on the byte budget, not decode all of it.
-                std::vector<CInv> big(3000, CInv{MSG_TX, wtxid}); // ~108 KiB on the wire
+                std::vector<CInv> big(wire::MAX_RECV_BYTES / 36 + 1, CInv{MSG_TX, wtxid}); // 36 bytes per entry
                 Reply(NetMsg::Make(NetMsgType::INV, big));
             }
             const int requests{m_fdp.ConsumeBool() ? 1 : m_fdp.ConsumeIntegralInRange<int>(0, 3)};

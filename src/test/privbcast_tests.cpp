@@ -37,6 +37,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <compat/compat.h>
+#include <consensus/consensus.h>
 
 #include <atomic>
 #include <chrono>
@@ -606,7 +607,7 @@ BOOST_AUTO_TEST_CASE(run_session_receive_cap_and_peer_close)
         const auto t0{Clock::now()};
         Session session{tx, t0, rng};
         auto pipes{std::make_shared<DynSock::Pipes>()};
-        for (uint64_t i = 0; i < 3000; ++i) pipes->recv.PushNetMsg(NetMsgType::PING, i);
+        for (uint64_t i = 0; i * 32 <= wire::MAX_RECV_BYTES; ++i) pipes->recv.PushNetMsg(NetMsgType::PING, i); // 32 bytes each over v1
         AttemptResult result;
         {
             DynSock sock{pipes};
@@ -631,6 +632,45 @@ BOOST_AUTO_TEST_CASE(run_session_receive_cap_and_peer_close)
         BOOST_CHECK(session.GetOutcome() == Outcome::NOT_ANNOUNCED);
         BOOST_CHECK_EQUAL(session.Reason(), "peer closed");
     }
+}
+
+BOOST_AUTO_TEST_CASE(run_session_large_orphan_resolution)
+{
+    // A child of maximum standard weight can spend a different transaction in every input. A peer
+    // resolving it as an orphan asks for every parent it does not recognise, confirmed ones
+    // included, in GETDATAs of up to 1000 entries, and ours may come last. It all fits the cap.
+    const CTransactionRef parent{MakeTx()};
+    const CTransactionRef child{MakeChildOf(parent)};
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const auto t0{Clock::now()};
+    Session session{child, t0, rng, parent};
+    auto pipes{std::make_shared<DynSock::Pipes>()};
+    pipes->recv.PushNetMsg(NetMsgType::VERSION, 70016, uint64_t{NODE_NETWORK | NODE_WITNESS}, int64_t{0},
+                           uint64_t{0}, CNetAddr::V1(CService{}), uint64_t{0}, CNetAddr::V1(CService{}),
+                           uint64_t{42}, std::string{"/peer:1.0/"}, int{100}, true);
+    pipes->recv.PushNetMsg(NetMsgType::WTXIDRELAY);
+    pipes->recv.PushNetMsg(NetMsgType::VERACK);
+    pipes->recv.PushNetMsg(NetMsgType::GETDATA, std::vector<CInv>{CInv{MSG_WTX, child->GetWitnessHash().ToUint256()}});
+    const size_t max_parents{MAX_STANDARD_TX_WEIGHT / (WITNESS_SCALE_FACTOR * 41)}; // one minimal input per parent
+    std::vector<CInv> requested;
+    while (requested.size() + 1 < max_parents) requested.emplace_back(MSG_WITNESS_TX, rng.rand256());
+    requested.emplace_back(MSG_WITNESS_TX, parent->GetHash().ToUint256());
+    for (size_t i = 0; i < requested.size(); i += 1000) {
+        pipes->recv.PushNetMsg(NetMsgType::GETDATA, std::vector<CInv>(requested.begin() + i, requested.begin() + std::min(i + 1000, requested.size())));
+    }
+    pipes->recv.PushNetMsg(NetMsgType::PONG, session.PingNonce());
+    AttemptResult result;
+    {
+        DynSock sock{pipes};
+        V1Transport transport{NodeId{0}};
+        RunSession(sock, transport, session, result, t0 + wire::ATTEMPT_MAX, [] { return false; });
+    }
+    BOOST_CHECK_EQUAL(session.Reason(), "");
+    BOOST_CHECK(session.GetOutcome() == Outcome::PONG_RECEIVED);
+    BOOST_CHECK(session.GetEvidence().parent_written.has_value());
+    std::string sent;
+    while (const auto msg{pipes->send.GetNetMsg()}) sent += (sent.empty() ? "" : ",") + msg->m_type;
+    BOOST_CHECK_EQUAL(sent, "version,wtxidrelay,verack,inv,tx,notfound,notfound,tx,notfound,ping");
 }
 
 BOOST_AUTO_TEST_CASE(discovery_freeze)

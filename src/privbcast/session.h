@@ -58,8 +58,12 @@ inline constexpr auto PONG_WAIT{10s};
 inline constexpr auto PARENT_HOLD{30s};
 /** Longest an attempt can run, from its scheduled start. */
 inline constexpr auto ATTEMPT_MAX{HANDSHAKE_TIMEOUT + REQUEST_WINDOW + PONG_WAIT};
-/** Raw transport bytes accepted per attempt before it is ended. */
-inline constexpr size_t MAX_RECV_BYTES{64 * 1024};
+/**
+ * Raw transport bytes accepted per attempt before it is ended: a sanity bound, not a privacy
+ * parameter. A peer resolving the child as an orphan asks for every parent it does not recognise,
+ * confirmed ones included, at 36 bytes each: about 88 KB for a child of maximum standard weight.
+ */
+inline constexpr size_t MAX_RECV_BYTES{128 * 1024};
 static_assert(PARENT_HOLD + PONG_WAIT <= REQUEST_WINDOW); // a promptly written child gets its full hold and the reserved pong budget
 } // namespace wire
 

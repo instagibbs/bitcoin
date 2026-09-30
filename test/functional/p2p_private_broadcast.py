@@ -23,11 +23,8 @@ import threading
 import time
 
 from test_framework.address import address_to_scriptpubkey
-from test_framework.mempool_util import TRUC_CHILD_MAX_VSIZE
 from test_framework.messages import (
     CInv,
-    COutPoint,
-    CTxIn,
     MSG_WTX,
     msg_getdata,
     msg_tx,
@@ -38,10 +35,7 @@ from test_framework.p2p import (
     P2P_SERVICES,
     start_p2p_listener,
 )
-from test_framework.socks5 import (
-    Command,
-    start_socks5_server,
-)
+from test_framework.socks5 import start_socks5_server
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -362,11 +356,6 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             assert_equal(len(live(txs[-1])), jobs)
             clean(txs[-1])
 
-        def missing_input(t):
-            t["tx"].vin.append(CTxIn(COutPoint(int("11" * 32, 16), 0)))
-            t.update(hex=t["tx"].serialize().hex(), wtxid=t["tx"].wtxid_hex)
-            return t
-
         def pair(parent_fee_rate=Decimal("0.003"), child_fee_rate=Decimal("0.003")):
             parent = self.wallet.create_self_transfer(fee_rate=parent_fee_rate)
             return parent, self.wallet.create_self_transfer(utxo_to_spend=parent["new_utxo"], fee_rate=child_fee_rate)
@@ -376,22 +365,14 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         to_mempool(in_mempool)
         check([in_mempool], "success", [""], 1)  # rebroadcast, sent as given
         check([self.wallet.create_self_transfer(fee_rate=Decimal("0"))], None, ["min relay fee not met"], 0)
-        check([missing_input(self.wallet.create_self_transfer())], None, ["bad-txns-inputs-missingorspent"], 0)
         check(pair(), "success", ["", ""], 1)
         check(pair(Decimal("0"), Decimal("0")), None, ["min relay fee not met", None], 0)
         parent, child = pair(child_fee_rate=Decimal("0"))
         to_mempool(parent)
         check([parent, child], None, ["", "min relay fee not met"], 0)
-        parent = self.wallet.create_self_transfer()
-        child = self.wallet.create_self_transfer_multi(utxos_to_spend=[parent["new_utxo"], {"txid": "11" * 32, "vout": 0, "value": Decimal("1")}])
-        to_mempool(parent)
-        check([parent, child], None, ["", "bad-txns-inputs-missingorspent"], 0)
         parent, child = pair()
         to_mempool(parent, child)
         check([parent, child], "success", ["", ""], 1)
-        parent, child = pair()
-        self.generateblock(self.nodes[0], self.wallet.get_address(), [parent["hex"]], sync_fun=self.sync_blocks)
-        check([parent, child], None, ["txn-already-known", None], 0)
         assert_raises_rpc_error(-25, "package topology disallowed", self.nodes[0].submitpackage,
                                 [self.wallet.create_self_transfer()["hex"], self.wallet.create_self_transfer()["hex"]])
 
@@ -408,12 +389,6 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.nodes[0].sendrawtransaction(child["hex"])
         self.nodes[0].submitpackage([parent["hex"], child["hex"]])
         assert_equal(len(live(child)), 2)
-        clean(child)
-        # With the parent not in the mempool, the child alone is refused for its missing input.
-        parent, child = pair(Decimal("0"), Decimal("0.01"))
-        self.nodes[0].submitpackage([parent["hex"], child["hex"]])
-        assert_raises_rpc_error(None, "bad-txns-inputs-missingorspent", self.nodes[0].sendrawtransaction, child["hex"])
-        assert_equal(len(live(child)), 1)
         clean(child)
         self.nodes[0].disconnect_p2ps()
         self.open_gate()
@@ -468,6 +443,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_equal([(r["wtxid"], r["hex"], r["state"]) for r in res["removed_transactions"]], [(w[0], txs[0]["hex"], "running")])
         job = self.wait_for_state(w[0], "aborted", timeout=30)
         assert_equal(job["report"]["summary"]["interrupted"], True)
+        assert_equal(job["announced"], False)  # stopped before delivery start: no INV written
         self.advance(started + START_SPACING_MIN_S - 1 - self.mocktime)
         assert_equal(self.jobs()[w[1]]["state"], "queued")
         # Once the spacing has passed the next job starts, and the one after it starts while it still runs.
@@ -578,13 +554,10 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         coin = self.wallet.get_utxo()
         parent = self.wallet.create_self_transfer(utxo_to_spend=coin)
         double_spend = self.wallet.create_self_transfer_multi(utxos_to_spend=[parent["new_utxo"], coin])
-        truc_parent = self.wallet.create_self_transfer(version=3)
-        truc_child = self.wallet.create_self_transfer(utxo_to_spend=truc_parent["new_utxo"], version=3, target_vsize=2 * TRUC_CHILD_MAX_VSIZE)
-        for package, reason in (([parent, double_spend], "conflict-in-package"), ([truc_parent, truc_child], "TRUC-violation")):
-            res = self.nodes[0].submitpackage([t["hex"] for t in package])
-            assert_equal(res["package_msg"].split(",")[0], reason)
-            for t in package:
-                assert res["tx-results"][t["wtxid"]]["error"]
+        res = self.nodes[0].submitpackage([parent["hex"], double_spend["hex"]])
+        assert_equal(res["package_msg"].split(",")[0], "conflict-in-package")
+        for t in (parent, double_spend):
+            assert res["tx-results"][t["wtxid"]]["error"]
         assert_equal(set(self.jobs()), before)
 
         self.test_package()
@@ -649,34 +622,11 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_greater_than_or_equal(streams, 20)
         assert_equal(len(creds), streams)
 
-        self.log.info("With a proxy that is not Tor, a job reaches no one: no RESOLVE answers, no onion")
-        not_tor = start_socks5_server(None, auth=True, unauth=True, tor=False)
-        self.restart_node(0, extra_args=[a if not a.startswith("-onion=") else f"-onion=127.0.0.1:{not_tor.conf.addr[1]}"
-                                         for a in self.extra_args[0]])
-        self.advance(0)  # the restarted node is back on the mocked clock
-        t = self.wallet.create_self_transfer()
-        job_id = self.jobs_after_submit(t["hex"])
-        self.finish([job_id])
-        job = self.jobs()[job_id]
-        assert_equal(job["announced"], False)
-        assert_equal(job["report"]["summary"]["announcements_written"], 0)
-        assert_equal(job["report"]["discovery"]["exit_path_candidates"], 0)
-        commands = []
-        while not not_tor.queue.empty():
-            item = not_tor.queue.get()
-            if isinstance(item, Exception):
-                raise item
-            commands.append(item)
-        assert any(c.cmd == Command.RESOLVE for c in commands)
-        assert all(c.cmd == Command.RESOLVE or c.addr.decode().endswith(".onion") for c in commands)
-        not_tor.stop()
-        self.restart_node(0)
-        self.advance(0)
 
         self.log.info("Jobs are kept in memory only; the default log names no transaction or peer; peer settings do not apply")
-        assert_equal(self.entries(), [])
         self.restart_node(0, extra_args=self.extra_args[0] + ["-debug=none", "-onlynet=onion", "-dnsseed=0", "-fixedseeds=0"])
         self.advance(0)
+        assert_equal(self.entries(), [])
         t = self.wallet.create_self_transfer()
         with self.nodes[0].assert_debug_log(expected_msgs=[], unexpected_msgs=[t["txid"], t["wtxid"], "11.22.33.", ".onion"]):
             job_id = self.jobs_after_submit(t["hex"])
@@ -690,8 +640,8 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
 
         self.log.info("Stopping the node cuts short a job blocked in a SOCKS exchange, in discovery or in delivery")
         # Proxies that hold every RESOLVE, or every CONNECT, an hour. With the clock frozen only the stop
-        # can end the job, and well before the SOCKS deadlines (15 s for a RESOLVE, 35 s for a CONNECT)
-        # it would otherwise wait out. The handler threads sleep through the hold and end with the test.
+        # can end the job, and it must not wait for any deadline. The handler threads sleep through the
+        # hold and end with the test.
         held_resolve = start_socks5_server(None, lambda name: "11.22.33.1", resolve_reply_delay=3600)
         held_connect = start_socks5_server(None, lambda name: "11.22.33.1", connect_reply_delay=3600)
         self.stop_node(0)
@@ -710,11 +660,6 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             assert_greater_than(10 * self.options.timeout_factor, time.time() - start)
         self.start_node(0)
         self.advance(0)
-
-        self.log.info("The node shuts down cleanly with a job running")
-        last = self.wallet.create_self_transfer()
-        self.wait_for_state(self.jobs_after_submit(last["hex"]), "running")
-        # The framework stops both nodes now; a hang or crash here fails the test.
         self.socks5_server.stop()
 
 

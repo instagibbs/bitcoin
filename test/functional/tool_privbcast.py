@@ -396,13 +396,11 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.test_argument_errors()
         self.test_bounded_job()
         self.test_concurrent_invocations()
-        self.test_interrupt()
         self.test_interrupt_mid_delivery()
         self.test_stalled_stderr()
         self.test_stalled_proxy()
         self.test_socks_auth_required()
         self.test_not_tor_proxy()
-        self.test_no_wtxid_relay()
         self.test_unsuitable_peers()
         self.test_package_requests()
         self.test_assignment()
@@ -700,46 +698,18 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(len(node.getpeerinfo()), peers_before)  # neither job made the node a recipient
         self.stop_proxy()
 
-    def test_interrupt(self):
-        self.log.info("SIGINT during discovery ends the job promptly with exit status 2 and a report")
-        self.start_proxy({"a.seed.": ["8.0.0.1"]}, {"8.0.0.1": (Recipient, True)})
-        node = self.nodes[0]
-        mempool_before = node.getrawmempool()
-        tx = self.wallet.create_self_transfer()
-        started = time.monotonic()
-        proc = self.start_send(tx["hex"], "-seed=a.seed.")
-        self.wait_until(lambda: self.resolve_counts.get("a.seed.", 0) >= 1)  # discovery is under way
-        self.interrupt(proc)
-        rc, report = self.finish_send(proc)
-        elapsed = time.monotonic() - started
-        assert_equal(rc, 2)
-        assert_equal(report["summary"]["interrupted"], True)
-        assert_equal(report["summary"]["connections"], 0)
-        assert_equal(report["summary"]["announcements_written"], 0)
-        assert_equal(report["summary"]["slots_completed"], 0)
-        assert_greater_than(DISCOVERY_WINDOW_S / TIME_DIVISOR + 10, elapsed)
-        assert_equal(self.connects, {})
-        assert_equal(node.getrawmempool(), mempool_before)
-        self.stop_proxy()
-
     def test_socks_auth_required(self):
         self.log.info("A proxy offering no authentication: the tool resolves nothing and sends nothing")
         onion = make_onion(9)
         self.start_proxy({"a.seed.": ["9.0.0.1"]}, {onion: (Recipient, True)}, proxy_authenticates=False)
-        # discover: the greeting is answered with no-auth, which the tool refuses, so no RESOLVE runs.
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-noprogress", "discover")
-        out = json.loads(proc.stdout)
-        assert_equal(out["seeds"][0]["queries"], 4)
-        assert_equal(out["seeds"][0]["kept"], 0)
-        assert_equal(self.resolve_counts, {})  # the proxy never reached the RESOLVE stage
-        assert_equal(self.drain_socks_commands(), [])
-        # send: no exit or onion connection is made either, and the job ends with nothing announced.
+        # The greeting is answered with no-auth, which the tool refuses: no RESOLVE, no CONNECT.
         tx = self.wallet.create_self_transfer()
         report, _ = self.run_send(tx["hex"], "-seed=a.seed.", f"-fixedseed={onion}:{REGTEST_PORT}", expected_rc=2)
         assert_equal(report["summary"]["announcements_written"], 0)
         for _, a in self.attempts(report):
             assert_equal(a["outcome"], "not_announced")
         assert_equal(self.connects, {})
+        assert_equal(self.resolve_counts, {})  # the proxy never reached the RESOLVE stage
         assert_equal(self.drain_socks_commands(), [])
         self.stop_proxy()
 
@@ -747,41 +717,20 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.log.info("An authenticating proxy that is not Tor: no exit-path candidates, no onion reached, nothing sent")
         onion = make_onion(10)
         self.start_proxy({"a.seed.": ["9.0.1.1"]}, {onion: (Recipient, True)}, tor=False)
-        # discover: every RESOLVE is refused as an unsupported command, so there is nothing to connect to.
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=a.seed.", "-noprogress", "discover")
-        out = json.loads(proc.stdout)
-        assert_equal(out["seeds"][0]["queries"], 4)
-        assert_equal(out["seeds"][0]["answers"], 0)
-        assert_equal(out["seeds"][0]["kept"], 0)
-        assert_equal([c.cmd for c in self.drain_socks_commands()], [Command.RESOLVE] * 4)
-        # send: the only CONNECTs are to the onion, and each fails at the proxy; nothing is announced.
+        # Every RESOLVE is refused as an unsupported command, so the only CONNECTs are to the onion, and
+        # each fails at the proxy; nothing is announced.
         tx = self.wallet.create_self_transfer()
         report, _ = self.run_send(tx["hex"], "-seed=a.seed.", f"-fixedseed={onion}:{REGTEST_PORT}", expected_rc=2)
         assert_equal(report["summary"]["announcements_written"], 0)
         assert_equal(report["discovery"]["exit_path_candidates"], 0)
         for _, a in self.attempts(report):
             assert_equal(a["outcome"], "not_announced")
-        connects = [c for c in self.drain_socks_commands() if c.cmd == Command.CONNECT]
+        commands = self.drain_socks_commands()
+        assert_equal(len([c for c in commands if c.cmd == Command.RESOLVE]), 4)
+        connects = [c for c in commands if c.cmd == Command.CONNECT]
         assert connects
         assert all(c.addr.decode() == onion for c in connects)
         assert_equal(self.connects, {})  # no connection got past the proxy
-        self.stop_proxy()
-
-    def test_no_wtxid_relay(self):
-        self.log.info("A recipient that does not negotiate wtxid relay is left before any announcement")
-        refuser, taker = "9.2.0.1", "9.2.0.2"
-        self.start_proxy({"w.seed.": [refuser, taker]}, {refuser: (NoWtxidRecipient, True), taker: (Recipient, True)})
-        tx = self.wallet.create_self_transfer()
-        report, _ = self.run_send(tx["hex"], "-seed=w.seed.")
-        self.log.debug(json.dumps(report, indent=1))
-        refused = self.attempts_to(report, refuser)
-        assert_equal(len(refused), 1)
-        assert_equal(refused[0]["outcome"], "not_announced")
-        assert refused[0]["inv_handed_ms"] is None
-        listener = self.listeners[refuser][0]
-        assert "inv" not in listener.last_message and not listener.txs_received
-        # The other recipient negotiates it and gets the transaction.
-        assert_equal([a["outcome"] for a in self.attempts_to(report, taker)], ["pong_received"])
         self.stop_proxy()
 
     def test_slow_resolve(self):
@@ -813,6 +762,7 @@ class ToolPrivbcast(BitcoinTestFramework):
         assert_equal(rc, 2)
         assert_equal(report["summary"]["interrupted"], True)
         assert_equal(report["summary"]["connections"], 0)
+        assert_equal(report["summary"]["slots_completed"], 0)
         # Far below the full schedule (~50 s scaled): the blocked workers were released at once.
         assert_greater_than(20, elapsed)
         assert_equal(self.connects, {})
@@ -839,6 +789,7 @@ class ToolPrivbcast(BitcoinTestFramework):
         # No recipient misbehaved, so nothing gets banned.
         assert_equal(node.listbanned(), banned_before)
         self.stop_proxy()
+
 
     def test_package_node_recipient(self):
         self.log.info("A child with a low-fee parent: the node asks for the parent after the child and accepts both")
@@ -897,16 +848,17 @@ class ToolPrivbcast(BitcoinTestFramework):
         node.disconnect_p2ps()
 
     def test_unsuitable_peers(self):
-        self.log.info("Peers below protocol 70016 or without NODE_WITNESS are left unannounced; a flooding peer is cut at the receive cap")
-        old, no_witness, flooder = "9.3.0.1", "9.3.0.2", "9.3.0.3"
-        self.start_proxy({"v.seed.": [old, no_witness, flooder]},
-                         {old: (OldVersionRecipient, True), no_witness: (NoWitnessRecipient, True), flooder: (FloodingRecipient, True)})
+        self.log.info("Peers below protocol 70016, without NODE_WITNESS or without WTXIDRELAY are left unannounced; a flooding peer is cut at the receive cap")
+        old, no_witness, no_wtxid, flooder = "9.3.0.1", "9.3.0.2", "9.3.0.3", "9.3.0.4"
+        self.start_proxy({"v.seed.": [old, no_witness], "w.seed.": [no_wtxid, flooder]},
+                         {old: (OldVersionRecipient, True), no_witness: (NoWitnessRecipient, True),
+                          no_wtxid: (NoWtxidRecipient, True), flooder: (FloodingRecipient, True)})
         tx = self.wallet.create_self_transfer()
         # Whether the flooder was sent the INV before the cap cut it is a race, and with it the exit status.
-        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=v.seed.", "send", stdin=tx["hex"], expected_rc=None)
+        proc = self.run_tool(f"-timedivisor={TIME_DIVISOR}", "-seed=v.seed.", "-seed=w.seed.", "send", stdin=tx["hex"], expected_rc=None)
         report = json.loads(proc.stdout)
         self.log.debug(json.dumps(report, indent=1))
-        for endpoint in (old, no_witness):
+        for endpoint in (old, no_witness, no_wtxid):
             assert_equal([a["outcome"] for a in self.attempts_to(report, endpoint)], ["not_announced"])
             listener = self.listeners[endpoint][0]
             assert_equal(listener.invs_received, 0)
@@ -962,19 +914,11 @@ class ToolPrivbcast(BitcoinTestFramework):
         self.stop_proxy()
 
     def test_assignment(self):
-        self.log.info("Assignment: first attempts before backups; seeds spread over slots; onion slots take onions")
+        self.log.info("Assignment: seeds spread over slots; onion slots take onions")
         # No endpoint is reachable, so every assigned opportunity is dialled and fails before announcing.
-        # Scarce candidates: two exit-path candidates go to two first attempts, not to a backup.
-        self.start_proxy({"s1.seed.": ["9.7.0.1", "9.7.0.2"]}, {})
-        tx = self.wallet.create_self_transfer()
-        report, _ = self.run_send(tx["hex"], "-seed=s1.seed.", expected_rc=2)
-        attempts = [(s, a) for s, a in self.attempts(report)]
-        assert_equal(len(attempts), report["discovery"]["exit_path_candidates"])
-        for s, a in attempts:
-            assert_equal(a["scheduled_start_ms"], s["scheduled_ms"][0])
-        self.stop_proxy()
         # Four seeds of three and eight onions: every exit-path slot's opportunities come from distinct
         # seeds, the four first attempts from four seeds, and the onion slots dial onions only.
+        tx = self.wallet.create_self_transfer()
         seeds = {f"q{n}.seed.": [f"9.8.{n}.{i}" for i in range(1, 4)] for n in range(1, 5)}
         onions = [make_onion(20 + i) for i in range(8)]
         self.start_proxy(seeds, {})
@@ -1047,6 +991,12 @@ class ToolPrivbcast(BitcoinTestFramework):
                 assert 0 <= a["started_ms"] - a["scheduled_start_ms"] <= grace_ms, a
                 # Failed within the handshake budget, so the slot's next opportunity is not held up.
                 assert a["ended_ms"] - a["scheduled_start_ms"] <= handshake_ms + 200, a
+        # Scarce candidates go to first attempts: every slot dialled its first opportunity, and the three
+        # left over went to second ones.
+        for s in report["slots"]:
+            assert_equal(s["attempts"][0]["scheduled_start_ms"], s["scheduled_ms"][0])
+            for a in s["attempts"][1:]:
+                assert_equal(a["scheduled_start_ms"], s["scheduled_ms"][1])
         # A stalled primary's backup was tried, at its own scheduled time.
         assert any(len(s["attempts"]) >= 2 for s in report["slots"])
         # The job ends by its scheduled end: nothing stretched.

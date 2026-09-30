@@ -11,7 +11,7 @@ Tools and Utilities
   manager, ban list, connection table or caches with `bitcoind`, so nothing a
   recipient observes can be tied to the node. Check the transaction with
   `testmempoolaccept` first and watch for receipt with `getmempoolentry`; see
-  `doc/design/private-broadcast-tool.md`. The tool is built when the
+  `doc/private-broadcast.md`. The tool is built when the
   `BUILD_PRIVBCAST` CMake option is enabled, which follows `BUILD_TESTS` by
   default. (TODO: PR number)
 
@@ -31,8 +31,8 @@ P2P and network changes
   takes those peers only from answers to Tor's SOCKS RESOLVE extension, so a
   proxy that is not Tor reaches no one. `-connect` is no longer
   incompatible with `-privatebroadcast`. Queued jobs start 35 to 55 seconds
-  apart, with a bounded queue, and a transaction whose job is still queued or
-  running is not queued again. Private broadcast jobs ignore `-onlynet`: with `-onlynet=onion`
+  apart, with a bounded queue, and a transaction whose job (matched by wtxid) is
+  still queued or running is not queued again. Private broadcast jobs ignore `-onlynet`: with `-onlynet=onion`
   they still resolve the DNS seeds through Tor and connect to IPv4 and IPv6
   peers through Tor exits. Previously private broadcast connected only to
   reachable networks. Jobs likewise find their recipients through the release
@@ -61,8 +61,9 @@ Updated RPCs
   mempool count as accepted and are sent as given, and a single transaction
   may replace a mempool transaction, as with `sendrawtransaction`. A parent too
   cheap on its own is accepted with its child, which is then checked only for
-  its fee: the child must stay within `maxfeerate` and the pair must meet the
-  mempool's minimum feerate. (TODO: PR number)
+  its fee: the child must stay within `maxfeerate` and the pair must pay at least
+  the higher of the mempool minimum feerate and the minimum relay feerate.
+  (TODO: PR number)
 
 - `testmempoolaccept` leaves the node's validation caches and its coins cache
   exactly as it found them: the coins fetched for the check are uncached again,

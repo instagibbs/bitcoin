@@ -204,10 +204,9 @@ FUZZ_TARGET(privbcast_manager)
     bool wonky{false};
     // Networking, as setnetworkactive leaves it; read by both sides alike.
     bool network_active{true};
-    // The design's one exception ("The queue" in doc/design/private-broadcast-tool.md): a transaction
-    // whose job is still running is not queued again, and a recipient can keep its job running, so
-    // the same transaction submitted again can be ignored on one side and queued on the other. From
-    // then on the sides' starts may differ.
+    // The design's one exception: a transaction whose job is still running is not queued again, and
+    // a recipient can keep its job running, so the same transaction submitted again can be ignored on
+    // one side and queued on the other. From then on the sides' starts may differ.
     bool resubmitted_apart{false};
     const auto pick_tx = [&] { return POOL[fdp.ConsumeIntegralInRange<size_t>(0, POOL.size() - 1)]; };
 

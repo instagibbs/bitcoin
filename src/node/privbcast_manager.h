@@ -64,7 +64,6 @@ public:
      * one and a warning is logged.
      */
     static constexpr size_t MAX_CONCURRENT_JOBS{(privbcast::plan::JOB_CAP + START_SPACING_MIN - std::chrono::seconds{1}) / START_SPACING_MIN};
-    static_assert(MAX_CONCURRENT_JOBS == 18, "the design doc states that at most eighteen jobs run at once");
     /** Jobs that may wait; a submission beyond this is rejected. */
     static constexpr size_t MAX_QUEUED_JOBS{10'000};
     /** Finished jobs whose reports are kept; the oldest is dropped first. */

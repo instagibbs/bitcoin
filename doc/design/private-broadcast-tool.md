@@ -1,378 +1,538 @@
-# bitcoin-privbcast: design notes
+# Private broadcast: specification
 
-The goal is to broadcast a transaction without revealing the sender's IP address, onion
-address or long-term node identity. A job is one run of that broadcast. `bitcoin-privbcast`
-announces one final transaction, or one parent and its child, to a bounded set of peers over
-Tor, makes at most 24 connections to recipients on a schedule that ends within ten minutes,
-and keeps nothing but its report. The tool is a separate program. With `-privatebroadcast`,
-`bitcoind` does not launch it; RPC submissions queue jobs, and worker threads in `bitcoind`
-run the same job code directly instead of the node's connection manager.
+`bitcoin-privbcast` and `bitcoind -privatebroadcast` broadcast a transaction without revealing the
+sender. This document states what a job must guarantee (invariants), the values peers and observers
+see (parameters), what the design relies on (assumptions) and what it does not attempt (non-goals).
+How to use it is in [private-broadcast.md](../private-broadcast.md).
+The base specifies one transaction per job. The section "Extension: one parent, one child" adds
+package mode on top of it and changes nothing for a job without a parent. The rationale at the end
+is not normative.
 
-Two rules govern a job, and the rest of this document follows from them. A job touches no
-node state, so nothing a recipient sees at the P2P layer can be tied to the node. A job draws
-its schedule before its first connection, and nothing a peer does moves it. The tool does not
-promise delivery and does not do additional retries on its own.
+## Goals
 
-**Terms.** A *job* is one run of the broadcast: one transaction, or one parent and its
-child, from submission to report. A job has six *slots*, each a delivery target with its
-own times and its own peers: the times are drawn at job start, and the peers are assigned
-when discovery ends, before any recipient is contacted. A slot has up to four
-*opportunities*: a first peer at the slot's opening time and up to three backups at drawn
-intervals after it. An opportunity that is dialled is an *attempt*: one Tor stream, one
-BIP324 connection, one session of the fixed protocol profile on it. An opportunity with no
-peer left to assign is empty, and one the host could not dial within 5 s of its time is
-missed; neither is an attempt. A slot makes at most one announcement, and after it the
-slot's remaining opportunities lapse. So: job, slot, opportunity, attempt, and the report
-is shaped the same way, `slots[].attempts[]`.
+- **GOAL-1.** A job does not reveal the sender's IP address, onion address or long-term node
+  identity to any party.
+- **GOAL-2.** A hostile recipient, DNS seed or Tor exit learns no more about the sender than an
+  honest one. It can only affect delivery.
 
-## Who sees what
+The invariants are the testable form of these goals.
 
-Every party sees a Tor circuit rather than the sender.
+## Terms
 
-- A recipient sees an exit or an onion circuit, a constant wire profile, and the transaction
-  (a child and, on request, its parent). The job has no IP address, onion address, peer set,
-  address manager, mempool or validation cache to leak.
-- A Tor exit on an exit-path connection sees the recipient. The encrypted transport
-  authenticates nobody, so the exit can also play the peer: see the transaction, and drop or
-  alter that one connection. Onion connections do not pass through an exit.
-- A DNS seed, or the resolver an exit uses, sees a query for the seed's name from a Tor exit.
-  It can answer falsely. It learns only that a job ran.
-- A network observer sees the transaction appear at several peers within seconds, which
-  reveals use of the tool and nothing about where the sender is.
-- The node's own peers see the transaction once it has come back from the network, relayed
-  like any other.
+- **Job**: one broadcast of one transaction, from submission to report.
+- **Slot**: one of a job's six delivery targets. Each has a fixed class, onion or exit-path, and
+  its own times and candidates.
+- **Opportunity**: one of a slot's four scheduled connection times, a first attempt and up to three
+  backups, each with a pre-assigned candidate or none.
+- **Attempt**: an opportunity that is dialled: one proxy stream, one BIP324 connection, one session.
+- **Announcement point**: the moment the transport accepts the job's INV for sending.
+- **Exit-path candidate**: an IPv4 or IPv6 address from a DNS seed, reached through a Tor exit.
+  **Onion candidate**: an onion service from the release fixed-seed list.
+- **Delivery start**: job start plus the discovery window.
 
-The design does not hide that a job ran, that it ran from a release with this profile, or
-anything that correlates the job with other traffic through the same Tor daemon (see Limits).
+## Threat model
 
-## Compared with `-privatebroadcast` before this change
+- A **recipient** sees a Tor exit or an onion circuit, the constant profile (E1) and the
+  transaction it is sent.
+- A **Tor exit** on an exit-path connection sees the recipient's address. BIP324 authenticates
+  nobody, so the exit can also act as the peer: see the transaction, and drop or alter that one
+  connection. Onion connections pass through no exit.
+- A **DNS seed**, or the resolver an exit uses, sees queries for the seed names from Tor exits. It
+  can answer falsely. It learns that a job ran.
+- A **network observer** sees the transaction appear at several peers within seconds. That reveals
+  that the tool was used, not where the sender is.
+- An **observer between the sender and its Tor guard** (the ISP, or the guard) sees a burst of new
+  circuits when a job starts and single circuits at its scheduled times, not their destinations.
+- The **node's own peers** (node mode) see the transaction only after it has come back from the
+  network, relayed like any other.
 
-The entry points stay: `sendrawtransaction`, now also `submitpackage`, and the
-`getprivatebroadcastinfo` and `abortprivatebroadcast` RPCs. What runs behind them is new, and
-`getprivatebroadcastinfo` now lists jobs and their reports instead of transactions and their
-peers.
+## Invariants
 
-| | Before (in `CConnman` and `PeerManager`) | Now (a job) |
+### A. Separation from the node and from other jobs
+
+- **A1.** A job's only inputs are the transaction, the proxy endpoint, the chain's release seed
+  material (DNS seed names, fixed-seed list, default port), a cancel signal, the clock and fresh
+  randomness.
+- **A2.** Every byte a job sends on a connection is a function of the transaction, per-attempt
+  randomness (BIP324 keys and garbage, VERSION and PING nonces), the messages that peer sent on that
+  connection and when they arrived against the attempt's fixed deadlines, and cancellation. So a
+  peer that declines, never asks or never answers the PING sees the same bytes as a cooperative one
+  up to that point; only when the connection closes differs.
+- **A3.** No state written by the node or by another job changes what a job sends or when. A job
+  keeps no state of its own on disk and leaves the node's peers, address manager and ban list as
+  they were.
+- **A4.** Apart from the transaction and the release profile, nothing a job sends or presents is
+  shared between two attempts or two jobs: BIP324 keys and garbage, VERSION and PING nonces and
+  proxy credentials are fresh per attempt or stream, and the schedule is fresh per job.
+
+### B. Network path
+
+- **B1.** Every stream a job opens goes through the SOCKS5 proxy. There is no direct connection and
+  no local DNS lookup.
+- **B2.** Every stream, each RESOLVE query and each attempt, carries fresh random isolation
+  credentials, whatever the node's proxy settings. A proxy that does not accept username and
+  password authentication gets no stream.
+- **B3.** The tool accepts only a loopback address or a unix socket as its proxy. The node uses its
+  configured onion proxy, local or not, trusted like its other proxy settings; the path to a remote
+  proxy sees every destination and can tell job streams from the node's by their credentials.
+- **B4.** Every attempt is BIP324 v2 as initiator. There is no v1 fallback.
+
+### C. Fixed plan
+
+- **C1.** The schedule, every opportunity's start and deadline, is drawn at job start, before any
+  network activity, independently of anything the job observes.
+- **C2.** Every opportunity's candidate is fixed when discovery ends, before any recipient is
+  contacted, as a function of the discovery result alone.
+- **C3.** Discovery ends when every query has completed or when the discovery window ends, whichever
+  comes first. Delivery starts at job start plus the discovery window, whatever discovery did.
+  Answers arriving after the window are discarded.
+- **C4.** Nothing received on a connection and nothing seen of the transaction's propagation
+  changes any time, any assignment or which opportunities run. The only exceptions: a slot's
+  failure before the announcement point lets its next pre-assigned opportunity run at its scheduled
+  time, and an announcement stops the slot's remaining opportunities. So a recipient can affect
+  only its own slot, whether the slot's remaining opportunities run and when it ends, and through
+  that when the job ends. There are no retries beyond the pre-drawn opportunities.
+- **C5.** An opportunity that has a candidate is dialled within START_GRACE of its scheduled time,
+  unless its slot has already announced (C6) or the job has been cancelled (C8). One the job cannot
+  dial by then is missed, never dialled late.
+- **C6.** Before the announcement point an attempt is replaceable; after it nothing else in that
+  slot runs. Reports count an announcement only once the INV is fully written (H2); the difference
+  is presentation only.
+- **C7.** Slots run independently. No slot waits for, or is limited by, another slot.
+- **C8.** Cancellation stops the whole job without waiting for any deadline: blocked proxy exchanges
+  are abandoned, and no opportunity starts after it is seen. The only wait allowed is for a TCP
+  connect to the proxy already under way, which may finish or time out first.
+
+### D. Bounds
+
+- **D1.** A job makes at most SLOTS × OPPORTUNITIES_PER_SLOT recipient connections, at most SLOTS
+  at once, and at most QUERIES_PER_SEED RESOLVE streams per DNS seed, all launched at job start.
+- **D2.** An attempt ends by its scheduled start plus ATTEMPT_MAX. A slot ends by its last
+  opportunity's scheduled start plus ATTEMPT_MAX, its scheduled end, which is at most SLOT_MAX after
+  its first opportunity. The job ends when its last slot has ended, at most SCHEDULED_BOUND after
+  job start. Nothing is acted on at or after a phase deadline. These bounds are on the wall clock,
+  so a clock set back mid-run stretches what remains. The node stops a job still running JOB_CAP
+  after it started, measured on a steady clock.
+- **D3.** A connection that has received more than MAX_RECV_BYTES, counting every byte read from it
+  after the proxy connected it, is ended. This is a sanity bound, not part of the privacy model.
+  The tool's read of stdin is bounded. The node queues at most
+  MAX_QUEUED_JOBS jobs and refuses further submissions; the bound is on the number of jobs, not
+  their size. It keeps at most MAX_FINISHED_JOBS reports.
+
+### E. Wire behaviour on every connection
+
+- **E1.** The job's VERSION is identical for every job of a release except its nonce (see
+  Parameters).
+- **E2.** The job announces only after the peer's VERSION shows a version of at least
+  MIN_PEER_PROTOCOL_VERSION, NODE_WITNESS and relay, and the peer has sent WTXIDRELAY before its
+  VERACK. After such a VERSION the job sends WTXIDRELAY, then VERACK; after any other it sends
+  nothing more. A peer that fails any of these is left before the announcement.
+- **E3.** The job sends exactly one INV, with one entry: MSG_WTX for the announced transaction's
+  wtxid.
+- **E4.** No transaction bytes are sent before the announcement point. A GETDATA that arrives before
+  it is ignored.
+- **E5.** The announced transaction is served at most once, and only for a single-entry MSG_WTX
+  GETDATA naming its wtxid.
+- **E6.** After serving, the job sends one PING and ends on a PONG carrying its nonce, or PONG_WAIT
+  after the PING was written. The TX and the PING are written by the end of the request window, or
+  the attempt ends there. Nothing more is served.
+- **E7.** The job sends only VERSION, WTXIDRELAY, VERACK, INV, TX and PING, each only as E1-E6 say,
+  and nothing once the attempt has ended, not even the rest of a partly written message. It ends a
+  connection only as E2 and E6 say, or on the receive cap, a malformed message of a kind it acts on
+  in its current state, a transport or socket error, the peer closing, a deadline or cancellation.
+- **E8.** With a peer that passes E2 before the handshake deadline, the job announces at once. It
+  serves the transaction on the first request E5 allows and then sends the PING. Against a Bitcoin
+  Core recipient as in Assumptions, an announced attempt ends with the PONG, and the recipient ends
+  up with the transaction when its policy accepts it.
+
+### R. Recipients and discovery
+
+- **R1.** Recipients come only from release material: the DNS seed names, resolved through the
+  proxy, and the onion entries of the fixed-seed list.
+- **R2.** A seed answer counts only if it is a public, routable IPv4 or IPv6 address; it gets the
+  chain's default port. Seeds cannot supply onions. The fixed-seed list supplies only onions.
+- **R3.** Which onions are chosen does not depend on what the seeds answered.
+- **R4.** An endpoint is assigned to at most one opportunity per job. An endpoint returned by several
+  seeds counts once.
+- **R5.** Candidates are assigned so that a single lying DNS seed, returning endpoints it controls or
+  dead ones, reaches as little of the job as possible, and so that scarce candidates go to first
+  attempts:
+  - **R5a.** When there are fewer candidates than opportunities, every slot's first opportunity that
+    a remaining candidate may fill (R5c) is filled before any slot gets a backup.
+  - **R5b.** Exit-path candidates are handed out across seeds in an order drawn before any query.
+    While other seeds still have candidates, no two of a slot's opportunities come from the same
+    seed. With four or more seeds answering, one seed supplies at most one of the exit-path slots'
+    first attempts. The order in which answers arrive within the window changes nothing.
+  - **R5c.** Onion slots take onion candidates while any remain, then exit-path candidates after
+    the exit-path slots at the same layer have drawn. Exit-path slots never take onions. Onions go
+    to the two onion slots alternately, layer by layer. The fallback happens on running out of
+    onions, not on an onion failing.
+- **R6.** Discovery excludes nothing based on node state. The node's own addresses can be drawn.
+
+### H. Outputs
+
+- **H1.** The job report contains no wall-clock time. Every time in it is an offset from job start.
+  The tool's progress lines on stderr are a live log and carry the logger's timestamps.
+- **H2.** The tool exits with status 0 if at least one INV was fully written, 2 if the job ran and
+  none was, and 1 on a usage, input or internal error.
+- **H3.** The report names every endpoint dialled, with each peer's protocol version and user agent,
+  and contains no transaction bytes.
+
+### U. Uniformity
+
+- **U1.** The only settings that change a job's timing, counts or seed material are the regtest test
+  overrides, and they are refused on other chains.
+- **U2.** Node settings that choose peers (`-onlynet`, `-dnsseed`, `-fixedseeds`, `-connect`,
+  `-seednode`, `-addnode`) and `-proxyrandomize` do not affect jobs. `-privatebroadcast` is refused
+  at startup if onion cannot become reachable.
+- **U3.** A node-mode job is the same as a tool job: same discovery, schedule, assignment and wire
+  behaviour. The node adds only its proxy (B3) and the real-time cap (D2).
+
+### N. Node integration
+
+- **N1.** Submitting under `-privatebroadcast` never adds the transaction to the node's mempool and
+  never relays it to the node's peers. It enters the mempool only when received from the network.
+- **N2.** A job sends the bytes the caller submitted, never the mempool's copy, even when the
+  mempool holds the same txid with another witness.
+- **N3.** Jobs start in submission order. Each start opens a window whose length is drawn at that
+  start from [START_SPACING_MIN, START_SPACING_MAX). A job submitted inside the window starts when
+  it closes; one submitted after it closes, with nothing waiting, starts at once. The window runs
+  from the previous start even if that job was aborted early. After the clock steps back, the next
+  start comes between START_SPACING_MIN and START_SPACING_MAX after the step. Start times depend on
+  no recipient and on no earlier job's end: the node runs enough jobs at once that a start waits for
+  a running job only if that job outlives its cap or the clock has jumped forward.
+- **N4.** Two jobs' discovery windows never overlap.
+- **N5.** A submission whose wtxid has a job that is queued, or running and not being aborted,
+  queues nothing. Otherwise it queues a new job. The key is the wtxid: a witness variant of a queued
+  transaction gets its own job.
+- **N6.** Cancellation is final. `abortprivatebroadcast`, shutdown and disabling networking cancel
+  running jobs and drop queued ones; enabling networking again revives nothing. Nothing is queued
+  while networking is off or the node is stopping. Networking off for less than a second can go
+  unseen. Queued jobs are dropped within a second of networking going off or, while the node runs
+  as many jobs as it can (N3), when one of them ends.
+- **N7.** The node's observation of the transaction in its mempool is recorded for the report only
+  and never reaches a job.
+- **N8.** The node's default log names no transaction and no peer. A SOCKS failure line at the
+  default level can show that a job ran.
+- **N9.** Job records and reports are held in memory only. A job's transactions are dropped when it
+  finishes; its hashes stay.
+- **N10.** The file descriptors jobs can use are reserved at startup, after those of the node's
+  ordinary connections and files. If not enough remain, the node refuses to start with
+  `-privatebroadcast` rather than lower `-maxconnections`.
+- **N11.** Only `sendrawtransaction` queues jobs. Wallet sends, `submitpackage` and every other way
+  into the mempool work as without `-privatebroadcast`.
+
+## Parameters
+
+Normative values, the same for every user of a release.
+
+| Parameter | Value | Seen by |
 |---|---|---|
-| Peers | from the node's address manager | discovered per job: the release DNS seeds resolved through Tor (`RESOLVE`), plus onion peers from the release fixed-seed list |
-| Networks | Tor, I2P, IPv4/IPv6 through the proxy | Tor only: onion peers, and IPv4/IPv6 peers through Tor exits |
-| Transport | v2 or v1 | v2 (BIP324) only |
-| Connections at once | 3 per transaction when it is submitted (all private broadcasts share a cap of 64), each up to 3 min | per job, 3 at start and never more than 6 (one per slot); in `bitcoind` up to 18 jobs overlap, so up to 108 |
-| Connections in total | more with every re-send | per job, at most 24 to recipients (6 slots of 4 opportunities, a first peer and up to 3 backups each), after 4 Tor lookups per DNS seed at job start (28 on mainnet) |
-| Retries | re-sent to one new peer every 2–3 min until a peer sends it back or it stops passing a test accept (for example, it is in the mempool or mined), up to 1000 times | none after an announcement; the schedule is drawn at job start and nothing seen on the network changes it |
-| Duration | open-ended | every job's network work ends within 568 s |
-| Peer profile | `NODE_NONE`, no wtxid relay, announces by txid | `NODE_WITNESS`, protocol 70017, requires wtxid relay (BIP339) and announces by wtxid |
-| Packages | no | one parent and its child |
-| Without a node | no | the `bitcoin-privbcast` program |
+| QUERIES_PER_SEED, answers kept per seed, onions kept | 4, 3, 8 | seeds, exits |
+| Seed query | RESOLVE of the bare seed name (no service-bit subdomain), one per stream | seeds, exits |
+| Discovery window | 18 s from job start | seeds, observers |
+| Slots | 6, fixed per release: slots 0-2 open at delivery start (exit-path, exit-path, onion); slot 3 (onion) at a time drawn in [35, 180] s after delivery start; slots 4-5 (exit-path) at times drawn in [185, 240] s, at least 5 s apart | observers, recipients |
+| OPPORTUNITIES_PER_SLOT | 4: a first attempt and 3 backups | observers |
+| Backup interval | drawn in [50, 60] s after the previous opportunity's scheduled time | observers |
+| START_GRACE | 5 s | |
+| Handshake budget: scheduled start to announcement point | 45 s | recipients |
+| Request window: announcement point to the peer's request | 75 s | recipients |
+| PONG_WAIT: after the PING is written | 10 s | recipients |
+| MAX_RECV_BYTES | 128 KiB | recipients |
+| VERSION | protocol 70017; services NODE_WITNESS; time 0; addr_recv null with services 0; addr_from null with services NODE_WITNESS; random nonce; user agent `/pynode:0.0.1/`; start height 0; relay false | recipients |
+| MIN_PEER_PROTOCOL_VERSION | 70016 (BIP339) | recipients |
+| JOB_CAP | 10 min | |
+| START_SPACING_MIN, START_SPACING_MAX | 35 s, 55 s | recipients, in aggregate |
+| MAX_QUEUED_JOBS, MAX_FINISHED_JOBS | 10,000, 100 | local |
 
-The right column describes a smaller feature. It gives up I2P, peers that speak only the old
-transport, the node's address manager, and re-sending when the transaction does not come
-back. Each is given up for the two rules below and for a bounded cost: at most 24
-connections to recipients, over within 568 s, with a report of every attempt.
+Derived: ATTEMPT_MAX = 45 + 75 + 10 = 130 s; SLOT_MAX = 3 × 60 + 130 = 310 s; SCHEDULED_BOUND =
+18 + 240 + 310 = 568 s; at most 24 connections per job, 6 at once.
 
-**Delivery depends on recipients; privacy does not.** A hostile recipient learns no more
-about the sender's IP address or long-term identity than an honest one. Recipients are chosen
-at random, through onion services and through Tor exits, for robustness: a recipient that
-drops the transaction, or an exit that interferes with it, costs at most one slot, and only one
-opportunity if it fails before the announcement, since the slot's backup still runs.
+Not normative, constrained only by C3, C5, D2, N3 and N6: the RESOLVE deadline, query grace, SOCKS
+timeouts, handshake reserve, how often the node reads its clock and networking state, the number of
+jobs it can run at once and the descriptors it reserves.
 
-## The two rules
+## Interface
 
-Both are enforced by construction rather than by careful coding.
+What users' scripts and the functional tests rely on. Commands, options, JSON field names and
+values, exit statuses and RPC error codes are part of it. Error messages and the report's `reason`
+field are text for people and are not.
 
-1. **The job creates no state a node can be read through.** It has no address manager, ban
-   or discouragement list, connection table shared with ordinary peers, upload accounting or
-   validation caches. A recipient that misbehaves ends only its own connection. When the job
-   ends, only its report remains: the tool prints it, and `bitcoind` keeps it in memory with
-   the job's hashes, times and outcome for its last 100 jobs. The companion change to
-   `testmempoolaccept` keeps the recommended preflight from leaving a trace in the node's
-   validation caches and coins cache; reading the inputs still warms the database and page
-   caches, like any UTXO lookup.
+### Proxy
 
-2. **The schedule is drawn when the job starts, and nothing observed on a connection moves
-   it.** At job start the job draws the time and hard lifetime limit of every
-   opportunity. After discovery it assigns every candidate before contacting any recipient.
-   Nothing received from a recipient reschedules or reassigns an opportunity. A failure
-   before an announcement enables only the same slot's next pre-assigned opportunity, at its
-   scheduled time. An announcement suppresses that slot's remaining opportunities. Protocol
-   responses follow fixed rules on the current connection. An opportunity that cannot start
-   within 5 s of its time is missed. Cancellation stops the whole job. Seeing the
-   transaction come back through the network changes nothing.
+The job speaks SOCKS5 (RFC 1928) with username and password authentication (RFC 1929), which it
+requires. It reaches recipients with CONNECT and resolves DNS seed names with Tor's RESOLVE
+extension (command 0xF0), one name per stream.
 
-## What a recipient sees
+### bitcoin-privbcast
 
-Each connection uses the same profile. The job sends a VERSION with constant fields: protocol
-70017, `NODE_WITNESS`, no relay, no height, no time, and user agent `/pynode:0.0.1/`. It
-answers the peer's VERSION with WTXIDRELAY and VERACK, announces the transaction by wtxid,
-serves it once when asked for it by wtxid, sends one PING, and closes on the matching PONG.
+- `bitcoin-privbcast [options] send` reads one transaction on stdin, a single hex string with
+  nothing but whitespace around it (at most 8,004,096 bytes in all), runs one job and prints the
+  report on stdout. The transaction must decode, pass the consensus checks that need no coins, not
+  be a coinbase, weigh at most 400,000 weight units and send no more than `-maxburnamount` to any
+  output whose script cannot be spent. Anything else is an input error.
+- `bitcoin-privbcast [options] discover` runs discovery only and prints the discovery object with
+  the candidates added (`seeds[].candidates`, `onion`).
+- Options: `-tor=<ip:port|path>` (default `127.0.0.1:9050`), `-maxburnamount=<amt>` (refuse an
+  output to an unspendable script above this amount; default 0), `-progress` (default on;
+  `-noprogress` turns it off), `-debug=<category>` (`1` for all), the usual chain options, `-help`
+  and `-version`.
+- Regtest only, refused on other chains: `-seed=<name>` and `-fixedseed=<addr:port>` (each
+  repeatable) replace the DNS seed list and the fixed-seed list; `-timedivisor=<n>` (1 to 1000)
+  divides every duration of the plan, the internal timeouts included.
+- stderr carries progress lines, in the logger's format, and error messages. When stderr is a pipe
+  or a file, writing them never delays the job: a line stderr cannot take at once is dropped. On
+  Windows, or on a terminal that is paused, a line can delay the job until it is written.
+- Exit status: `send` as H2; `discover` 0, or 1 on error; a missing or unknown command exits 1, and
+  with no arguments at all the usage is printed on stdout; `-help` and `-version` exit 0. Usage and
+  input errors are found before any network activity. SIGINT and SIGTERM, and on Windows Ctrl-C and
+  Ctrl-Break, cancel the job, and the report is still printed.
 
-The protocol version is Core's current one, so the profile tracks the release rather than
-marking the tool. The user agent is the one the previous implementation sent, a constant
-other than the node's own (see bitcoin/bitcoin#27509). Keeping it adds no new user-agent
-string, but the other differences in the table above still let a recipient tell the two
-implementations apart.
+### Report
 
-The job requires a peer at protocol 70016 or later that offers `NODE_WITNESS`, accepts relay
-and sends WTXIDRELAY before its VERACK. It leaves any other peer before announcing anything.
-It ignores every other message, but ends the connection if the peer sends more than 64 KiB in
-all or a malformed message of a kind it acts on. In package mode, while it waits for the
-parent request, it also answers `notfound` for transactions it cannot supply (see "One
-parent, one child"). A peer that declines the transaction, does not ask for it, or does not
-answer the PING sees nothing different from a peer that does everything promptly, except that
-the connection ends at its fixed deadline instead of earlier.
+A JSON object. Times named `*_ms` are milliseconds from job start, one instant taken before
+anything else, or null if the event did not happen.
 
-## The schedule
+- `txid`, `wtxid`, `chain`.
+- `discovery`:
+  - `duration_ms`: when discovery ended (C3).
+  - `seeds`, one per DNS seed, each with `name`; `queries`, the RESOLVE queries started; `skipped`,
+    QUERIES_PER_SEED minus `queries`; `answers`, every answer received in the window; `accepted`,
+    the distinct usable endpoints credited to this seed (an endpoint several seeds returned is
+    credited to one of them); and `kept`, those that became candidates.
+  - `duplicates`: answers, from any seed, whose endpoint was already accepted; `rejected`: answers
+    that are not public, routable IPv4 or IPv6 addresses.
+  - `exit_path_candidates`, the sum of `kept`, and `onion_candidates`.
+- `slots`, six in slot order, each with `slot`, `class` (`exit_path` or `onion`), `stratum`
+  (`prompt`, `mid` or `late`), `scheduled_ms` (the four opportunities' scheduled starts),
+  `scheduled_end_ms` (D2), `empty_opportunities` (those without a candidate),
+  `missed_opportunities` (C5), `interrupted` (stopped by cancellation), `error` (null unless the
+  slot failed) and `attempts`, in the order they were dialled.
+- Each attempt: `endpoint` (address and port, an IPv6 address in brackets), `source` (`dns_seed` or
+  `bundled`), `provenance` (the seed name, or `bundled`), `outcome`, `reason`,
+  `scheduled_start_ms`, `started_ms` (the dial), `connected_ms` (the proxy connected),
+  `peer_version` and `peer_user_agent` (from the peer's VERSION), `inv_handed_ms` (the
+  announcement point), `inv_written_ms`, `getdata_ms` (the request that was served),
+  `tx_written_ms`, `ping_written_ms`, `pong_ms`, `ended_ms`, `extra_requests` (GETDATAs received
+  after the announcement point that got no reply), `bytes_sent` and `bytes_recv` (everything
+  written to and read from the connection after the proxy connected it).
+- `outcome` is `not_announced` (ended before the announcement point), `announced_not_requested`,
+  `tx_written_no_pong`, `pong_received` or `post_announcement_failure`.
+- `summary`: `connections` (attempts dialled); `announcements_handed`, `announcements_written`,
+  `tx_written` and `pongs` (attempts that got that far); `slots_completed` (slots that neither
+  failed nor were interrupted); `interrupted` (the job was cancelled); `duration_ms` (when the
+  report was made).
 
-Times are from job start.
+### Node
 
-- **Discovery, 0-18 s.** The job asks Tor to resolve each release DNS seed four times, each
-  query on its own Tor stream, and keeps up to three answers per seed. It adds up to eight
-  onion peers from the release fixed-seed list. Queries stop at 15 s, and delivery starts at
-  18 s whether or not answers arrived.
-- **Delivery, six slots.** A slot is one delivery target with four opportunities: a first
-  peer and up to three pre-chosen backups. Three prompt slots open together at 18 s: two to
-  peers reached through Tor exits and one to an onion peer, so the first announcement comes
-  from whichever path connects first. The other three open at times drawn at job start. One
-  onion slot opens 35-180 s after delivery starts, which is 53-198 s from job start. Two
-  exit-path slots open 185-240 s after delivery starts, which is 203-258 s from job start, at
-  least 5 s apart. Onion slots prefer onions: both draw from the job's list of up to eight,
-  and only once it has run out, which needs a fixed-seed list with fewer than eight onions,
-  do their remaining opportunities take exit-path peers. With no onions known, every attempt
-  is exit-path. Exit-path slots never take onions.
-- **Each attempt.** From its opportunity's time, an attempt has 45 s to connect, complete
-  the encrypted handshake and announce. The peer then has 75 s to ask for the transaction,
-  and 10 s to answer the PING after it is written. If the attempt fails before announcing,
-  the slot's next opportunity opens 50-60 s after the previous one's time, at most three
-  times; that interval is drawn at job start. Failure includes a peer closing the
-  encrypted handshake because it speaks only v1; there is no v1 fallback. Once a slot
-  announces via INV it makes no more attempts, whatever happens next. Slots do not wait
-  for each other.
-- **End.** A slot's network work ends within 310 s of its first opportunity's time, and the job's
-  by 568 s at the latest. These are scheduled bounds on the wall clock: host scheduling can delay
-  a step but cannot reschedule one, and a clock set back stretches what remains. In `bitcoind`, a
-  job still running ten minutes after it started, in real time, is stopped.
+- `-privatebroadcast` (default off) needs a Tor proxy for onion (`-proxy`, `-onion`, or
+  `-listenonion` with `-torcontrol`). Startup fails if onion cannot become reachable, or if the
+  file descriptors jobs need are not available.
+- Regtest only, refused on other chains: `-privatebroadcastseed=<name>` and
+  `-privatebroadcastfixedseed=<addr:port>`, each repeatable, as the tool's `-seed` and `-fixedseed`.
+- A job's schedule and deadlines are on the node's clock: `setmocktime` moves them, and a change of
+  the clock takes effect within a second of real time. Proxy exchanges, reads from the network and
+  the checks of networking and shutdown proceed in real time whatever the clock does.
+- `sendrawtransaction` queues a job and returns the txid. A transaction whose txid is already in the
+  mempool counts as accepted and is queued as given; any other is test-accepted first, and may
+  replace mempool transactions as usual.
+- A submission that an existing job covers (N5) succeeds without queueing anything, even when the
+  queue is full.
+- It fails with RPC_LIMIT_EXCEEDED when a job cannot be queued (queue full, networking off, or
+  shutting down) and with RPC_MISC_ERROR when no Tor proxy is configured.
+- `getprivatebroadcastinfo` returns `jobs`: the retained finished jobs, oldest first, then the
+  running and the queued ones. Each job has `txid`, `wtxid`, `state` (`queued`, `running`, `done`
+  or `aborted`), `time_added`, `time_started`, `time_ended`,
+  `seen_in_mempool` (Unix seconds, each once it applies), `error` (if the job could not run, or was
+  stopped by disabling networking or by the cap), `progress` while running (`discovery_done`, set
+  when discovery has ended; `opportunities_ended`, counting opportunities that were empty, missed,
+  or whose attempt has ended; `connections` and `announcements_written`, counting ended attempts),
+  and once it has run, `announced` (at least one INV fully written) and `report`. A running job
+  that is aborted still ends with a report; a queued one has none.
+- `abortprivatebroadcast <txid or wtxid>` returns `removed_transactions`, each with `txid`,
+  `wtxid`, `hex` and `state`, the job's state after the call: `aborted` for a queued job, which is
+  dropped at once, and `running` for a running one, which stops shortly. It fails with
+  RPC_INVALID_ADDRESS_OR_KEY if no queued or running job matches.
+- Without `-privatebroadcast`, both of these fail with RPC_METHOD_NOT_FOUND.
 
-All durations are compile-time constants, in `src/privbcast/*.h` and, for the node's queue,
-`src/node/privbcast_manager.h`. There are no knobs, because a tunable would make its users
-distinguishable. The options that change timing or seeds exist for tests and are refused
-outside regtest.
+## Assumptions
 
-The numbers have three sources. The per-attempt budgets follow from Tor and Core: 45 s fits
-an onion rendezvous and the handshake over Tor, 75 s outlasts the 60 s Core waits before
-asking another announcer, 10 s covers a PING's round trip, and the 5 s grace only absorbs
-scheduler jitter. The 50 s backup floor, the 310 s slot and the 568 s bound follow from those
-budgets, the discovery window and the latest late opening. The 15 s query deadline is
-measured: on one Tor client, RESOLVE bursts finished within 8 s nine times in ten, and 15 s
-kept the same candidates as 25 s. The 18 s discovery window adds a 3 s margin before delivery
-starts. The 30 s parent hold is several times the roughly 4 s Core takes to ask an inbound
-peer for a missing parent: 2 s for a non-preferred peer and 2 s for a request by txid, plus a
-Tor round trip. The onion reachability under Limits comes from probing each release's
-fixed-seed list. Six slots, three of them prompt, three backups each, and the two windows are
-design choices: enough that losing a path or a few peers does not lose the job, few enough
-that a job stays small. None is a privacy parameter; changing one changes cost and robustness
-for every user of a release alike.
+- **Tor.** The SocksPort isolates streams by SOCKS username and password (`IsolateSOCKSAuth`, Tor's
+  default). A SocksPort shared with the node must keep it: nothing at the SOCKS interface can detect
+  its absence, and without it Tor may put several of a job's streams, or a job's stream and the
+  node's own connections, on one circuit. Tor supports the RESOLVE extension, which returns one
+  address per query. Only Tor implementations (C tor, Arti) speak RESOLVE, which is what keeps an
+  ordinary SOCKS5 proxy from yielding exit-path candidates. A proxy built to imitate Tor would not be
+  detected; it is covered by the proxy being trusted (B3).
+- **Recipients** (Bitcoin Core):
+  - wait 60 s for a requested transaction before asking another announcer;
+  - when they cannot find a transaction's inputs, ask the announcer for every parent they do not
+    recognise, confirmed ones included, by txid as MSG_WITNESS_TX, in GETDATAs of up to 1,000
+    entries.
+- **Release material.** DNS seeds return reachable nodes. The fixed-seed list ages with the release:
+  about half of a list's onions still accept BIP324 six months after it is generated, and about one
+  in eight after a year.
 
-The schedule makes no claim about hiding the user's address. That comes from the job having
-no node state and reaching everything through Tor. The schedule buys two things: delivery
-that survives failed attempts, and a fixed plan that no peer can move. Any privacy on top
-is marginal and unpromised. The later slots open at random offsets within fixed windows, in a
-fixed order and at least 5 s apart, so there is no regular grid to recognize. The three
-prompt slots open together on purpose, and backups can still cluster, so bursts remain.
+## Non-goals
 
-## One parent, one child
+- Hiding that a job ran, that it ran from a release with this profile, or anything that correlates
+  it with other traffic through the same Tor daemon. The host, Tor's caches and its guard are shared
+  with the node.
+- Guaranteed delivery, or knowing whether a recipient accepted the transaction. A PONG means only
+  that the recipient processed what it was sent.
+- Retrying. The remedy for a transaction that did not arrive is another job, submitted by the user.
+- The wallet, which is out of scope. Wallet sends are not private broadcasts: the wallet submits to
+  the mempool and announces to all peers. And once a transaction that involves the wallet is back in
+  the node's mempool, the wallet's periodic resend (every 12 to 36 hours) announces it to every peer
+  while it stays unconfirmed, however it was first broadcast.
+- Hiding when a job was submitted. A tool job starts at once, and so does a node job submitted to an
+  idle queue.
+- End-to-end timing correlation by an observer of both the sender's Tor traffic and the network,
+  which Tor does not prevent either.
+- Hiding operator actions from a recipient that is also one of the node's peers. Shutdown and
+  `setnetworkactive false` close a job's open connections within about 100 ms of the node's own.
+- Local users of the host, who can see connections to the proxy, process arguments and the tool's
+  output.
+- Authenticating recipients. Exits and seeds are untrusted.
 
-A transaction whose fee is too low to enter mempools on its own can be carried by a child
-that spends it, when the recipient evaluates the two together. Bitcoin Core 28 and later do
-this for exactly one parent and one child. Give the tool both transactions in either order;
-it works out which is which.
+## Extension: one parent, one child
 
-- Only the child is announced. Announcing the parent would invite a request for it before
-  the child. A low-fee parent received alone is rejected, and the job does not serve a
-  transaction a second time.
-- The child is served once, on the exact single-entry request for it by wtxid. The job then
-  holds its PING for up to 30 s for the peer to ask for the parent. It always keeps the last
-  10 s of the request window for the PING, so a child requested late gets a shorter hold, or
-  none. A recipient that lacks the parent asks about 4 s later, because of Core's
-  orphan-resolution delays. That request may batch the parent with the child's other inputs,
-  so the job serves the parent and answers the entries it does not have with `notfound`, as a
-  node would, so the peer can ask elsewhere. It does so only while it holds the PING, or for
-  the parent-only request below, and never says `notfound` about its own two transactions.
-- The parent is served once, only if it is the parent given, and only on one of two requests:
-  - after the child was served and before the PING goes out, a request naming the parent by
-    txid as `MSG_WITNESS_TX`, which is how orphan resolution asks;
-  - before the child was served, a request naming the parent and not the child. A recipient
-    on Bitcoin Core 29 or later asks this way when it already holds the child as an orphan
-    learned from another peer: the job's wtxid announcement adds it as an announcer of that
-    orphan, so it asks the job only for the parent. The job cannot tell why a peer asks, and
-    answers any such request once.
-  Before the child has been served, a request that names both child and parent is ignored
-  outright, with no `notfound` either. The peer cannot have learned the child's inputs from
-  the job at that point, so the announcement did not cause that request. The connection
-  stays open, and a later request for the child alone is still answered. Once the parent is
-  served, PING goes out and nothing more is served on that connection.
-- If no request for the parent arrives within the hold, PING goes out anyway. The job cannot
-  tell whether the peer already had the parent, was still waiting on a request to another
-  peer, or will not take the package.
-- One request window still bounds the requests: the second one restarts nothing, and the
-  announcement point and the replacement rules are unchanged. As with a single transaction,
-  the PONG wait may end up to 10 s after the window, within the attempt's 130 s.
-- Which recipients accept the package depends on the parent. Bitcoin Core 31 and later accept
-  a parent below the minimum relay feerate as part of a package whatever its version; Bitcoin
-  Core 28 to 30 only if it is TRUC (version 3); older recipients drop it. Whether the package
-  reaches miners depends on what they run.
-- The tool cannot check that the child has no other unconfirmed parent or that it pays enough
-  for both, and there is no dry run for a package. `testmempoolaccept` checks each
-  transaction on its own and does not apply the child's fee to the parent, so it rejects a
-  low-fee parent ("min relay fee not met", or "mempool min fee not met" when the node's
-  mempool minimum is higher) even when the package would be accepted, and it stops there
-  without evaluating the child. That rejection says nothing about the child's validity. Work
-  out the package feerate yourself. The tool also cannot see whether the recipient accepted
-  the package; a PONG means only that the recipient processed what it was sent. A recipient
-  older than Bitcoin Core 28 asks for the parent, rejects it alone and keeps the child as an
-  orphan only until the job disconnects.
-- A second transaction is served on request only in package mode, that is, when the tool is
-  given two transactions or `submitpackage` is given a parent and its child under
-  `-privatebroadcast`. A recipient that asks for the parent therefore learns the sender used
-  package mode. That the two transactions belong together is already visible on the chain.
+A parent too cheap to enter mempools on its own can be carried by a child that pays for both, when
+the recipient evaluates the two together. Package mode adds that to the base: a job then carries the
+child and its unconfirmed parent. For a job without a parent, nothing in the base changes.
 
-## Using it
+### Terms and threat model
 
-1. Check the transaction with `bitcoin-cli testmempoolaccept` first. The tool itself does
-   only stateless sanity checks. The check leaves the node's validation and coins caches
-   untouched, but reading the inputs warms the node's database and page caches like any
-   UTXO lookup. If that matters, run the check on a node that is not your public one. For a
-   parent and child the check rejects a low-fee parent on its own; see "One parent, one
-   child".
-2. Feed the final hex on stdin: `bitcoin-privbcast send < tx.hex`. Tor is expected at
-   127.0.0.1:9050; pass `-tor=` for another listener. The JSON report goes to stdout and
-   progress lines go to stderr.
-3. Watch for receipt with `bitcoin-cli getmempoolentry`. Do not also broadcast the same
-   transaction the ordinary way.
+- **Package mode**: a job that carries a child and its parent. Where the base says "the
+  transaction", read the child, except in A1, A2 and A4, which cover both transactions.
+- A recipient in package mode is sent the child, and the parent if it asks for it.
 
-`send` exits 0 if at least one announcement was fully written, 2 if none was, and 1 on bad
-input or arguments, or an internal error. Status 0 does not mean a peer requested the
-transaction, received its bytes or accepted it: a peer can ignore the announcement, and the
-slot has already given up its remaining opportunities, because after an INV the peer may hold
-the transaction and further attempts could only add exposure. The report's per-attempt
-outcome and its `tx_written` and `pongs` counts are the stronger evidence. The JSON report
-has no wall-clock value and is the record. Progress lines on stderr are best effort: a line
-that stderr cannot take at once, or that is longer than `PIPE_BUF`, is dropped rather than
-waited for, except on Windows, where writes block (see `-help`). Both are local evidence of
-the attempt, so keep them where you would keep a wallet log.
+### Invariants
 
-The proxy must run on this machine, because a remote one would carry destinations and
-credentials in the clear. It must accept SOCKS authentication and Tor's RESOLVE extension; a
-proxy without IPv6 only loses the IPv6 peers. The tool cannot verify that a proxy is Tor and
-does not need to. A proxy that is not Tor delivers nothing: every stream requires fresh
-username/password credentials, which `ssh -D` and most VPN clients do not offer; exit-path
-candidates come only from RESOLVE answers; and the job takes only the onions from the
-fixed-seed list. Such a proxy learns only that a job ran: the seed names and onions it is
-asked for are public.
+- **F1.** In package mode only the child is announced.
+- **F2.** The parent is served at most once per connection, and only for a GETDATA containing
+  MSG_WITNESS_TX for the parent's txid, either (a) after the child was served and before the PING,
+  or (b) before the child was served, when the GETDATA names neither of the child's ids. A GETDATA
+  naming both before the child is served is ignored entirely. After the parent is served, the PING
+  goes out and nothing more is served.
+- **F3.** After the child is fully written, the PING is held until the parent is served or
+  PARENT_HOLD has passed, but never into the last PONG_WAIT of the request window.
+- **F4.** A GETDATA received while the job waits for the parent request (from serving the child
+  until the PING), or handled under F2 (b), is answered with NOTFOUND for exactly its transaction
+  entries that are neither id of either of the job's transactions, and with none if there are no
+  such entries. No other NOTFOUND is sent.
+- The base changes in package mode as follows:
+  - E6: the PING follows the parent phase (F2, F3).
+  - E7: the job also sends NOTFOUND, as F4 says.
+  - E8: the job also serves the parent on the first request F2 allows, and the PING waits for the
+    hold (F3). A Bitcoin Core recipient ends up with the package when its policy accepts it.
+  - N5: a submission with a parent is covered only by a job with the same parent; one without a
+    parent is covered by a job with any parent.
+  - N11: `submitpackage` queues jobs too.
 
-When the node and a job share a SocksPort, circuit separation requires `IsolateSOCKSAuth`,
-Tor's default; fresh credentials alone cannot enforce it. With `NoIsolateSOCKSAuth`, Tor may
-put several of a job's streams on one circuit, so one exit can see the transaction reach
-several recipients. It may also put a job's stream on a circuit that carries other traffic
-through the same SocksPort, such as the node's own connections and whatever they reveal
-about it, its advertised onion address for one. Nothing at the SOCKS interface can detect
-this; Tor accepts the credentials either way. The operator must ensure the SocksPort keeps
-stream isolation.
+### Parameters
 
-## Inside the node
+| Parameter | Value | Seen by |
+|---|---|---|
+| PARENT_HOLD | 30 s | recipients |
 
-With `-privatebroadcast`, `sendrawtransaction` and `submitpackage` queue a job in
-`bitcoind`'s `PrivateBroadcastManager`. A worker calls `privbcast::RunJob()` in the node's
-process, the same function the standalone program calls. A job uses none of the node's peer
-machinery: no address manager, connection manager, peer manager or ban list. It only reads
-the connection manager's network-active flag, so that `setnetworkactive false` stops it. Its
-discovery, schedule and wire profile are the tool's. The transaction does not enter the
-node's mempool until it comes back from the network, and the node then treats it like any
-other. Submitting a transaction whose job is still queued or running queues nothing more. A
-job runs until its schedule has run: every slot has announced or reached its last
-opportunity, including opportunities left without a peer. That takes at most ten minutes and
-often less. Once it has ended, or while it is being aborted by `abortprivatebroadcast` or
-`setnetworkactive false`, the same transaction may be queued again, even if the node's
-mempool holds it. A job that serves a parent also covers its child submitted alone once the
-parent is in the node's mempool; before that, `sendrawtransaction` refuses the child for its
-missing input. A job for the child alone does not cover the package, which needs the parent
-served. `getprivatebroadcastinfo` shows those reports, including every peer a job dialled;
-they live in memory only and are gone after a restart.
+PARENT_HOLD + PONG_WAIT is at most the request window, so a child requested promptly gets the whole
+hold.
 
-`submitpackage` takes one transaction, or one parent and its child. A transaction whose txid
-is already in the node's mempool counts as accepted and is sent as the caller gave it,
-whichever RPC submits it: the node validated the copy in its mempool, not this one. A single
-new one is test-accepted as `sendrawtransaction` does. A new parent too cheap on its own goes
-out with its child, because the node cannot evaluate a package's feerate without adding it to
-its mempool. The child is then checked only for its fee: it must stay within `maxfeerate`,
-and the pair must meet the mempool's minimum feerate.
+### Interface
 
-Node settings that choose peers (`-onlynet`, `-dnsseed`, `-fixedseeds`, `-connect`,
-`-seednode`, `-addnode`) do not apply to jobs, except that, as before, `-privatebroadcast` is
-refused at startup when `-onlynet` leaves out onion. Even with `-onlynet=onion`, a job can
-connect through Tor exits: the fixed-seed onions alone age with the release (see Limits), Tor
-hides the user's address on either path, and an exit can only drop or alter its own
-connection, which cannot control the other slots. There is no switch to change this, for the
-same reason there are no other knobs.
+- `bitcoin-privbcast send` also takes two transactions, a parent and its child in either order,
+  separated by whitespace. They must differ and one must spend the other. Every input of the child
+  that spends the parent must name an output the parent has and that can be spent, the two must
+  share no input, and together they must weigh at most 404,000 weight units.
+- The report adds `parent_txid` and `parent_wtxid`; per attempt `parent_getdata_ms` (the request
+  the parent was served for), `parent_tx_written_ms` and `parent_hold_expired_ms` (the PING went out
+  without a parent request, F3); and `summary.parents_served`.
+- `getprivatebroadcastinfo` adds `parent_txid` for a package job.
+- `submitpackage` takes one transaction, or one parent and its child. More than two fail with
+  RPC_INVALID_PARAMETER, and two that are not a parent and its child with RPC_VERIFY_ERROR, as
+  without `-privatebroadcast`. A transaction whose txid is in the mempool counts as accepted and is
+  sent as given. What remains is test-accepted: one transaction alone, as by `sendrawtransaction`;
+  two as a package. If the parent then fails only for its fee, the child is checked only for its fee:
+  within `maxfeerate`, and the pair paying at least the higher of the mempool minimum feerate and the
+  minimum relay feerate. A package rejected as a whole queues nothing. The result has `package_msg`
+  (`success`, `parent-reconsiderable` or an error) and `tx-results`, keyed by wtxid, and a job is
+  queued only when the package is acceptable. Each entry of `tx-results` has `txid`; `other-wtxid`
+  when the mempool holds the txid with another witness; `fees` when the transaction was
+  test-accepted; and `error` when it was not accepted, carrying validation's reject reason when
+  validation rejected it.
+  It fails as `sendrawtransaction` does when a job cannot be queued or no Tor proxy is configured.
 
-A job shares six things with the node.
+### Assumptions
 
-- **The proxy.** The node's Tor proxy, trusted as the node's other proxy settings are. Every
-  stream carries fresh credentials regardless of `-proxyrandomize`.
-- **The queue.** Jobs start in submission order, each at least 35 to 55 seconds (drawn at
-  random) after the previous start, whether or not earlier jobs have ended; a job submitted
-  when the queue is idle starts at once. No recipient can choose when a job starts. A
-  recipient can affect one thing, when its job ends, by holding its connection open or
-  closing it early; seeds and exits shape the end as well. That matters only to a
-  resubmission: if the same transaction is submitted again while that job is running, the
-  submission is ignored. If the job has already ended, the submission queues a new job, which
-  takes the next start, and every later job starts one interval later than it otherwise
-  would. Jobs overlap, but starts are further apart than discovery takes, so only one job
-  resolves seeds at a time. A job's schedule ends within its ten-minute cap, so at most
-  eighteen run at once; a job still running at the cap, in real time, is stopped.
-- **An observation.** `getprivatebroadcastinfo` records when the node's mempool first accepts
-  the transaction after it was queued (`seen_in_mempool`). The observation is not fed back
-  into a job.
-- **The log.** `debug.log` records job progress only with `-debug=privatebroadcast`. SOCKS
-  failures that mention a destination appear only with `-debug=proxy` or `-debug=net`. By
-  default it names no transaction or peer: it warns when every worker is busy or a job runs
-  into its cap, and notes a SOCKS greeting the proxy did not answer.
-- **The process.** Shutdown and `setnetworkactive false` cancel jobs. Networking is read, not
-  signalled: running jobs check it within a fraction of a second, and the queue is dropped at
-  the next start-gate check, which waits for a free worker when all eighteen are busy.
-  Networking turned back on before a check cancels nothing.
-- **File descriptors.** Jobs get up to 140 from what the node's ordinary connections leave. If
-  fewer remain, `bitcoind` refuses to start with `-privatebroadcast`; lowering `-maxconnections`
-  frees some.
+- Recipients (Bitcoin Core) ask for a missing parent about 4 s after receiving the child (2 s for a
+  non-preferred peer, 2 s for a request by txid). From version 29 they ask only for the parent when
+  they already hold the child as an orphan learned from another peer. They accept a parent below the
+  minimum relay feerate in a package from version 31 whatever its version, and in versions 28 to 30
+  only if it is TRUC; older versions drop it.
 
-Wallet sends are not private broadcasts. The wallet submits to the node's mempool and
-rebroadcasts from there, which a private broadcast must not do. Making wallet sends private
-is a separate change.
+### Non-goals
 
-## Limits
+- Hiding package mode. A recipient that fetches the child can tell from the held PING, and one that
+  asks for the parent is served it. The pairing is visible on chain anyway.
+- Validating a package fully. The tool checks no fees. When the parent fails only for its fee, the
+  node checks the child only for its fee, as the interface says, which needs the child's other
+  inputs to be in the mempool or the UTXO set.
 
-- The tool and the node still share a host and, usually, a Tor daemon. Load, Tor's caches
-  and the client's guard are common to both; the design does not separate them.
-- DNS seeds, resolvers and Tor exits are untrusted. They can lie, tag their answers, or act
-  as the peer themselves on an exit-path connection, since the encrypted transport
-  authenticates nobody. Onion connections do not pass through an exit.
-- Onion peers come only from the fixed-seed list built into the binary, which ages with it: the
-  longer a version stays in use, the fewer of its onions still answer. About half a list's
-  onions still accept the encrypted transport six months after it is generated, and roughly one
-  in eight a year or more after. The onion slots keep dialling that list, so with an aged list
-  most onion attempts fail and delivery rests on the exit-path slots.
-- Recipients can recognize the release by its profile and probe it. They learn only that
-  someone used the tool.
-- Discovery does not exclude the node's own addresses. A filter on node state is the coupling
-  rule 1 forbids, and it is not wanted anyway: excluding some addresses would bias the
-  sampling of recipients, and self-delivery is indistinguishable from delivery to any other
-  recipient. A job that draws the node's own onion or IP makes the node one of that job's
-  first relayers.
-- Tor's timing and reachability vary between users. The schedule fixes when the job acts;
-  the network decides how fast it answers.
-- A job stops when its schedule ends and does not retry on its own. Retrying because the
-  transaction did not come back would act on exactly the signal a network adversary
-  controls. A recipient can accept an announcement and then withhold the transaction; that
-  slot will not try its backups. To censor a job, an adversary must do that in every slot,
-  onion slots included, or make all of a slot's opportunities fail before an announcement.
-  The remedy is another job, submitted by the user after watching `getmempoolentry`; it
-  discovers and schedules independently.
+### Rationale (not normative)
+
+- Only the child is announced: announcing the parent would invite a request for it before the child,
+  and a low-fee parent received alone is rejected.
+- A peer that has not been sent the child cannot have learned its inputs from the job, so a request
+  naming both was not caused by the announcement (F2).
+- The 30 s parent hold is several times a recipient's orphan-parent delay plus a Tor round trip.
+
+## Rationale (not normative)
+
+- **Where privacy comes from.** GOAL-1 rests on A, B and U: the job shares nothing with the node and
+  reaches everything through Tor. The schedule (C) adds no address privacy. It buys delivery that
+  survives failed attempts and a plan no peer can move. The later slots open at random offsets in
+  fixed windows, at least 5 s apart, so there is no regular grid, but the prompt slots and backups
+  still form bursts.
+- **No knobs.** A tunable would make its users distinguishable, so every parameter is fixed per
+  release and the test overrides exist only on regtest. None of the parameters is a privacy
+  parameter: changing one changes cost and robustness for every user alike.
+- **No retries.** Retrying because the transaction did not come back would act on exactly the signal
+  a network adversary controls. To censor a job, an adversary must take the announcement and
+  withhold the transaction in every slot, onion slots included, or make every opportunity of a slot
+  fail before announcing.
+- **Slot shape.** The three prompt slots race two exit paths and an onion, so the first announcement
+  comes from whichever connects first, and the prompt onion gives an early route that does not
+  depend on the DNS seeds. The late pair runs whatever happened before and uses fresh DNS answers,
+  because the onion list ages.
+- **Budgets.** 45 s fits an onion rendezvous and the BIP324 handshake over Tor. 75 s outlasts the
+  60 s a recipient waits before asking another announcer. 10 s covers a PING round trip. The 5 s
+  grace absorbs scheduler jitter only. The 50 s backup floor is the handshake budget plus the grace,
+  so a failure before the announcement is known before the backup's time. The discovery window was
+  measured: on one Tor client, bursts of RESOLVE queries finished within 8 s nine times in ten, and
+  a 15 s query deadline kept the same candidates as 25 s; 18 s leaves a margin.
+- **Start spacing.** Starts are spaced from the previous start, not the previous end, because
+  recipients can affect when a job ends and must not affect when the next starts. The spacing
+  exceeds the discovery window so discoveries never overlap. What a recipient can still affect is
+  whether a resubmission during its job is ignored (N5) or queued.
+- **Profile.** Protocol 70017 tracks the release. NODE_WITNESS is advertised because the job serves
+  witness data, and wtxid relay is required so the transaction is announced and requested by wtxid.
+  The user agent is the constant the previous implementation sent (bitcoin/bitcoin#27509), not the
+  node's.
+- **Own addresses.** Discovery does not exclude the node's own addresses: a filter on node state is
+  the coupling A forbids, excluding some addresses would bias the choice of recipients, and delivery
+  to the node itself looks like delivery to any other recipient.
+- **Exits with `-onlynet=onion`.** Jobs use exit-path peers regardless: the fixed-seed onions alone
+  age with the release, Tor hides the sender's address on either path, and an exit can only affect
+  its own connection.
+- **Proxy.** SOCKS5 carries destinations and credentials in plaintext up to the proxy, so the tool
+  accepts only a local one; the node trusts its configured proxy as it does for its own connections.
+  A proxy that is not Tor delivers nothing: every stream needs fresh username and password
+  credentials, exit-path candidates come only from RESOLVE answers, and only the onion entries of
+  the fixed-seed list are used. It learns only that a job ran.
+- **Sending the caller's bytes (N2).** Sending the mempool's copy would let a witness variant
+  planted in the node's mempool mark the node's broadcasts.
+- **Receive cap.** A recipient that cannot find a large transaction's inputs can ask the job for
+  about 2,400 parents at 36 bytes each; 128 KiB leaves room for that and the handshake. relay=false
+  in the VERSION keeps a recipient from announcing its own transactions to the job, so only its
+  requests use the budget.

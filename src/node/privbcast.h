@@ -16,6 +16,7 @@
 #include <threadsafety.h>
 #include <uint256.h>
 #include <univalue.h>
+#include <util/result.h>
 #include <util/time.h>
 #include <validationinterface.h>
 
@@ -32,6 +33,9 @@
 #include <thread>
 #include <vector>
 
+class ArgsManager;
+class CChainParams;
+
 namespace node {
 
 /** The seed material every job of the node gets (A1): the chain's DNS seed names, fixed-seed list
@@ -43,6 +47,17 @@ struct PrivbcastSeeds {
     /** The chain's name, for the report. */
     std::string chain;
 };
+
+/** The seed material of the node's jobs: the chain's, or on regtest the test overrides, which other
+ *  chains refuse whenever they are given (U1). Every DNS seed name must be one that SOCKS5 can
+ *  carry, as for the tool: an override's whenever it is given, the chain's own with
+ *  -privatebroadcast. */
+util::Result<PrivbcastSeeds> GetPrivbcastSeeds(const ArgsManager& args, const CChainParams& chainparams);
+
+/** Whether -privatebroadcast, if set, can be used with the node's other settings. Only the regtest
+ *  test overrides may change a job's seed material or timing (U1), so -signetseednode,
+ *  -signetchallenge and, off regtest, a -mocktime other than 0 are refused. */
+util::Result<void> CheckPrivbcastSettings(const ArgsManager& args, const CChainParams& chainparams);
 
 /**
  * The node's private broadcast jobs (doc/design/private-broadcast-tool.md, section N): submitted

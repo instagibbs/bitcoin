@@ -4,21 +4,31 @@
 
 #include <node/privbcast.h>
 
+#include <common/args.h>
 #include <core_io.h>
+#include <kernel/chainparams.h>
 #include <kernel/mempool_entry.h>
+#include <net.h>
+#include <netaddress.h>
 #include <netbase.h>
 #include <primitives/transaction.h>
+#include <privbcast/input.h>
 #include <privbcast/job.h>
 #include <privbcast/params.h>
 #include <privbcast/report.h>
+#include <protocol.h>
 #include <sync.h>
+#include <tinyformat.h>
 #include <uint256.h>
 #include <univalue.h>
+#include <util/chaintype.h>
 #include <util/check.h>
 #include <util/log.h>
+#include <util/result.h>
 #include <util/thread.h>
 #include <util/threadnames.h>
 #include <util/time.h>
+#include <util/translation.h>
 
 #include <algorithm>
 #include <cassert>
@@ -57,6 +67,57 @@ std::optional<int64_t> UnixSeconds(const std::optional<NodeClock::time_point>& t
 }
 
 } // namespace
+
+util::Result<PrivbcastSeeds> GetPrivbcastSeeds(const ArgsManager& args, const CChainParams& chainparams)
+{
+    const bool regtest{chainparams.GetChainType() == ChainType::REGTEST};
+    for (const char* arg : {"-privatebroadcastseed", "-privatebroadcastfixedseed"}) {
+        if (args.IsArgSet(arg) && !regtest) return util::Error{Untranslated(strprintf("%s can only be used with regtest", arg))};
+    }
+    PrivbcastSeeds seeds{
+        .dns_seeds = chainparams.DNSSeeds(),
+        .fixed_seeds = DecodeFixedSeeds(chainparams.FixedSeeds()),
+        .default_port = chainparams.GetDefaultPort(),
+        .chain = chainparams.GetChainTypeString(),
+    };
+    const bool overridden{args.IsArgSet("-privatebroadcastseed")};
+    if (overridden) seeds.dns_seeds = args.GetArgs("-privatebroadcastseed");
+    // Refused here rather than left to fail every query. Only jobs query the chain's own names,
+    // so a node that runs none starts with any -signetseednode.
+    if (overridden || args.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)) {
+        for (const std::string& name : seeds.dns_seeds) {
+            if (auto checked{privbcast::CheckSeedName(name)}; !checked) {
+                return util::Error{Untranslated(strprintf("Cannot query this DNS seed in private broadcast jobs: %s", util::ErrorString(checked).original))};
+            }
+        }
+    }
+    if (args.IsArgSet("-privatebroadcastfixedseed")) {
+        seeds.fixed_seeds.clear();
+        for (const std::string& value : args.GetArgs("-privatebroadcastfixedseed")) {
+            const CService seed{LookupNumeric(value, chainparams.GetDefaultPort())};
+            if (!seed.IsValid() || seed.GetPort() == 0) {
+                return util::Error{Untranslated(strprintf("-privatebroadcastfixedseed=%s is not an addr:port", value))};
+            }
+            seeds.fixed_seeds.push_back(seed);
+        }
+    }
+    return seeds;
+}
+
+util::Result<void> CheckPrivbcastSettings(const ArgsManager& args, const CChainParams& chainparams)
+{
+    if (!args.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)) return {};
+    if (args.IsArgSet("-signetseednode")) {
+        return util::Error{_("-privatebroadcast cannot be used with -signetseednode: private broadcast jobs query only the chain's own DNS seeds.")};
+    }
+    if (args.IsArgSet("-signetchallenge")) {
+        return util::Error{_("-privatebroadcast cannot be used with -signetchallenge: a custom signet has no DNS seeds for private broadcast jobs to query.")};
+    }
+    if (args.GetIntArg("-mocktime", 0) != 0 && chainparams.GetChainType() != ChainType::REGTEST) {
+        return util::Error{Untranslated("-privatebroadcast cannot be used with -mocktime except on regtest: the node's clock schedules every private broadcast job.")};
+    }
+    return {};
+}
 
 PrivbcastQueue::PrivbcastQueue(PrivbcastSeeds seeds,
                                std::function<bool()> network_active,

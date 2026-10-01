@@ -591,6 +591,30 @@ BOOST_AUTO_TEST_CASE(cnetaddr_unserialize_v2)
     BOOST_REQUIRE(s.empty());
 }
 
+BOOST_AUTO_TEST_CASE(decode_fixed_seeds)
+{
+    const CService ipv4{Lookup("1.2.3.4", 8333, false).value()};
+    CNetAddr onion_addr;
+    BOOST_REQUIRE(onion_addr.SetSpecial("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"));
+    const CService onion{onion_addr, 18333};
+
+    // Serialized as in chainparamsseeds.h: BIP155 address and port, back to back.
+    DataStream s{};
+    const auto ser_params{CAddress::V2_NETWORK};
+    s << ser_params(ipv4) << ser_params(onion);
+
+    const std::vector<CService> decoded{DecodeFixedSeeds(MakeUCharSpan(s))};
+    BOOST_REQUIRE_EQUAL(decoded.size(), 2U);
+    BOOST_CHECK(decoded[0] == ipv4);
+    BOOST_CHECK(decoded[1] == onion);
+
+    BOOST_CHECK(DecodeFixedSeeds({}).empty());
+
+    // A truncated tail is an error, not a shorter list.
+    const auto bytes{MakeUCharSpan(s)};
+    BOOST_CHECK_THROW(DecodeFixedSeeds(bytes.first(bytes.size() - 1)), std::ios_base::failure);
+}
+
 // prior to PR #14728, this test triggers an undefined behavior
 BOOST_AUTO_TEST_CASE(ipv4_peer_with_ipv6_addrMe_test)
 {

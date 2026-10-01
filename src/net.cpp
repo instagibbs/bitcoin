@@ -188,10 +188,7 @@ static std::vector<CAddress> ConvertSeeds(const std::vector<uint8_t> &vSeedsIn)
     const auto one_week{7 * 24h};
     std::vector<CAddress> vSeedsOut;
     FastRandomContext rng;
-    ParamsStream s{SpanReader{vSeedsIn}, CAddress::V2_NETWORK};
-    while (!s.empty()) {
-        CService endpoint;
-        s >> endpoint;
+    for (const CService& endpoint : DecodeFixedSeeds(vSeedsIn)) {
         CAddress addr{endpoint, SeedsAssumedServiceFlags()};
         addr.nTime = rng.rand_uniform_delay(Now<NodeSeconds>() - one_week, -one_week);
         LogDebug(BCLog::NET, "Added hardcoded seed: %s\n", addr.ToStringAddrPort());

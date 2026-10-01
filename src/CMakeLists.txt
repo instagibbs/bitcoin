@@ -159,6 +159,8 @@ target_link_libraries(bitcoin_common
     $<$<PLATFORM_ID:Windows>:ws2_32>
 )
 
+add_subdirectory(privbcast)
+
 include(InstallBinaryComponent)
 
 if(ENABLE_WALLET)

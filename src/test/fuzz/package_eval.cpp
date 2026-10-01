@@ -6,6 +6,7 @@
 #include <consensus/amount.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
+#include <crypto/sha256.h>
 #include <node/mining_types.h>
 #include <policy/feerate.h>
 #include <policy/packages.h>
@@ -14,6 +15,7 @@
 #include <policy/truc_policy.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
+#include <span.h>
 #include <sync.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
@@ -212,6 +214,35 @@ std::optional<COutPoint> GetChildEvictingPrevout(const CTxMemPool& tx_pool)
     return std::nullopt;
 }
 
+/**
+ * What a test accept of txs could leave behind: the coins cache's size, whether each input is
+ * cached, and whether each transaction has a script execution cache entry for the policy or the
+ * consensus flags. A test accept must leave all of it as it found it.
+ */
+struct CacheFootprint {
+    size_t coins;
+    std::vector<bool> present;
+    bool operator==(const CacheFootprint&) const = default;
+};
+
+CacheFootprint GetCacheFootprint(Chainstate& chainstate, ChainstateManager& chainman, const std::vector<CTransactionRef>& txs) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    CacheFootprint out{.coins = chainstate.CoinsTip().GetCacheSize(), .present = {}};
+    ValidationCache& vcache{chainman.m_validation_cache};
+    for (const script_verify_flags flags : {STANDARD_SCRIPT_VERIFY_FLAGS, GetBlockScriptFlags(*chainstate.m_chain.Tip(), chainman)}) {
+        for (const auto& tx : txs) {
+            uint256 entry;
+            CSHA256 hasher{vcache.ScriptExecutionCacheHasher()};
+            hasher.Write(UCharCast(tx->GetWitnessHash().begin()), 32).Write(reinterpret_cast<const unsigned char*>(&flags), sizeof(flags)).Finalize(entry.begin());
+            out.present.push_back(vcache.m_script_execution_cache.contains(entry, /*erase=*/false));
+        }
+    }
+    for (const auto& tx : txs) {
+        for (const CTxIn& in : tx->vin) out.present.push_back(chainstate.CoinsTip().HaveCoinInCache(in.prevout));
+    }
+    return out;
+}
+
 FUZZ_TARGET(ephemeral_package_eval, .init = initialize_tx_pool)
 {
     SeedRandomStateForTest(SeedRand::ZEROS);
@@ -341,11 +372,20 @@ FUZZ_TARGET(ephemeral_package_eval, .init = initialize_tx_pool)
 
         auto single_submit = txs.size() == 1;
 
+        // Whichever call is the test accept leaves the coins and script execution caches as it found them.
+        const std::vector<CTransactionRef> tested{single_submit ? txs : std::vector<CTransactionRef>{txs.back()}};
+        const auto footprint = [&] { return WITH_LOCK(::cs_main, return GetCacheFootprint(chainstate, *node.chainman, tested)); };
+        std::optional<CacheFootprint> before;
+        if (single_submit) before = footprint();
+
         const auto result_package = WITH_LOCK(::cs_main,
                                     return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit, /*client_maxfeerate=*/{}));
+        if (single_submit) Assert(footprint() == *before);
+        if (!single_submit) before = footprint();
 
         const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(),
                                    /*bypass_limits=*/false, /*test_accept=*/!single_submit));
+        if (!single_submit) Assert(footprint() == *before);
 
         if (!single_submit && result_package.m_state.GetResult() != PackageValidationResult::PCKG_POLICY) {
             // We don't know anything about the validity since transactions were randomly generated, so
@@ -515,13 +555,28 @@ FUZZ_TARGET(tx_package_eval, .init = initialize_tx_pool)
             client_maxfeerate = CFeeRate(fuzzed_data_provider.ConsumeIntegralInRange<CAmount>(-1, 50 * COIN), 100);
         }
 
+        // Whichever call is the test accept leaves the coins and script execution caches as it found
+        // them, and so does a test accept of the whole package, as testmempoolaccept runs it.
+        const std::vector<CTransactionRef> tested{single_submit ? txs : std::vector<CTransactionRef>{txs.back()}};
+        const auto footprint = [&](const std::vector<CTransactionRef>& of) { return WITH_LOCK(::cs_main, return GetCacheFootprint(chainstate, *node.chainman, of)); };
+        std::optional<CacheFootprint> before;
+        if (!single_submit) {
+            before = footprint(txs);
+            (void)WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/true, client_maxfeerate));
+            Assert(footprint(txs) == *before);
+        }
+        if (single_submit) before = footprint(tested);
+
         const auto result_package = WITH_LOCK(::cs_main,
                                     return ProcessNewPackage(chainstate, tx_pool, txs, /*test_accept=*/single_submit, client_maxfeerate));
+        if (single_submit) Assert(footprint(tested) == *before);
+        if (!single_submit) before = footprint(tested);
 
         // Always set bypass_limits to false because it is not supported in ProcessNewPackage and
         // can be a source of divergence.
         const auto res = WITH_LOCK(::cs_main, return AcceptToMemoryPool(chainstate, txs.back(), GetTime(),
                                    /*bypass_limits=*/false, /*test_accept=*/!single_submit));
+        if (!single_submit) Assert(footprint(tested) == *before);
         const bool passed = res.m_result_type == MempoolAcceptResult::ResultType::VALID;
 
         node.validation_signals->SyncWithValidationInterfaceQueue();

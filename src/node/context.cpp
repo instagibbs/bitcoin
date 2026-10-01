@@ -11,6 +11,7 @@
 #include <key.h>
 #include <net.h>
 #include <net_processing.h>
+#include <node/privbcast_manager.h>
 #include <netgroup.h>
 #include <node/block_template_manager.h>
 #include <node/kernel_notifications.h>

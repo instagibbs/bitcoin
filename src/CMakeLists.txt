@@ -96,6 +96,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   addresstype.cpp
   base58.cpp
   bech32.cpp
+  bip324.cpp
   chain.cpp
   chainparams.cpp
   chainparamsbase.cpp
@@ -126,6 +127,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   merkleblock.cpp
   musig.cpp
   net_permissions.cpp
+  net_transport.cpp
   net_types.cpp
   netaddress.cpp
   netbase.cpp
@@ -186,7 +188,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   addrdb.cpp
   addrman.cpp
   banman.cpp
-  bip324.cpp
   blockencodings.cpp
   blockfilter.cpp
   consensus/tx_verify.cpp
@@ -238,6 +239,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/mini_miner.cpp
   node/minisketchwrapper.cpp
   node/peerman_args.cpp
+  node/privbcast_manager.cpp
   node/psbt.cpp
   node/timeoffsets.cpp
   node/transaction.cpp
@@ -256,7 +258,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   policy/rbf.cpp
   policy/settings.cpp
   policy/truc_policy.cpp
-  private_broadcast.cpp
   rest.cpp
   rpc/blockchain.cpp
   rpc/external_signer.cpp
@@ -288,6 +289,7 @@ target_link_libraries(bitcoin_node
   PRIVATE
     core_interface
     bitcoin_common
+    bitcoin_privbcast
     bitcoin_util
     $<TARGET_NAME_IF_EXISTS:bitcoin_zmq>
     leveldb
@@ -404,6 +406,39 @@ if(BUILD_UTIL)
     univalue
   )
   install_binary_component(bitcoin-util HAS_MANPAGE)
+endif()
+
+# Bounded private transaction broadcast over Tor, sharing nothing with a running node.
+add_library(bitcoin_privbcast STATIC EXCLUDE_FROM_ALL
+  privbcast/attempt.cpp
+  privbcast/discovery.cpp
+  privbcast/input.cpp
+  privbcast/job.cpp
+  privbcast/session.cpp
+  privbcast/timing.cpp
+)
+target_link_libraries(bitcoin_privbcast
+  PRIVATE
+    core_interface
+    bitcoin_common
+    bitcoin_util
+    univalue
+)
+
+if(BUILD_PRIVBCAST)
+  add_executable(bitcoin-privbcast
+    bitcoin-privbcast.cpp
+    bitcoin-privbcast-res.rc
+  )
+  add_windows_application_manifest(bitcoin-privbcast)
+  target_link_libraries(bitcoin-privbcast
+    core_interface
+    bitcoin_privbcast
+    bitcoin_common
+    bitcoin_util
+    univalue
+  )
+  install_binary_component(bitcoin-privbcast HAS_MANPAGE)
 endif()
 
 

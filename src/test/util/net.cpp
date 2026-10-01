@@ -56,7 +56,7 @@ void ConnmanTestMsg::Handshake(CNode& node,
     FlushSendBuffer(node); // Drop the verack message added by SendMessages.
     if (node.fDisconnect) return;
     assert(node.nVersion == version);
-    assert(node.GetCommonVersion() == std::min(version, node.AdvertisedVersion()));
+    assert(node.GetCommonVersion() == std::min(version, PROTOCOL_VERSION));
     CNodeStateStats statestats;
     assert(peerman.GetNodeStateStats(node.GetId(), statestats));
     assert(statestats.m_relay_txs == (relay_txs && !node.IsBlockOnlyConn()));
@@ -84,8 +84,6 @@ void ConnmanTestMsg::Reset()
 {
     ResetAddrCache();
     ResetMaxOutboundCycle();
-    m_private_broadcast.m_outbound_tor_ok_at_least_once.store(false);
-    m_private_broadcast.m_num_to_open.store(0);
 }
 
 void ConnmanTestMsg::NodeReceiveMsgBytes(CNode& node, std::span<const uint8_t> msg_bytes, bool& complete) const

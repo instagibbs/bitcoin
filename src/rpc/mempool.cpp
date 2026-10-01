@@ -6,17 +6,19 @@
 #include <rpc/mempool.h>
 #include <rpc/register.h> // IWYU pragma: associated
 
+#include <coins.h>
 #include <common/args.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <index/txospenderindex.h>
-#include <net.h>
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netbase.h>
+#include <node/context.h>
 #include <node/mempool_persist.h>
 #include <node/mempool_persist_args.h>
+#include <node/privbcast_manager.h>
 #include <node/transaction.h>
 #include <node/txorphanage.h>
 #include <node/types.h>
@@ -25,6 +27,7 @@
 #include <policy/policy.h>
 #include <policy/rbf.h>
 #include <primitives/transaction.h>
+#include <privbcast/job.h>
 #include <rpc/protocol.h>
 #include <rpc/request.h>
 #include <rpc/server.h>
@@ -63,13 +66,10 @@
 #include <utility>
 #include <vector>
 
-namespace node {
-struct NodeContext;
-} // namespace node
-
 using node::DumpMempool;
 
 using node::DEFAULT_MAX_BURN_AMOUNT;
+using node::DEFAULT_PRIVATE_BROADCAST;
 using node::DEFAULT_MAX_RAW_TX_FEE_RATE;
 using node::MempoolPath;
 using node::NodeContext;
@@ -88,15 +88,23 @@ static RPCMethod sendrawtransaction()
         "privacy by leaking the transaction's origin, as nodes will normally not\n"
         "rebroadcast non-wallet transactions already in their mempool.\n"
 
-        "\nIf -privatebroadcast is enabled, then the transaction will be sent via\n"
-        "dedicated, short-lived connections to Tor or I2P peers, or to IPv4/IPv6 peers\n"
-        "via the Tor network. This provides best-effort concealment of the transaction's origin.\n"
-        "Private broadcast is experimental and may change in future releases.\n"
-        "Submission does not itself add the transaction to the local mempool; normal\n"
-        "mempool acceptance and relay apply when it is received back from the network.\n"
-        "The private broadcast queue is bounded: when it is full, this RPC fails and\n"
-        "the transaction is not scheduled until an existing one completes or is\n"
-        "aborted. Use getprivatebroadcastinfo to inspect the queue and abortprivatebroadcast to abort.\n"
+        "\nIf -privatebroadcast is enabled, then the transaction is queued as a private\n"
+        "broadcast job: a bounded number of short-lived connections through the Tor network\n"
+        "to onion peers and to IPv4/IPv6 peers via Tor exits, on a schedule fixed when the\n"
+        "job starts, with no reaction to what the network does. This provides best-effort\n"
+        "concealment of the transaction's origin. Private broadcast is experimental and may\n"
+        "change in future releases. The transaction will only enter the local mempool when it\n"
+        "is received back from the network. If the mempool already has a transaction with the\n"
+        "same txid, the given one is queued as it is, without being checked. The queue is\n"
+        "bounded: when it is full, or networking is off, this RPC fails and the transaction is\n"
+        "not queued. Jobs start in submission order, at least " +
+            strprintf("%d to %d\n", count_seconds(node::PrivateBroadcastManager::START_SPACING_MIN), count_seconds(node::PrivateBroadcastManager::START_SPACING_MAX)) +
+        "seconds apart, and a transaction whose job (matched by wtxid) is still queued or\n"
+        "running is not queued again. A job runs until its fixed schedule has run, at most ten\n"
+        "minutes. Success means only that the job was queued: a job does not retry, so if\n"
+        "getprivatebroadcastinfo shows it finished with announced false, submit the\n"
+        "transaction again. Use getprivatebroadcastinfo to inspect the jobs and their\n"
+        "reports, and abortprivatebroadcast to abort one.\n"
 
         "\nA specific exception, RPC_TRANSACTION_ALREADY_IN_UTXO_SET, may throw if the transaction cannot be added to the mempool.\n"
 
@@ -150,14 +158,12 @@ static RPCMethod sendrawtransaction()
             AssertLockNotHeld(cs_main);
             NodeContext& node = EnsureAnyNodeContext(request.context);
             const bool private_broadcast_enabled{gArgs.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)};
-            if (private_broadcast_enabled &&
-                !g_reachable_nets.Contains(NET_ONION) &&
-                !g_reachable_nets.Contains(NET_I2P)) {
+            if (private_broadcast_enabled && !node::PrivateBroadcastManager::UsableProxy(GetProxy(NET_ONION))) {
                 throw JSONRPCError(RPC_MISC_ERROR,
-                                   "-privatebroadcast is enabled, but none of the Tor or I2P networks is "
-                                   "reachable. Maybe the location of the Tor proxy couldn't be retrieved "
-                                   "from the Tor daemon at startup. Check whether the Tor daemon is running "
-                                   "and that -torcontrol, -torpassword and -i2psam are configured properly.");
+                                   "-privatebroadcast is enabled, but no Tor SOCKS5 proxy is configured. Maybe the location of the Tor proxy "
+                                   "couldn't be retrieved from the Tor daemon at startup. Check whether the Tor "
+                                   "daemon is running and that -proxy, -onion or -torcontrol and -torpassword are "
+                                   "configured properly.");
             }
             const auto method = private_broadcast_enabled ? node::TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST
                                                           : node::TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL;
@@ -176,35 +182,71 @@ static RPCMethod sendrawtransaction()
     };
 }
 
+static UniValue JobToJson(const node::PrivateBroadcastManager::JobInfo& job)
+{
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("txid", job.txid.ToString());
+    o.pushKV("wtxid", job.wtxid.ToString());
+    if (job.parent_txid) o.pushKV("parent_txid", job.parent_txid->ToString());
+    o.pushKV("state", std::string(node::PrivateBroadcastManager::StateName(job.state)));
+    o.pushKV("time_added", TicksSinceEpoch<std::chrono::seconds>(job.added));
+    if (job.started) o.pushKV("time_started", TicksSinceEpoch<std::chrono::seconds>(*job.started));
+    if (job.ended) o.pushKV("time_ended", TicksSinceEpoch<std::chrono::seconds>(*job.ended));
+    if (job.seen_in_mempool) o.pushKV("seen_in_mempool", TicksSinceEpoch<std::chrono::seconds>(*job.seen_in_mempool));
+    if (job.error) o.pushKV("error", *job.error);
+    if (job.state == node::PrivateBroadcastManager::JobState::RUNNING) {
+        UniValue progress(UniValue::VOBJ);
+        progress.pushKV("discovery_done", job.progress.discovery_done);
+        progress.pushKV("opportunities_ended", job.progress.opportunities_ended);
+        progress.pushKV("connections", job.progress.connections);
+        progress.pushKV("announcements_written", job.progress.announcements_written);
+        o.pushKV("progress", std::move(progress));
+    }
+    if (job.report) {
+        o.pushKV("announced", job.exit_code == 0);
+        o.pushKV("report", *job.report);
+    }
+    return o;
+}
+
 static RPCMethod getprivatebroadcastinfo()
 {
     return RPCMethod{
         "getprivatebroadcastinfo",
-        "Returns information about transactions tracked for private broadcast.\n"
-        "Transactions that have reached the send-attempt limit remain in the result with attempts_remaining=0.\n"
+        "Returns the private broadcast jobs: the most recent finished ones (up to " +
+            strprintf("%d", node::PrivateBroadcastManager::MAX_FINISHED_JOBS) +
+        ", oldest first),\n"
+        "then the running and the queued ones, in order. Jobs are kept in memory only.\n"
+        "A job is one bounded broadcast of one transaction; it is done when its fixed schedule has run,\n"
+        "which says nothing about whether the network accepted the transaction. seen_in_mempool is when\n"
+        "this node's own mempool first accepted the transaction, from any source.\n"
         "This method is only available when running with -privatebroadcast enabled.\n",
         {},
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::ARR, "transactions", "",
+                {RPCResult::Type::ARR, "jobs", "",
                     {
                         {RPCResult::Type::OBJ, "", "",
                             {
                                 {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
                                 {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
-                                {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
-                                {RPCResult::Type::NUM_TIME, "time_added", "The time this transaction was added to the private broadcast queue (seconds since epoch)"},
-                                {RPCResult::Type::NUM, "attempts_remaining", "The number of additional private broadcast send attempts allowed for this transaction"},
-                                {RPCResult::Type::ARR, "peers", "Per-peer send and acknowledgment information for this transaction",
+                                {RPCResult::Type::STR_HEX, "parent_txid", /*optional=*/true, "The unconfirmed parent served on request, for a package job"},
+                                {RPCResult::Type::STR, "state", "queued, running, done or aborted"},
+                                {RPCResult::Type::NUM_TIME, "time_added", "When the job was queued (seconds since epoch)"},
+                                {RPCResult::Type::NUM_TIME, "time_started", /*optional=*/true, "When the job started (seconds since epoch)"},
+                                {RPCResult::Type::NUM_TIME, "time_ended", /*optional=*/true, "When the job ended (seconds since epoch)"},
+                                {RPCResult::Type::NUM_TIME, "seen_in_mempool", /*optional=*/true, "When this node's mempool first accepted the transaction after the job was queued (seconds since epoch); absent for one already in the mempool then"},
+                                {RPCResult::Type::STR, "error", /*optional=*/true, "Why the job could not run, or what stopped it: networking being disabled, or still running at the ten-minute cap"},
+                                {RPCResult::Type::OBJ, "progress", /*optional=*/true, "How far a running job has got",
                                     {
-                                        {RPCResult::Type::OBJ, "", "",
-                                            {
-                                                {RPCResult::Type::STR, "address", "The address of the peer to which the transaction was sent"},
-                                                {RPCResult::Type::NUM_TIME, "sent", "The time this transaction was picked for sending to this peer via private broadcast (seconds since epoch)"},
-                                                {RPCResult::Type::NUM_TIME, "received", /*optional=*/true, "The time this peer acknowledged reception of the transaction (seconds since epoch)"},
-                                            }},
+                                        {RPCResult::Type::BOOL, "discovery_done", "Whether the peers to announce to have been chosen"},
+                                        {RPCResult::Type::NUM, "opportunities_ended", "Scheduled opportunities that have ended, dialled, missed or without a peer, of 24"},
+                                        {RPCResult::Type::NUM, "connections", "Attempts made so far"},
+                                        {RPCResult::Type::NUM, "announcements_written", "Announcements fully written to a peer so far"},
                                     }},
+                                {RPCResult::Type::BOOL, "announced", /*optional=*/true, "Whether at least one announcement was fully written to a peer"},
+                                {RPCResult::Type::ANY, "report", /*optional=*/true, "The job's full report, as bitcoin-privbcast prints it"},
                             }},
                     }},
             }},
@@ -215,37 +257,13 @@ static RPCMethod getprivatebroadcastinfo()
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
         {
             const NodeContext& node{EnsureAnyNodeContext(request.context)};
-            const PeerManager& peerman{EnsurePeerman(node)};
-            if (!peerman.GetInfo().private_broadcast) {
+            if (!node.privbcast) {
                 throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
             }
-
-            const auto txs{peerman.GetPrivateBroadcastInfo()};
-
-            UniValue transactions(UniValue::VARR);
-            for (const auto& tx_info : txs) {
-                UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", tx_info.tx->GetHash().ToString());
-                o.pushKV("wtxid", tx_info.tx->GetWitnessHash().ToString());
-                o.pushKV("hex", EncodeHexTx(*tx_info.tx));
-                o.pushKV("time_added", TicksSinceEpoch<std::chrono::seconds>(tx_info.time_added));
-                o.pushKV("attempts_remaining", tx_info.attempts_remaining);
-                UniValue peers(UniValue::VARR);
-                for (const auto& peer : tx_info.peers) {
-                    UniValue p(UniValue::VOBJ);
-                    p.pushKV("address", peer.address.ToStringAddrPort());
-                    p.pushKV("sent", TicksSinceEpoch<std::chrono::seconds>(peer.sent));
-                    if (peer.received.has_value()) {
-                        p.pushKV("received", TicksSinceEpoch<std::chrono::seconds>(*peer.received));
-                    }
-                    peers.push_back(std::move(p));
-                }
-                o.pushKV("peers", std::move(peers));
-                transactions.push_back(std::move(o));
-            }
-
+            UniValue jobs(UniValue::VARR);
+            for (const auto& job : node.privbcast->GetJobs()) jobs.push_back(JobToJson(job));
             UniValue ret(UniValue::VOBJ);
-            ret.pushKV("transactions", std::move(transactions));
+            ret.pushKV("jobs", std::move(jobs));
             return ret;
         },
     };
@@ -255,23 +273,24 @@ static RPCMethod abortprivatebroadcast()
 {
     return RPCMethod{
         "abortprivatebroadcast",
-        "Abort private broadcast attempts for a transaction currently being privately broadcast.\n"
-        "The transaction will be removed from the private broadcast queue.\n"
+        "Abort private broadcast of a transaction. A queued job is removed; a running one is cancelled and ends\n"
+        "shortly with a report of what it did before the cancel.\n"
         "This method is only available when running with -privatebroadcast enabled.\n",
         {
-            {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid for all transactions in the private broadcast queue.\n"
+            {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid of every queued or running job.\n"
                                                                 "If the provided id matches a txid that corresponds to multiple transactions with different wtxids, multiple transactions will be removed and returned."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::ARR, "removed_transactions", "Transactions removed from the private broadcast queue",
+                {RPCResult::Type::ARR, "removed_transactions", "Transactions whose jobs were aborted",
                     {
                         {RPCResult::Type::OBJ, "", "",
                             {
                                 {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
                                 {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
                                 {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
+                                {RPCResult::Type::STR, "state", "aborted for a queued job; running for a job still ending"},
                             }},
                     }},
             }
@@ -282,26 +301,22 @@ static RPCMethod abortprivatebroadcast()
         },
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
         {
-
             const NodeContext& node{EnsureAnyNodeContext(request.context)};
-            PeerManager& peerman{EnsurePeerman(node)};
-            if (!peerman.GetInfo().private_broadcast) {
+            if (!node.privbcast) {
                 throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
             }
-
             const uint256 id{ParseHashV(self.Arg<UniValue>("id"), "id")};
-
-            const auto removed_txs{peerman.AbortPrivateBroadcast(id)};
-            if (removed_txs.empty()) {
+            const auto jobs{node.privbcast->Abort(id)};
+            if (jobs.empty()) {
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not in private broadcast queue. Check getprivatebroadcastinfo.");
             }
-
             UniValue removed_transactions(UniValue::VARR);
-            for (const auto& tx : removed_txs) {
+            for (const auto& job : jobs) {
                 UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", tx->GetHash().ToString());
-                o.pushKV("wtxid", tx->GetWitnessHash().ToString());
-                o.pushKV("hex", EncodeHexTx(*tx));
+                o.pushKV("txid", job.txid.ToString());
+                o.pushKV("wtxid", job.wtxid.ToString());
+                o.pushKV("hex", EncodeHexTx(*job.tx));
+                o.pushKV("state", std::string(node::PrivateBroadcastManager::StateName(job.state)));
                 removed_transactions.push_back(std::move(o));
             }
             UniValue ret(UniValue::VOBJ);
@@ -1374,6 +1389,168 @@ static RPCMethod getorphantxs()
     };
 }
 
+/**
+ * A transaction's fee: inputs that spend `parent`, if given, are valued from its outputs, the rest
+ * from the mempool and the UTXO set. nullopt if an input is missing or an amount is out of range.
+ * Like a test accept, it leaves no coins cache footprint: a coin it brought into the cache is
+ * uncached again.
+ */
+static std::optional<CAmount> TxFee(Chainstate& chainstate, const CTxMemPool& mempool, const CTransaction& tx, const CTransaction* parent)
+{
+    LOCK2(::cs_main, mempool.cs);
+    CCoinsViewCache& tip{chainstate.CoinsTip()};
+    const CCoinsViewMemPool view{&tip, mempool};
+    CAmount in{0};
+    for (const CTxIn& txin : tx.vin) {
+        CAmount value;
+        if (parent && txin.prevout.hash == parent->GetHash()) {
+            if (txin.prevout.n >= parent->vout.size()) return std::nullopt;
+            value = parent->vout[txin.prevout.n].nValue;
+        } else {
+            const bool cached{tip.HaveCoinInCache(txin.prevout)};
+            const std::optional<Coin> coin{view.GetCoin(txin.prevout)};
+            if (!cached) tip.Uncache(txin.prevout);
+            if (!coin) return std::nullopt;
+            value = coin->out.nValue;
+        }
+        if (!MoneyRange(value)) return std::nullopt;
+        in += value;
+        if (!MoneyRange(in)) return std::nullopt;
+    }
+    CAmount out{0};
+    for (const CTxOut& txout : tx.vout) {
+        if (!MoneyRange(txout.nValue)) return std::nullopt;
+        out += txout.nValue;
+        if (!MoneyRange(out)) return std::nullopt;
+    }
+    if (out > in) return std::nullopt;
+    return in - out;
+}
+
+/**
+ * The -privatebroadcast form of submitpackage: one transaction, or exactly one parent and its
+ * child. Nothing enters the mempool. The package is test-accepted and, if acceptable, queued as one
+ * private broadcast job that announces the child and serves the parent to a peer that asks for it
+ * (one parent, one child). A transaction whose txid is already in the mempool counts as accepted
+ * and is sent as given, unvalidated. A test accept applies no package feerate, so a parent that
+ * fails on its own as TX_RECONSIDERABLE (a fee too low by itself) is let through with the child
+ * unvalidated: that is the case package relay exists for, and the node cannot check it any further
+ * here. Only the fees are still worked out, so that maxfeerate holds for the child and the package
+ * meets the feerate floor package validation would apply.
+ */
+static UniValue SubmitPackagePrivately(NodeContext& node, Chainstate& chainstate, CTxMemPool& mempool,
+                                       const std::vector<CTransactionRef>& txns, const CFeeRate& max_raw_tx_fee_rate)
+{
+    CHECK_NONFATAL(node.privbcast);
+    if (!node::PrivateBroadcastManager::UsableProxy(GetProxy(NET_ONION))) {
+        throw JSONRPCError(RPC_MISC_ERROR, "-privatebroadcast is enabled, but no Tor SOCKS5 proxy is configured.");
+    }
+    if (txns.size() > 2) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "With -privatebroadcast a package is one transaction, or one parent and its child.");
+    }
+    const CTransactionRef& child{txns.back()};
+    const CTransactionRef parent{txns.size() == 2 ? txns.front() : nullptr};
+    // A transaction already in the mempool counts as accepted, as in an ordinary submitpackage, and the
+    // job sends it as given, as sendrawtransaction does. What is left is test-accepted: as a package
+    // when both are new, so that a parent too cheap on its own can go with its child, otherwise on its
+    // own, as sendrawtransaction does, which allows a replacement.
+    const CTransactionRef mempool_parent{parent ? mempool.get(parent->GetHash()) : nullptr};
+    const CTransactionRef mempool_child{mempool.get(child->GetHash())};
+    std::vector<CTransactionRef> to_check;
+    if (parent && !mempool_parent) to_check.push_back(parent);
+    if (!mempool_child) to_check.push_back(child);
+    const PackageMempoolAcceptResult result{[&] {
+        LOCK(::cs_main);
+        if (to_check.size() == 2) return ProcessNewPackage(chainstate, mempool, to_check, /*test_accept=*/true, /*client_maxfeerate=*/std::nullopt);
+        PackageValidationState state;
+        std::map<Wtxid, MempoolAcceptResult> results;
+        if (!to_check.empty()) {
+            MempoolAcceptResult single{chainstate.m_chainman.ProcessTransaction(to_check.front(), /*test_accept=*/true)};
+            if (single.m_result_type != MempoolAcceptResult::ResultType::VALID) state.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
+            results.emplace(to_check.front()->GetWitnessHash(), std::move(single));
+        }
+        return PackageMempoolAcceptResult{state, std::move(results)};
+    }()};
+
+    bool acceptable{true};
+    bool parent_reconsiderable{false};
+    UniValue tx_results{UniValue::VOBJ};
+    for (const auto& tx : txns) {
+        UniValue r{UniValue::VOBJ};
+        r.pushKV("txid", tx->GetHash().GetHex());
+        const CTransactionRef& in_mempool{tx == child ? mempool_child : mempool_parent};
+        const auto it{result.m_tx_results.find(tx->GetWitnessHash())};
+        if (in_mempool) {
+            if (in_mempool->GetWitnessHash() != tx->GetWitnessHash()) r.pushKV("other-wtxid", in_mempool->GetWitnessHash().GetHex());
+        } else if (it == result.m_tx_results.end()) {
+            r.pushKV("error", "package-not-validated");
+            // A parent that failed only for its fee leaves its child unvalidated, but the fees are still
+            // checked: maxfeerate holds for the child, and the package must pay the feerate floor that
+            // package validation would apply.
+            if (tx == child && parent_reconsiderable) {
+                const std::optional<CAmount> parent_fee{TxFee(chainstate, mempool, *parent, nullptr)};
+                const std::optional<CAmount> child_fee{TxFee(chainstate, mempool, *tx, parent.get())};
+                const int32_t package_vsize{int32_t(GetVirtualTransactionSize(*parent) + GetVirtualTransactionSize(*tx))};
+                // std::max returns a reference to one of its arguments: copy it while GetMinFee()'s result lives.
+                const CFeeRate floor{WITH_LOCK(mempool.cs, return CFeeRate{std::max(mempool.GetMinFee(), mempool.m_opts.min_relay_feerate)})};
+                if (!parent_fee || !child_fee) {
+                    acceptable = false;
+                    r.pushKV("error", "missing or invalid inputs");
+                } else if (max_raw_tx_fee_rate != CFeeRate(0) && *child_fee > max_raw_tx_fee_rate.GetFee(GetVirtualTransactionSize(*tx))) {
+                    acceptable = false;
+                    r.pushKV("error", "max feerate exceeded");
+                } else if (*parent_fee + *child_fee < floor.GetFee(package_vsize)) {
+                    acceptable = false;
+                    r.pushKV("error", "package feerate too low");
+                }
+            }
+        } else {
+            const MempoolAcceptResult& tx_result{it->second};
+            switch (tx_result.m_result_type) {
+            case MempoolAcceptResult::ResultType::VALID: {
+                const int64_t vsize{GetVirtualTransactionSize(*tx)};
+                r.pushKV("vsize_adjusted", tx_result.m_vsize.value());
+                r.pushKV("vsize_bip141", vsize);
+                UniValue fees{UniValue::VOBJ};
+                fees.pushKV("base", ValueFromAmount(tx_result.m_base_fees.value()));
+                r.pushKV("fees", std::move(fees));
+                if (max_raw_tx_fee_rate != CFeeRate(0) && tx_result.m_base_fees.value() > max_raw_tx_fee_rate.GetFee(vsize)) {
+                    acceptable = false;
+                    r.pushKV("error", "max feerate exceeded");
+                }
+                break;
+            }
+            case MempoolAcceptResult::ResultType::INVALID:
+                r.pushKV("error", tx_result.m_state.ToString());
+                if (tx == parent && tx_result.m_state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
+                    parent_reconsiderable = true; // the child may pay for it; only package relay can tell
+                } else {
+                    acceptable = false;
+                }
+                break;
+            case MempoolAcceptResult::ResultType::MEMPOOL_ENTRY:
+            case MempoolAcceptResult::ResultType::DIFFERENT_WITNESS:
+                acceptable = false;
+                r.pushKV("error", "already in mempool");
+                break;
+            } // no default case, so the compiler can warn about missing cases
+        }
+        tx_results.pushKV(tx->GetWitnessHash().GetHex(), std::move(r));
+    }
+    // A package-wide failure (malformed, TRUC or cluster limits) can stop validation before any
+    // per-transaction result; only a reconsiderable parent leaves an invalid package queueable.
+    if (result.m_state.IsInvalid() && !parent_reconsiderable) acceptable = false;
+
+    UniValue out{UniValue::VOBJ};
+    out.pushKV("package_msg", !acceptable ? (result.m_state.IsInvalid() ? result.m_state.ToString() : "transaction failed") :
+                              parent_reconsiderable ? "parent-reconsiderable" : "success");
+    out.pushKV("tx-results", std::move(tx_results));
+    if (acceptable && !node.privbcast->Submit(child, parent)) {
+        throw JSONRPCTransactionError(TransactionError::PRIVATE_BROADCAST_FULL);
+    }
+    return out;
+}
+
 static RPCMethod submitpackage()
 {
     return RPCMethod{"submitpackage",
@@ -1381,6 +1558,16 @@ static RPCMethod submitpackage()
         "The package will be validated according to consensus and mempool policy rules. If any transaction passes, it will be accepted to mempool.\n"
         "This RPC is experimental and the interface may be unstable. Refer to doc/policy/packages.md for documentation on package policies.\n"
         "Warning: successful submission does not mean the transactions will propagate throughout the network.\n"
+        "\nIf -privatebroadcast is enabled, the package must be one transaction, or one parent and its child. Nothing\n"
+        "enters the local mempool: the package is test-accepted and queued as one private broadcast job that announces\n"
+        "the child and serves the parent to a peer that asks for it. A transaction already in the mempool counts as\n"
+        "accepted, as it does without -privatebroadcast, and the job sends it as given. A single new transaction\n"
+        "is test-accepted on its own, as sendrawtransaction does, so it may replace a mempool transaction. A new parent\n"
+        "that fails on its own only for its fee (TX_RECONSIDERABLE) is allowed, with the child left unvalidated, since a\n"
+        "test accept applies no package feerate: the fees are still worked out, maxfeerate holds for the child and the\n"
+        "package must pay at least the higher of the mempool minimum feerate and the minimum relay feerate, but a child\n"
+        "that is otherwise invalid is still sent. package_msg is then \"parent-reconsiderable\". A package whose job is\n"
+        "already queued or running queues nothing more. The job is listed by getprivatebroadcastinfo.\n"
         ,
         {
             {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.\n"
@@ -1477,6 +1664,9 @@ static RPCMethod submitpackage()
             NodeContext& node = EnsureAnyNodeContext(request.context);
             CTxMemPool& mempool = EnsureMemPool(node);
             Chainstate& chainstate = EnsureChainman(node).ActiveChainstate();
+            if (gArgs.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)) {
+                return SubmitPackagePrivately(node, chainstate, mempool, txns, max_raw_tx_fee_rate);
+            }
             const auto package_result = WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/ false, client_maxfeerate));
 
             std::string package_msg = "success";

@@ -17,7 +17,9 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string>
+#include <vector>
 
 /** Message header.
  * (4) message start.
@@ -485,6 +487,12 @@ public:
                static_cast<const CService&>(a) == static_cast<const CService&>(b);
     }
 };
+
+/** Decode a chain's fixed-seed list, as serialized in chainparamsseeds.h: BIP155 addresses with
+ *  ports, back to back. Every entry is returned as decoded, without validation or filtering, so an
+ *  unknown network identifier yields an invalid CService. Throws std::ios_base::failure on a
+ *  truncated or otherwise malformed encoding. */
+std::vector<CService> DecodeFixedSeeds(std::span<const uint8_t> seeds);
 
 /** getdata message type flags */
 inline constexpr uint32_t MSG_WITNESS_FLAG = 1 << 30;

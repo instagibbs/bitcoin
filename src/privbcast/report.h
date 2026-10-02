@@ -68,6 +68,8 @@ struct Summary {
     int announcements_written{0};
     int tx_written{0};
     int pongs{0};
+    /** Package mode: attempts that wrote the parent's TX. */
+    int parents_served{0};
     /** Slots that ran to their end, cut short neither by cancellation nor by a failure of the job. */
     int slots_completed{0};
     /** The job was cancelled. */
@@ -85,6 +87,9 @@ struct Summary {
 struct Report {
     Txid txid;
     Wtxid wtxid;
+    /** Package mode: the parent's ids. Empty for a job without a parent. */
+    std::optional<Txid> parent_txid;
+    std::optional<Wtxid> parent_wtxid;
     std::string chain;
     DiscoveryReport discovery;
     /** In slot order. */
@@ -93,7 +98,8 @@ struct Report {
 };
 
 /** The report's JSON object, with the field names and values of Interface/Report. A time is an
- *  integer number of milliseconds, or null for an event that did not happen. */
+ *  integer number of milliseconds, or null for an event that did not happen. The fields package
+ *  mode adds are there only for a job with a parent. */
 UniValue ToUniValue(const Report& report);
 /** The report's discovery object. With `candidates`, what `discover` prints: the endpoints each
  *  seed kept (seeds[].candidates) and the onion candidates (onion) are added. */

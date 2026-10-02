@@ -6,13 +6,14 @@
 #include <rpc/mempool.h>
 #include <rpc/register.h> // IWYU pragma: associated
 
+#include <coins.h>
 #include <consensus/amount.h>
+#include <consensus/tx_check.h>
+#include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <index/txospenderindex.h>
 #include <net_processing.h>
-#include <netaddress.h>
-#include <netbase.h>
 #include <node/context.h>
 #include <node/mempool_persist.h>
 #include <node/mempool_persist_args.h>
@@ -24,6 +25,7 @@
 #include <policy/packages.h>
 #include <policy/policy.h>
 #include <policy/rbf.h>
+#include <policy/settings.h>
 #include <primitives/transaction.h>
 #include <privbcast/job.h>
 #include <privbcast/params.h>
@@ -33,6 +35,7 @@
 #include <rpc/server_util.h>
 #include <rpc/util.h>
 #include <script/script.h>
+#include <script/verify_flags.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <txgraph.h>
@@ -44,12 +47,14 @@
 #include <util/feefrac.h>
 #include <util/fs.h>
 #include <util/moneystr.h>
+#include <util/overflow.h>
 #include <util/string.h>
 #include <util/time.h>
 #include <util/vector.h>
 #include <validation.h>
 
 #include <algorithm>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -76,6 +81,16 @@ using node::NodeContext;
 using node::TransactionError;
 using util::ToString;
 
+//! The error of a submission under -privatebroadcast when no Tor proxy is configured.
+static UniValue NoPrivateBroadcastProxyError()
+{
+    return JSONRPCError(RPC_MISC_ERROR,
+                        "-privatebroadcast is enabled, but no Tor proxy is configured. Maybe the "
+                        "location of the Tor proxy couldn't be retrieved from the Tor daemon. Check "
+                        "whether the Tor daemon is running and that -torcontrol and -torpassword are "
+                        "configured properly.");
+}
+
 static RPCMethod sendrawtransaction()
 {
     return RPCMethod{
@@ -94,8 +109,9 @@ static RPCMethod sendrawtransaction()
         "counts as accepted; any other is test-accepted first. Submission does not add the\n"
         "transaction to the local mempool; normal mempool acceptance and relay apply when\n"
         "it is received back from the network. A transaction whose job is still queued or\n"
-        "running (same wtxid) is not queued again. This RPC fails when the job cannot be\n"
-        "queued: the queue is full, networking is disabled or the node is shutting down.\n"
+        "running (same wtxid, also as the child of a package) is not queued again. This RPC\n"
+        "fails when the job cannot be queued: the queue is full, networking is disabled or\n"
+        "the node is shutting down.\n"
         "Use getprivatebroadcastinfo to follow the jobs and abortprivatebroadcast to abort one.\n"
 
         "\nA specific exception, RPC_TRANSACTION_ALREADY_IN_UTXO_SET, may throw if the transaction cannot be added to the mempool.\n"
@@ -150,13 +166,7 @@ static RPCMethod sendrawtransaction()
             AssertLockNotHeld(cs_main);
             NodeContext& node = EnsureAnyNodeContext(request.context);
             const bool private_broadcast_enabled{node.privbcast != nullptr};
-            if (private_broadcast_enabled && !GetProxy(NET_ONION)) {
-                throw JSONRPCError(RPC_MISC_ERROR,
-                                   "-privatebroadcast is enabled, but no Tor proxy is configured. Maybe the "
-                                   "location of the Tor proxy couldn't be retrieved from the Tor daemon. Check "
-                                   "whether the Tor daemon is running and that -torcontrol and -torpassword are "
-                                   "configured properly.");
-            }
+            if (private_broadcast_enabled && !node.privbcast->HasProxy()) throw NoPrivateBroadcastProxyError();
             const auto method = private_broadcast_enabled ? node::TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST
                                                           : node::TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL;
             const TransactionError err = BroadcastTransaction(node,
@@ -175,9 +185,9 @@ static RPCMethod sendrawtransaction()
 }
 
 //! A time in a private broadcast report: milliseconds from job start, or null.
-static RPCResult PrivbcastReportTime(std::string key, const std::string& event)
+static RPCResult PrivbcastReportTime(std::string key, const std::string& event, bool optional = false)
 {
-    return {RPCResult::Type::NUM, std::move(key), event + ", in milliseconds from job start, or null if it did not happen", {}, {.skip_type_check = true}};
+    return {RPCResult::Type::NUM, std::move(key), optional, event + ", in milliseconds from job start, or null if it did not happen", {}, {.skip_type_check = true}};
 }
 
 //! The report of a private broadcast job, as bitcoin-privbcast send prints it.
@@ -186,6 +196,8 @@ static std::vector<RPCResult> PrivbcastReportDoc()
     return {
         {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
         {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
+        {RPCResult::Type::STR_HEX, "parent_txid", /*optional=*/true, "The parent's transaction hash in hex (package mode only)"},
+        {RPCResult::Type::STR_HEX, "parent_wtxid", /*optional=*/true, "The parent's transaction witness hash in hex (package mode only)"},
         {RPCResult::Type::STR, "chain", "The chain"},
         {RPCResult::Type::OBJ, "discovery", "What discovery found",
             {
@@ -240,6 +252,9 @@ static std::vector<RPCResult> PrivbcastReportDoc()
                                         PrivbcastReportTime("inv_written_ms", "When the announcement was fully written"),
                                         PrivbcastReportTime("getdata_ms", "When the request that was served arrived"),
                                         PrivbcastReportTime("tx_written_ms", "When the transaction was fully written"),
+                                        PrivbcastReportTime("parent_getdata_ms", "When the request that the parent was served for arrived (package mode only)", /*optional=*/true),
+                                        PrivbcastReportTime("parent_tx_written_ms", "When the parent was fully written (package mode only)", /*optional=*/true),
+                                        PrivbcastReportTime("parent_hold_expired_ms", "When the ping went out without a request for the parent (package mode only)", /*optional=*/true),
                                         PrivbcastReportTime("ping_written_ms", "When the ping was written"),
                                         PrivbcastReportTime("pong_ms", "When the pong arrived"),
                                         PrivbcastReportTime("ended_ms", "When the attempt ended"),
@@ -257,6 +272,7 @@ static std::vector<RPCResult> PrivbcastReportDoc()
                 {RPCResult::Type::NUM, "announcements_written", "The attempts whose announcement was fully written"},
                 {RPCResult::Type::NUM, "tx_written", "The attempts that wrote the transaction"},
                 {RPCResult::Type::NUM, "pongs", "The attempts that received the pong"},
+                {RPCResult::Type::NUM, "parents_served", /*optional=*/true, "The attempts that wrote the parent (package mode only)"},
                 {RPCResult::Type::NUM, "slots_completed", "The slots that ran to their end, cut short neither by cancellation nor by a failure of the job"},
                 {RPCResult::Type::BOOL, "interrupted", "Whether the job was cancelled"},
                 {RPCResult::Type::STR, "error", "Why the job failed, or null", {}, RPCResultOptions{.skip_type_check = true}},
@@ -282,6 +298,7 @@ static RPCMethod getprivatebroadcastinfo()
                             {
                                 {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
                                 {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
+                                {RPCResult::Type::STR_HEX, "parent_txid", /*optional=*/true, "For a job queued by submitpackage with a parent, the parent's transaction hash in hex. The job carries the parent and serves it to a peer that asks for it"},
                                 {RPCResult::Type::STR, "state", "queued, running, done or aborted"},
                                 {RPCResult::Type::NUM_TIME, "time_added", "When the job was queued, in " + UNIX_EPOCH_TIME},
                                 {RPCResult::Type::NUM_TIME, "time_started", /*optional=*/true, "When the job started, in " + UNIX_EPOCH_TIME},
@@ -317,6 +334,7 @@ static RPCMethod getprivatebroadcastinfo()
                 UniValue o(UniValue::VOBJ);
                 o.pushKV("txid", job.txid.ToString());
                 o.pushKV("wtxid", job.wtxid.ToString());
+                if (job.parent_txid) o.pushKV("parent_txid", job.parent_txid->ToString());
                 o.pushKV("state", job.state);
                 o.pushKV("time_added", job.time_added);
                 if (job.time_started) o.pushKV("time_started", *job.time_started);
@@ -351,7 +369,8 @@ static RPCMethod abortprivatebroadcast()
         "A queued job is dropped at once; a running one stops shortly and ends with its report.\n"
         "This method is only available when running with -privatebroadcast enabled.\n",
         {
-            {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid of every queued or running job, and every job that matches is aborted."},
+            {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid of every queued or running job, and every job that matches is aborted. "
+                "A job that carries a parent is matched by the transaction's own ids only, not the parent's."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -1465,6 +1484,237 @@ static RPCMethod getorphantxs()
     };
 }
 
+//! What submitpackage reports of one transaction under -privatebroadcast.
+struct PrivateBroadcastTxResult {
+    //! The wtxid of the mempool's transaction with this txid, if the mempool holds one.
+    std::optional<Wtxid> in_mempool;
+    //! Validation's result, if the transaction was test-accepted.
+    std::optional<MempoolAcceptResult> accepted;
+    //! Why the transaction was not accepted.
+    std::optional<std::string> error;
+};
+
+//! Whether a transaction pays no more than max_fee_rate allows, as sendrawtransaction checks it.
+static bool WithinMaxFeeRate(const CTransaction& tx, CAmount fee, const CFeeRate& max_fee_rate)
+{
+    const CAmount max_fee{max_fee_rate.GetFee(GetVirtualTransactionSize(tx))};
+    return max_fee <= 0 || fee <= max_fee;
+}
+
+//! Whether a transaction of a package pays no more than max_fee_rate allows, as submitpackage checks
+//! it: its modified fee over its virtual size adjusted for signature operations.
+static bool WithinPackageMaxFeeRate(CAmount modified_fee, int64_t vsize, const CFeeRate& max_fee_rate)
+{
+    return max_fee_rate == CFeeRate{0} || CFeeRate{modified_fee, static_cast<int32_t>(vsize)} <= max_fee_rate;
+}
+
+//! A fee with the delta prioritisetransaction gave the transaction: its modified fee, as validation
+//! counts it.
+static CAmount ModifiedFee(const CTxMemPool& mempool, const Txid& txid, CAmount fee)
+{
+    LOCK(mempool.cs);
+    CAmount delta{0};
+    mempool.ApplyDelta(txid, delta);
+    return SaturatingAdd(fee, delta);
+}
+
+//! Record what test-accepting a transaction found, with the check of max_fee_rate (Extension:
+//! Interface): as sendrawtransaction checks it for a transaction test-accepted alone, as
+//! submitpackage checks it for each of two test-accepted as a package.
+static void RecordTestAccept(PrivateBroadcastTxResult& out, const CTransaction& tx, const MempoolAcceptResult& result,
+                             const CFeeRate& max_fee_rate, const CTxMemPool& mempool, bool package)
+{
+    if (result.m_result_type != MempoolAcceptResult::ResultType::VALID) {
+        out.error = result.m_state.ToString();
+    } else if (package ? !WithinPackageMaxFeeRate(ModifiedFee(mempool, tx.GetHash(), result.m_base_fees.value()), result.m_vsize.value(), max_fee_rate)
+                       : !WithinMaxFeeRate(tx, result.m_base_fees.value(), max_fee_rate)) {
+        out.error = "max feerate exceeded";
+    } else {
+        out.accepted.emplace(result);
+    }
+}
+
+//! Whether test-accept rejected a transaction for its fee alone (Extension: Interface).
+static bool FailedOnlyForFee(const MempoolAcceptResult& result)
+{
+    const TxValidationState& state{result.m_state};
+    return result.m_result_type == MempoolAcceptResult::ResultType::INVALID &&
+           state.GetResult() == TxValidationResult::TX_RECONSIDERABLE &&
+           (state.GetRejectReason() == "min relay fee not met" || state.GetRejectReason() == "mempool min fee not met");
+}
+
+//! What a transaction pays, as validation counts it: its modified fee, and its virtual size adjusted
+//! for its signature operations.
+struct Paid {
+    CAmount fee;
+    int64_t vsize;
+};
+
+/**
+ * What a transaction pays, its inputs looked up among the outputs of parent if given, then in the
+ * mempool and in the UTXO set. Of the transaction, only the consensus rules that need no coins
+ * (CheckTransaction()) are checked besides.
+ */
+static std::optional<Paid> PaidFee(const CTransaction& tx, const CTransactionRef& parent, const CTxMemPool& mempool,
+                                   const CCoinsViewCache& utxo, TxValidationState& state) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (!CheckTransaction(tx, state)) return std::nullopt;
+    // The outputs it spends, for its fee and its signature operations.
+    CCoinsViewCache spent_coins{&CoinsViewEmpty::Get()};
+    for (const CTxIn& input : tx.vin) {
+        const COutPoint& prevout{input.prevout};
+        const CTransactionRef source{parent && prevout.hash == parent->GetHash() ? parent : mempool.get(prevout.hash)};
+        std::optional<CTxOut> spent;
+        if (source) {
+            if (prevout.n < source->vout.size()) spent = source->vout[prevout.n];
+        } else if (const std::optional<Coin> coin{utxo.PeekCoin(prevout)}) {
+            spent = coin->out;
+        }
+        // An output that can never be spent counts as missing, as the UTXO set keeps none.
+        if (!spent || spent->scriptPubKey.IsUnspendable()) {
+            state.Invalid(TxValidationResult::TX_MISSING_INPUTS, "bad-txns-inputs-missingorspent", prevout.ToString());
+            return std::nullopt;
+        }
+        spent_coins.AddCoin(prevout, Coin{*spent, /*nHeightIn=*/0, /*fCoinBaseIn=*/false}, /*possible_overwrite=*/true);
+    }
+    // No coin is a coinbase, so the spend height plays no part.
+    CAmount fee;
+    if (!Consensus::CheckTxInputs(tx, state, spent_coins, /*nSpendHeight=*/0, fee)) return std::nullopt;
+    const int64_t sigop_cost{GetTransactionSigOpCost(tx, spent_coins, STANDARD_SCRIPT_VERIFY_FLAGS)};
+    return Paid{ModifiedFee(mempool, tx.GetHash(), fee), GetVirtualTransactionSize(tx, sigop_cost, ::nBytesPerSigOp)};
+}
+
+/**
+ * The check of a child whose parent test-accept rejected for its fee alone, for the consensus
+ * rules that need no coins and its fee (Extension: Interface), on the fees and sizes PaidFee()
+ * counts: the child pays within max_fee_rate, as submitpackage checks it, and the two together pay
+ * at least the higher of the mempool minimum feerate and the minimum relay feerate.
+ */
+static TxValidationState CheckChildFee(const CTransactionRef& parent, const CTransaction& child, const CTxMemPool& mempool,
+                                       const CCoinsViewCache& utxo, const CFeeRate& max_fee_rate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    TxValidationState state;
+    const std::optional<Paid> child_paid{PaidFee(child, parent, mempool, utxo, state)};
+    if (!child_paid) return state;
+    if (!WithinPackageMaxFeeRate(child_paid->fee, child_paid->vsize, max_fee_rate)) {
+        state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "max feerate exceeded");
+        return state;
+    }
+    // Test-accept found the parent's inputs before it checked the parent's fee.
+    const std::optional<Paid> parent_paid{PaidFee(*parent, /*parent=*/nullptr, mempool, utxo, state)};
+    if (!parent_paid) return state;
+    const int64_t vsize{parent_paid->vsize + child_paid->vsize};
+    const CAmount fee{SaturatingAdd(parent_paid->fee, child_paid->fee)};
+    if (const CAmount min_fee{mempool.GetMinFee().GetFee(vsize)}; min_fee > 0 && fee < min_fee) {
+        state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "mempool min fee not met", strprintf("%d < %d", fee, min_fee));
+    } else if (const CAmount min_relay_fee{mempool.m_opts.min_relay_feerate.GetFee(vsize)}; fee < min_relay_fee) {
+        state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "min relay fee not met", strprintf("%d < %d", fee, min_relay_fee));
+    }
+    return state;
+}
+
+/**
+ * submitpackage under -privatebroadcast (doc/design/private-broadcast-tool.md, Extension:
+ * Interface): one transaction, or a parent and its child, checked and then queued as one job, the
+ * child's, which serves the parent on request. Nothing enters the mempool.
+ */
+static UniValue SubmitPackagePrivately(NodeContext& node, const Package& txns, const CFeeRate& max_fee_rate)
+{
+    CHECK_NONFATAL(txns.size() == 1 || txns.size() == 2);
+    node::PrivbcastQueue& queue{*CHECK_NONFATAL(node.privbcast)};
+    if (!queue.HasProxy()) throw NoPrivateBroadcastProxyError();
+    CTxMemPool& mempool{EnsureMemPool(node)};
+    ChainstateManager& chainman{EnsureChainman(node)};
+    const CTransactionRef& tx{txns.back()};
+    const CTransactionRef parent{txns.size() == 2 ? txns.front() : nullptr};
+
+    std::vector<PrivateBroadcastTxResult> results(txns.size());
+    std::string package_msg{"transaction failed"};
+    // The parent failed only for its fee, and its child passed the check of its fee.
+    bool reconsiderable{false};
+    // The context-free package checks hold for the whole submission, before what the mempool holds
+    // of it is left out: two weigh at most MAX_PACKAGE_WEIGHT together, with neither, one or both
+    // in the mempool already.
+    if (PackageValidationState package_state; !IsWellFormedPackage(txns, package_state)) {
+        package_msg = package_state.ToString();
+        for (PrivateBroadcastTxResult& result : results) result.error = "package-not-validated";
+    } else {
+        LOCK(::cs_main);
+        // A transaction whose txid is in the mempool counts as accepted, and is sent as given.
+        std::vector<size_t> to_test;
+        for (size_t i{0}; i < txns.size(); ++i) {
+            if (const CTransactionRef in_mempool{mempool.get(txns[i]->GetHash())}) {
+                results[i].in_mempool = in_mempool->GetWitnessHash();
+            } else {
+                to_test.push_back(i);
+            }
+        }
+        if (to_test.size() == 1) {
+            // One transaction alone, as by sendrawtransaction.
+            const size_t i{to_test.front()};
+            RecordTestAccept(results[i], *txns[i], chainman.ProcessTransaction(txns[i], /*test_accept=*/true), max_fee_rate, mempool, /*package=*/false);
+        } else if (to_test.size() == 2) {
+            const PackageMempoolAcceptResult package_result{ProcessNewPackage(chainman.ActiveChainstate(), mempool, txns, /*test_accept=*/true, /*client_maxfeerate=*/{})};
+            if (package_result.m_state.IsInvalid()) package_msg = package_result.m_state.ToString();
+            for (size_t i{0}; i < txns.size(); ++i) {
+                if (const auto it{package_result.m_tx_results.find(txns[i]->GetWitnessHash())}; it != package_result.m_tx_results.end()) {
+                    RecordTestAccept(results[i], *txns[i], it->second, max_fee_rate, mempool, /*package=*/true);
+                } else {
+                    // Rejected with the package as a whole, or not reached.
+                    results[i].error = "package-not-validated";
+                }
+            }
+            // Validation stops at the first transaction that fails. If that is the parent, for its
+            // fee alone, the child is checked for its fee and the consensus rules that need no coins.
+            const auto parent_result{package_result.m_tx_results.find(parent->GetWitnessHash())};
+            if (parent_result != package_result.m_tx_results.end() && FailedOnlyForFee(parent_result->second) &&
+                !package_result.m_tx_results.contains(tx->GetWitnessHash())) {
+                const TxValidationState state{CheckChildFee(parent, *tx, mempool, chainman.ActiveChainstate().CoinsTip(), max_fee_rate)};
+                reconsiderable = state.IsValid();
+                results.back().error = reconsiderable ? "not validated beyond its fee and the consensus rules that need no coins" : state.ToString();
+            }
+        }
+    }
+
+    // A package rejected, as a whole or for one of its transactions, queues nothing. One that a job
+    // covers succeeds without queueing anything (N5).
+    if (reconsiderable || std::ranges::none_of(results, [](const auto& result) { return result.error.has_value(); })) {
+        if (const TransactionError err{node::SubmitPrivateBroadcast(queue, tx, parent)}; err != TransactionError::OK) {
+            throw JSONRPCTransactionError(err);
+        }
+        package_msg = reconsiderable ? "parent-reconsiderable" : "success";
+    }
+
+    UniValue tx_results{UniValue::VOBJ};
+    for (size_t i{0}; i < txns.size(); ++i) {
+        const CTransaction& submitted{*txns[i]};
+        const PrivateBroadcastTxResult& result{results[i]};
+        UniValue entry{UniValue::VOBJ};
+        entry.pushKV("txid", submitted.GetHash().GetHex());
+        if (result.in_mempool && *result.in_mempool != submitted.GetWitnessHash()) {
+            entry.pushKV("other-wtxid", result.in_mempool->GetHex());
+        }
+        if (result.accepted) {
+            entry.pushKV("vsize_adjusted", result.accepted->m_vsize.value());
+            entry.pushKV("vsize", result.accepted->m_vsize.value());
+            entry.pushKV("vsize_bip141", GetVirtualTransactionSize(submitted));
+            UniValue fees{UniValue::VOBJ};
+            fees.pushKV("base", ValueFromAmount(result.accepted->m_base_fees.value()));
+            fees.pushKV("effective-feerate", ValueFromAmount(result.accepted->m_effective_feerate.value().GetFeePerK()));
+            UniValue effective_includes{UniValue::VARR};
+            for (const Wtxid& wtxid : result.accepted->m_wtxids_fee_calculations.value()) effective_includes.push_back(wtxid.ToString());
+            fees.pushKV("effective-includes", std::move(effective_includes));
+            entry.pushKV("fees", std::move(fees));
+        }
+        if (result.error) entry.pushKV("error", *result.error);
+        tx_results.pushKV(submitted.GetWitnessHash().GetHex(), std::move(entry));
+    }
+    UniValue rpc_result{UniValue::VOBJ};
+    rpc_result.pushKV("package_msg", package_msg);
+    rpc_result.pushKV("tx-results", std::move(tx_results));
+    return rpc_result;
+}
+
 static RPCMethod submitpackage()
 {
     return RPCMethod{"submitpackage",
@@ -1472,12 +1722,21 @@ static RPCMethod submitpackage()
         "The package will be validated according to consensus and mempool policy rules. If any transaction passes, it will be accepted to mempool.\n"
         "This RPC is experimental and the interface may be unstable. Refer to doc/policy/packages.md for documentation on package policies.\n"
         "Warning: successful submission does not mean the transactions will propagate throughout the network.\n"
+        "\nIf -privatebroadcast is enabled, the package is one transaction, or one parent and its child, and it is\n"
+        "queued as one private broadcast job (see sendrawtransaction) instead of entering the local mempool. A\n"
+        "transaction whose txid is already in the mempool counts as accepted and is sent as given. The rest is\n"
+        "test-accepted: one transaction alone, as by sendrawtransaction, two as a package. A parent that fails only\n"
+        "for its fee still goes out if its child stays within maxfeerate and the two together pay at least the\n"
+        "mempool minimum feerate and the minimum relay feerate; of that child, nothing else is checked but the\n"
+        "consensus rules that need no coins. The job\n"
+        "announces the child and serves the parent to a peer that asks for it.\n"
         ,
         {
             {"package", RPCArg::Type::ARR, RPCArg::Optional::NO, "An array of raw transactions.\n"
                 "The package must consist of a transaction with (some, all, or none of) its unconfirmed parents. A single transaction is permitted.\n"
                 "None of the parents may depend on each other. Parents that are already in mempool do not need to be present in the package.\n"
-                "The package must be topologically sorted, with the child being the last element in the array if there are multiple elements.",
+                "The package must be topologically sorted, with the child being the last element in the array if there are multiple elements.\n"
+                "With -privatebroadcast, the package is at most one parent and its child.",
                 {
                     {"rawtx", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, ""},
                 },
@@ -1494,12 +1753,13 @@ static RPCMethod submitpackage()
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::STR, "package_msg", "The transaction package result message. \"success\" indicates all transactions were accepted into or are already in the mempool."},
+                {RPCResult::Type::STR, "package_msg", "The transaction package result message. \"success\" indicates all transactions were accepted into or are already in the mempool.\n"
+                    "With -privatebroadcast, \"success\" or \"parent-reconsiderable\" (the parent failed only for its fee) indicates that a job was queued, or that a queued or running job covers the package."},
                 {RPCResult::Type::OBJ_DYN, "tx-results", "The transaction results keyed by wtxid. An entry is returned for every submitted wtxid.",
                 {
                     {RPCResult::Type::OBJ, "wtxid", "transaction wtxid", {
                         {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
-                        {RPCResult::Type::STR_HEX, "other-wtxid", /*optional=*/true, "The wtxid of a different transaction with the same txid but different witness found in the mempool. This means the submitted transaction was ignored."},
+                        {RPCResult::Type::STR_HEX, "other-wtxid", /*optional=*/true, "The wtxid of a different transaction with the same txid but different witness found in the mempool. This means the submitted transaction was ignored, or with -privatebroadcast that it is sent as given."},
                         {RPCResult::Type::NUM, "vsize_adjusted", /*optional=*/true, "Maximum of sigop-adjusted size (-bytespersigop) and virtual transaction size as defined in BIP 141."},
                         {RPCResult::Type::NUM, "vsize", /*optional=*/true, "(DEPRECATED) Was previously erroneously described as the BIP 141 vsize, but is actually sigops-adjusted vsize.\n"
                                                                     "Use vsize_bip141 to actually get that behavior or switch to the explicit vsize_adjusted for retained behavior."},
@@ -1511,10 +1771,11 @@ static RPCMethod submitpackage()
                                 {{RPCResult::Type::STR_HEX, "", "transaction wtxid in hex"},
                             }},
                         }},
-                        {RPCResult::Type::STR, "error", /*optional=*/true, "Error string if rejected from mempool, or \"package-not-validated\" when the package aborts before any per-tx processing."},
+                        {RPCResult::Type::STR, "error", /*optional=*/true, "Error string if rejected from mempool, or \"package-not-validated\" when the package aborts before any per-tx processing.\n"
+                            "With -privatebroadcast, also \"package-not-validated\" for a transaction that validation did not reach, and an error for a child that was checked only for its fee and the consensus rules that need no coins."},
                     }}
                 }},
-                {RPCResult::Type::ARR, "replaced-transactions", /*optional=*/true, "List of txids of replaced transactions",
+                {RPCResult::Type::ARR, "replaced-transactions", /*optional=*/true, "List of txids of replaced transactions (not with -privatebroadcast)",
                 {
                     {RPCResult::Type::STR_HEX, "", "The transaction id"},
                 }},
@@ -1526,10 +1787,14 @@ static RPCMethod submitpackage()
         },
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
         {
+            NodeContext& node = EnsureAnyNodeContext(request.context);
             const UniValue raw_transactions = request.params[0].get_array();
             if (raw_transactions.empty() || raw_transactions.size() > MAX_PACKAGE_COUNT) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER,
                                    "Array must contain between 1 and " + ToString(MAX_PACKAGE_COUNT) + " transactions.");
+            }
+            if (node.privbcast && raw_transactions.size() > 2) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "With -privatebroadcast, a package is one transaction, or one parent and its child.");
             }
 
             // Fee check needs to be run with chainstate and package context
@@ -1564,8 +1829,8 @@ static RPCMethod submitpackage()
             if (txns.size() > 1 && !IsChildWithParentsTree(txns)) {
                 throw JSONRPCTransactionError(TransactionError::INVALID_PACKAGE, "package topology disallowed. not child-with-parents or parents depend on each other.");
             }
+            if (node.privbcast) return SubmitPackagePrivately(node, txns, max_raw_tx_fee_rate);
 
-            NodeContext& node = EnsureAnyNodeContext(request.context);
             CTxMemPool& mempool = EnsureMemPool(node);
             Chainstate& chainstate = EnsureChainman(node).ActiveChainstate();
             const auto package_result = WITH_LOCK(::cs_main, return ProcessNewPackage(chainstate, mempool, txns, /*test_accept=*/ false, client_maxfeerate));

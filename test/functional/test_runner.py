@@ -110,6 +110,7 @@ BASE_SCRIPTS = [
     'p2p_opportunistic_1p1c.py',
     'p2p_node_network_limited.py --v1transport',
     'p2p_node_network_limited.py --v2transport',
+    'tool_privbcast_package.py',
     'tool_privbcast.py',
     'tool_privbcast_peers.py',
     'tool_privbcast_proxy.py',

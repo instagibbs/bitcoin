@@ -286,6 +286,7 @@ static void CheckInvariants(const node::TxDownloadManagerImpl& txdownload_impl)
         }
     }
     txdownload_impl.m_txrequest.SanityCheck();
+    Assert(txdownload_impl.m_txid_rejects.size() <= node::TxDownloadManagerImpl::MAX_TXID_REJECTS);
 }
 
 FUZZ_TARGET(txdownloadman_impl, .init = initialize)
@@ -328,6 +329,7 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
             [&] {
                 txdownload_impl.ActiveTipChange();
                 // After a block update, nothing should be in the rejection caches
+                Assert(txdownload_impl.m_txid_rejects.empty());
                 for (const auto& tx : TRANSACTIONS) {
                     Assert(!txdownload_impl.RecentRejectsFilter().contains(tx->GetWitnessHash().ToUint256()));
                     Assert(!txdownload_impl.RecentRejectsFilter().contains(tx->GetHash().ToUint256()));

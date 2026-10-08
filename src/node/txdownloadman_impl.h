@@ -15,6 +15,9 @@
 #include <policy/packages.h>
 #include <random.h>
 #include <txrequest.h>
+#include <util/hasher.h>
+
+#include <unordered_set>
 
 class CTxMemPool;
 namespace node {
@@ -51,9 +54,8 @@ public:
      * or for the parents of an orphan): a witnessless transaction's wtxid
      * equals its txid, so a witness-stripped copy of any transaction, which
      * fails for reasons unrelated to the original, would otherwise make that
-     * txid look rejected. Failures that do not depend on the witness, such
-     * as TX_INPUTS_NOT_STANDARD, used to add the txid as well; that entry
-     * was dropped since nothing reads it.
+     * txid look rejected. The few rejections that are judged by txid are
+     * kept in m_txid_rejects instead.
      *
      * Memory used: 1.3 MB
      */
@@ -126,6 +128,37 @@ public:
         return *m_lazy_recent_confirmed_transactions;
     }
 
+    /**
+     * Txids rejected since the last tip change for a reason that depends on
+     * the txid alone and that no copy of a confirmed or mempool transaction
+     * can produce: TX_INPUTS_NOT_STANDARD, which is only reached once the
+     * inputs were found, and orphans dropped for having a parent in this set.
+     * Lookups by txid (announcements from txid-relay peers, and the parents
+     * of an orphan) check only this set, never the reject filters above.
+     *
+     * This is an exact set rather than a txid entry in m_lazy_recent_rejects:
+     * a false positive would drop an honest orphan by txid, along with its
+     * descendants.
+     *
+     * It is capped at MAX_TXID_REJECTS entries. Once full, further txids are
+     * not remembered until the next tip change; such a transaction may then
+     * be downloaded again once per announcer of each of its children, which
+     * costs bandwidth and nothing else.
+     *
+     * Memory used: each entry is a 48-byte node (next pointer, 32-byte txid,
+     * cached hash), 64 bytes after malloc overhead, plus about one 8-byte
+     * bucket pointer, so at most about 72 * 10,000 bytes = 720 kB.
+     */
+    std::unordered_set<Txid, SaltedTxidHasher> m_txid_rejects;
+    static constexpr size_t MAX_TXID_REJECTS{10'000};
+
+    bool TxidRejected(const Txid& txid) const { return m_txid_rejects.contains(txid); }
+    /** Remember a txid rejection, unless m_txid_rejects is full. */
+    void RememberTxidReject(const Txid& txid)
+    {
+        if (m_txid_rejects.size() < MAX_TXID_REJECTS) m_txid_rejects.insert(txid);
+    }
+
     TxDownloadManagerImpl(const TxDownloadOptions& options)
         : m_mempool{options.m_mempool},
           m_rng{options.m_deterministic_txrequest},
@@ -156,6 +189,7 @@ public:
      *  - orphanage
      *  - m_recent_rejects (if wtxid)
      *  - m_recent_rejects_reconsiderable (if wtxid and include_reconsiderable = true)
+     *  - m_txid_rejects (if txid)
      *  - m_recent_confirmed_transactions
      *  */
     bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable);

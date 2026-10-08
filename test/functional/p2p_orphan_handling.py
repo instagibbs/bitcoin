@@ -3,6 +3,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+from decimal import Decimal
 import time
 
 from test_framework.mempool_util import (
@@ -11,6 +12,11 @@ from test_framework.mempool_util import (
 )
 from test_framework.messages import (
     CInv,
+    COIN,
+    COutPoint,
+    CTransaction,
+    CTxIn,
+    CTxOut,
     DEFAULT_ANCESTOR_LIMIT,
     MSG_TX,
     MSG_WITNESS_TX,
@@ -30,6 +36,10 @@ from test_framework.p2p import (
     P2PInterface,
     P2PTxInvStore,
     TXID_RELAY_DELAY,
+)
+from test_framework.script import (
+    CScript,
+    OP_2,
 )
 from test_framework.util import (
     assert_not_equal,
@@ -129,6 +139,18 @@ class OrphanHandlingTest(BitcoinTestFramework):
         child = self.wallet.create_self_transfer(utxo_to_spend=parent['new_utxo'])
         return child["tx"].wtxid_hex, child["tx"], parent["tx"]
 
+    def create_tx_with_nonstandard_inputs(self):
+        """Create a witnessless transaction (txid == wtxid) that pays to self.wallet and spends a
+        confirmed output with an unknown witness version. Creating that output is standard, but
+        spending it fails with bad-txns-nonstandard-inputs, which depends on the txid alone."""
+        funding = self.wallet.send_to(from_node=self.nodes[0], scriptPubKey=CScript([OP_2, bytes(32)]), amount=1_000_000)
+        self.generate(self.nodes[0], 1)
+        tx = CTransaction()
+        tx.vin = [CTxIn(COutPoint(int(funding["txid"], 16), funding["sent_vout"]))]
+        tx.vout = [CTxOut(990_000, self.wallet.get_output_script())]
+        assert_equal(tx.txid_hex, tx.wtxid_hex)
+        return {"tx": tx, "txid": tx.txid_hex, "new_utxo": {"txid": tx.txid_hex, "vout": 0, "value": Decimal(990_000) / COIN}}
+
     def relay_transaction(self, peer, tx):
         """Relay transaction using MSG_WTX"""
         wtxid = tx.wtxid_int
@@ -185,6 +207,29 @@ class OrphanHandlingTest(BitcoinTestFramework):
         node = self.nodes[0]
         peer1 = node.add_p2p_connection(PeerTxRelayer())
         peer2 = node.add_p2p_connection(PeerTxRelayer())
+
+        self.log.info("Test orphan handling when a nonsegwit parent is known to be invalid regardless of witness")
+        parent_nonstandard_inputs = self.create_tx_with_nonstandard_inputs()
+        parent_other = self.wallet_nonsegwit.create_self_transfer()
+        child_nonsegwit = self.wallet_nonsegwit.create_self_transfer_multi(
+            utxos_to_spend=[parent_other["new_utxo"], parent_nonstandard_inputs["new_utxo"]])
+
+        # Relay the parent. It should be rejected (and not reconsiderable) because of its inputs.
+        with node.assert_debug_log(["bad-txns-nonstandard-inputs"]):
+            self.relay_transaction(peer1, parent_nonstandard_inputs["tx"])
+        assert parent_nonstandard_inputs["txid"] not in node.getrawmempool()
+
+        # Relay the child. It should not be accepted because it has missing inputs.
+        # Its parent should not be requested because its rejection has been remembered by txid.
+        self.relay_transaction(peer2, child_nonsegwit["tx"])
+        assert child_nonsegwit["txid"] not in node.getrawmempool()
+        assert not tx_in_orphanage(node, child_nonsegwit["tx"])
+
+        # No parents are requested.
+        self.nodes[0].bumpmocktime(GETDATA_TX_INTERVAL)
+        peer1.assert_never_requested(int(parent_other["txid"], 16))
+        peer2.assert_never_requested(int(parent_other["txid"], 16))
+        peer2.assert_never_requested(int(parent_nonstandard_inputs["txid"], 16))
 
         self.log.info("Test orphan handling when a segwit parent was invalid but may be retried with another witness")
         parent_low_fee = self.wallet.create_self_transfer(fee_rate=0)
@@ -383,6 +428,49 @@ class OrphanHandlingTest(BitcoinTestFramework):
         )
         self.wait_until(lambda: child["txid"] in node.getrawmempool())
         assert not tx_in_orphanage(node, child["tx"])
+
+    @cleanup
+    def test_orphan_inherit_rejection(self):
+        node = self.nodes[0]
+        peer1 = node.add_p2p_connection(PeerTxRelayer())
+        peer2 = node.add_p2p_connection(PeerTxRelayer())
+        peer3 = node.add_p2p_connection(PeerTxRelayer(wtxidrelay=False))
+
+        self.log.info("Test that an orphan with rejected parents, along with any descendants, cannot be retried with an alternate witness")
+        parent_nonstandard_inputs = self.create_tx_with_nonstandard_inputs()
+        child = self.wallet.create_self_transfer(utxo_to_spend=parent_nonstandard_inputs["new_utxo"])
+        grandchild = self.wallet.create_self_transfer(utxo_to_spend=child["new_utxo"])
+        assert_not_equal(child["txid"], child["tx"].wtxid_hex)
+        assert_not_equal(grandchild["txid"], grandchild["tx"].wtxid_hex)
+
+        # Send the parent unsolicited. It should be rejected because of its inputs, and this
+        # rejection is cached by txid and wtxid.
+        with node.assert_debug_log(["bad-txns-nonstandard-inputs"]):
+            peer1.send_and_ping(msg_tx(parent_nonstandard_inputs["tx"]))
+        assert parent_nonstandard_inputs["txid"] not in node.getrawmempool()
+
+        # Relay the child. It should be rejected for having missing parents, and this rejection is
+        # cached by txid and wtxid.
+        self.relay_transaction(peer1, child["tx"])
+        assert_equal(0, len(node.getrawmempool()))
+        assert not tx_in_orphanage(node, child["tx"])
+        self.nodes[0].bumpmocktime(TXREQUEST_TIME_SKIP)
+        peer1.assert_never_requested(parent_nonstandard_inputs["tx"].txid_int)
+
+        # Grandchild should also not be kept in orphanage because its parent has been rejected.
+        self.relay_transaction(peer2, grandchild["tx"])
+        assert_equal(0, len(node.getrawmempool()))
+        assert not tx_in_orphanage(node, grandchild["tx"])
+        self.nodes[0].bumpmocktime(TXREQUEST_TIME_SKIP)
+        peer2.assert_never_requested(child["tx"].txid_int)
+        peer2.assert_never_requested(child["tx"].wtxid_int)
+
+        # Neither the parent nor the child should be requested by txid, even if announced again with
+        # potentially different witness.
+        peer3.send_and_ping(msg_inv([CInv(t=MSG_TX, h=parent_nonstandard_inputs["tx"].txid_int), CInv(t=MSG_TX, h=child["tx"].txid_int)]))
+        self.nodes[0].bumpmocktime(TXREQUEST_TIME_SKIP)
+        peer3.assert_never_requested(parent_nonstandard_inputs["tx"].txid_int)
+        peer3.assert_never_requested(child["tx"].txid_int)
 
     @cleanup
     def test_orphan_present_parent_stripped(self):
@@ -829,6 +917,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.test_orphans_overlapping_parents()
         self.test_orphan_of_orphan()
         self.test_orphan_parent_confirmed()
+        self.test_orphan_inherit_rejection()
         self.test_orphan_present_parent_stripped()
         self.test_same_txid_orphan()
         self.test_same_txid_orphan_of_orphan()

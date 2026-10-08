@@ -15,6 +15,7 @@
 #include <test/util/setup_common.h>
 #include <validation.h>
 
+#include <algorithm>
 #include <array>
 
 #include <boost/test/unit_test.hpp>
@@ -43,6 +44,7 @@ struct Behaviors {
 
     void CheckEqual(const Behaviors& other, bool segwit)
     {
+        BOOST_CHECK_EQUAL(other.m_txid_in_rejects,        m_txid_in_rejects);
         BOOST_CHECK_EQUAL(other.m_wtxid_in_rejects,       m_wtxid_in_rejects);
         BOOST_CHECK_EQUAL(other.m_wtxid_in_rejects_recon, m_wtxid_in_rejects_recon);
         BOOST_CHECK_EQUAL(other.m_keep_for_compact,       m_keep_for_compact);
@@ -50,7 +52,6 @@ struct Behaviors {
 
         // false negatives for nonsegwit transactions, since txid == wtxid.
         if (segwit) {
-            BOOST_CHECK_EQUAL(other.m_txid_in_rejects,        m_txid_in_rejects);
             BOOST_CHECK_EQUAL(other.m_txid_in_rejects_recon,  m_txid_in_rejects_recon);
             BOOST_CHECK_EQUAL(other.m_ignore_inv_txid,        m_ignore_inv_txid);
         }
@@ -58,10 +59,11 @@ struct Behaviors {
 };
 
 // Map from failure reason to expected behavior for a segwit tx that fails
-// Txid and Wtxid are assumed to be different here. For a nonsegwit transaction, use the wtxid results.
+// Txid and Wtxid are assumed to be different here. For a nonsegwit transaction, use the wtxid results,
+// except for txid_rejects, which means TxidRejected(txid).
 static std::map<TxValidationResult, Behaviors> expected_behaviors{
     {TxValidationResult::TX_CONSENSUS,               {/*txid_rejects*/0,/*wtxid_rejects*/1,/*txid_recon*/0,/*wtxid_recon*/0,/*keep*/1,/*txid_inv*/0,/*wtxid_inv*/1}},
-    {TxValidationResult::TX_INPUTS_NOT_STANDARD,     {                0,                 1,              0,               0,        1,            0,             1}},
+    {TxValidationResult::TX_INPUTS_NOT_STANDARD,     {                1,                 1,              0,               0,        1,            1,             1}},
     {TxValidationResult::TX_NOT_STANDARD,            {                0,                 1,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_MISSING_INPUTS,          {                0,                 0,              0,               0,        1,            0,             1}},
     {TxValidationResult::TX_PREMATURE_SPEND,         {                0,                 1,              0,               0,        1,            0,             1}},
@@ -130,6 +132,8 @@ BOOST_FIXTURE_TEST_CASE(tx_rejection_types, TestChain100Setup)
             const auto ptx_child = CreatePlaceholderTx(segwit_child);
             const auto& parent_txid = ptx_parent->GetHash();
             const auto& parent_wtxid = ptx_parent->GetWitnessHash();
+            const auto& child_txid = ptx_child->GetHash();
+            const auto& child_wtxid = ptx_child->GetWitnessHash();
 
             for (const auto& [result, expected_behavior] : expected_behaviors) {
                 node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
@@ -141,7 +145,7 @@ BOOST_FIXTURE_TEST_CASE(tx_rejection_types, TestChain100Setup)
                 // No distinction between txid and wtxid caching for nonsegwit transactions, so only test these specific
                 // behaviors for segwit transactions.
                 Behaviors actual_behavior{
-                    /*txid_rejects=*/txdownload_impl.RecentRejectsFilter().contains(parent_txid.ToUint256()),
+                    /*txid_rejects=*/txdownload_impl.TxidRejected(parent_txid),
                     /*wtxid_rejects=*/txdownload_impl.RecentRejectsFilter().contains(parent_wtxid.ToUint256()),
                     /*txid_recon=*/txdownload_impl.RecentRejectsReconsiderableFilter().contains(parent_txid.ToUint256()),
                     /*wtxid_recon=*/txdownload_impl.RecentRejectsReconsiderableFilter().contains(parent_wtxid.ToUint256()),
@@ -155,7 +159,15 @@ BOOST_FIXTURE_TEST_CASE(tx_rejection_types, TestChain100Setup)
                 // Later, a child of this transaction fails for missing inputs
                 state.Invalid(TxValidationResult::TX_MISSING_INPUTS, "");
                 txdownload_impl.MempoolRejectedTx(ptx_child, state, nodeid, /*first_time_failure=*/true);
-                BOOST_CHECK(txdownload_impl.m_orphanage->HaveTx(ptx_child->GetWitnessHash()));
+
+                // If the parent was rejected by txid, the child is too. A wtxid entry, even one equal to
+                // the parent's txid, does not count.
+                const bool parent_txid_rejected{expected_behavior.m_txid_in_rejects};
+                BOOST_CHECK_EQUAL(parent_txid_rejected, txdownload_impl.TxidRejected(child_txid));
+                BOOST_CHECK_EQUAL(parent_txid_rejected, txdownload_impl.RecentRejectsFilter().contains(child_wtxid.ToUint256()));
+
+                // Unless rejected, the child should be in orphanage.
+                BOOST_CHECK_EQUAL(!parent_txid_rejected, txdownload_impl.m_orphanage->HaveTx(ptx_child->GetWitnessHash()));
             }
         }
     }
@@ -209,7 +221,7 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
         const bool parent_recent_conf((decisions >> 2) & 1);
         const bool parent_in_mempool((decisions >> 3) & 1);
 
-        if (parent_recent_rej) txdownload_impl.RecentRejectsFilter().insert(single_parent->GetHash().ToUint256());
+        if (parent_recent_rej) txdownload_impl.RememberTxidReject(single_parent->GetHash());
         if (parent_recent_rej_recon) txdownload_impl.RecentRejectsReconsiderableFilter().insert(single_parent->GetHash().ToUint256());
         if (parent_recent_conf) txdownload_impl.RecentConfirmedTransactionsFilter().insert(single_parent->GetHash().ToUint256());
         if (parent_in_mempool) {
@@ -219,12 +231,18 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
             assert(coinbase_idx < m_coinbase_txns.size());
         }
 
-        // Orphans are still handled when parents are found in rejection filters, since we only know their txids.
-        const unsigned int expected_parents = parent_recent_conf || parent_in_mempool ? 0 : 1;
+        // Whether or not the transaction is added as an orphan depends solely on whether or not
+        // the parent was rejected by txid (TxidRejected). Specifically, the parent is allowed to be
+        // in RecentRejectsReconsiderableFilter.
+        const bool expect_keep_orphan = !parent_recent_rej;
+        const unsigned int expected_parents = parent_recent_rej || parent_recent_conf || parent_in_mempool ? 0 : 1;
+        // If we don't expect to keep the orphan then expected_parents is 0.
+        // !expect_keep_orphan => (expected_parents == 0)
+        BOOST_CHECK(expect_keep_orphan || expected_parents == 0);
         const auto ret_1p1c = txdownload_impl.MempoolRejectedTx(orphan, state_orphan, nodeid, /*first_time_failure=*/true);
         std::string err_msg;
         const bool ok = CheckOrphanBehavior(txdownload_impl, orphan, ret_1p1c, err_msg,
-                                            /*expect_orphan=*/true, /*expect_keep=*/true, /*expected_parents=*/expected_parents);
+                                            /*expect_orphan=*/expect_keep_orphan, /*expect_keep=*/true, /*expected_parents=*/expected_parents);
         BOOST_CHECK_MESSAGE(ok, err_msg);
     }
 
@@ -275,6 +293,23 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
             const bool ok = CheckOrphanBehavior(txdownload_impl, orphan, ret_1recon_conf, err_msg,
                                                 /*expect_orphan=*/true, /*expect_keep=*/true, /*expected_parents=*/expected_parents);
             BOOST_CHECK_MESSAGE(ok, err_msg);
+        }
+
+        // 1 parent in RecentRejectsReconsiderableFilter, 1 other rejected by txid
+        {
+            node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
+            txdownload_impl.ConnectedPeer(nodeid, DEFAULT_CONN);
+
+            txdownload_impl.RecentRejectsReconsiderableFilter().insert(parents[1]->GetHash().ToUint256());
+            txdownload_impl.RememberTxidReject(parents[0]->GetHash());
+
+            const auto ret_2_problems = txdownload_impl.MempoolRejectedTx(orphan, state_orphan, nodeid, /*first_time_failure=*/true);
+            std::string err_msg;
+            const bool ok = CheckOrphanBehavior(txdownload_impl, orphan, ret_2_problems, err_msg,
+                                                /*expect_orphan=*/false, /*expect_keep=*/true, /*expected_parents=*/0);
+            BOOST_CHECK_MESSAGE(ok, err_msg);
+            BOOST_CHECK(txdownload_impl.TxidRejected(orphan->GetHash()));
+            BOOST_CHECK(txdownload_impl.RecentRejectsFilter().contains(orphan->GetWitnessHash().ToUint256()));
         }
     }
 
@@ -516,19 +551,84 @@ BOOST_FIXTURE_TEST_CASE(txid_lookups_ignore_wtxid_rejects, TestChain100Setup)
         BOOST_CHECK(!txdownload_impl.RecentRejectsFilter().contains(child->GetWitnessHash().ToUint256()));
     }
 
-    // A lookup by txid never consults the reject filters: not after a TX_INPUTS_NOT_STANDARD
-    // rejection, which depends on the txid alone, nor when the txid's bytes are in the filters.
+    // TX_INPUTS_NOT_STANDARD depends only on the txid, and is remembered by txid with or without a
+    // witness. A child spending such a parent is not kept, and both of its hashes are rejected so that
+    // it is not downloaded again from another peer. A grandchild is dropped the same way.
+    for (const bool segwit_parent : {true, false}) {
+        node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
+        txdownload_impl.ConnectedPeer(nodeid, connection_info);
+        const auto parent = CreatePlaceholderTx(segwit_parent);
+        const auto child = CreatePlaceholderTx(/*segwit=*/true);
+        const auto grandchild = CreatePlaceholderTx(/*segwit=*/true);
+        txdownload_impl.MempoolRejectedTx(parent, state_inputs_nonstandard, nodeid, /*first_time_failure=*/true);
+        BOOST_CHECK(txdownload_impl.TxidRejected(parent->GetHash()));
+        BOOST_CHECK(txdownload_impl.AlreadyHaveTx(parent->GetHash(), /*include_reconsiderable=*/false));
+
+        for (const auto& orphan : {child, grandchild}) {
+            const auto todo = txdownload_impl.MempoolRejectedTx(orphan, state_orphan, nodeid, /*first_time_failure=*/true);
+            BOOST_CHECK(!txdownload_impl.m_orphanage->HaveTx(orphan->GetWitnessHash()));
+            BOOST_CHECK(todo.m_unique_parents.empty());
+            BOOST_CHECK(txdownload_impl.RecentRejectsFilter().contains(orphan->GetWitnessHash().ToUint256()));
+            BOOST_CHECK(txdownload_impl.TxidRejected(orphan->GetHash()));
+            BOOST_CHECK(txdownload_impl.AlreadyHaveTx(orphan->GetHash(), /*include_reconsiderable=*/false));
+            BOOST_CHECK(txdownload_impl.AlreadyHaveTx(orphan->GetWitnessHash(), /*include_reconsiderable=*/false));
+        }
+        BOOST_CHECK_EQUAL(txdownload_impl.m_txrequest.Size(), 0U);
+    }
+
+    // A lookup by txid only consults m_txid_rejects: it matches after a TX_INPUTS_NOT_STANDARD
+    // rejection, but not when the txid's bytes are in either reject filter as a wtxid.
     {
         node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
         txdownload_impl.ConnectedPeer(nodeid, connection_info);
         const auto tx = CreatePlaceholderTx(/*segwit=*/true);
         txdownload_impl.MempoolRejectedTx(tx, state_inputs_nonstandard, nodeid, /*first_time_failure=*/true);
         BOOST_CHECK(txdownload_impl.AlreadyHaveTx(tx->GetWitnessHash(), /*include_reconsiderable=*/true));
-        BOOST_CHECK(!txdownload_impl.AlreadyHaveTx(tx->GetHash(), /*include_reconsiderable=*/true));
+        BOOST_CHECK(txdownload_impl.AlreadyHaveTx(tx->GetHash(), /*include_reconsiderable=*/true));
+    }
+    {
+        node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
+        const auto tx = CreatePlaceholderTx(/*segwit=*/true);
         txdownload_impl.RecentRejectsFilter().insert(tx->GetHash().ToUint256());
+        BOOST_CHECK(!txdownload_impl.AlreadyHaveTx(tx->GetHash(), /*include_reconsiderable=*/true));
         txdownload_impl.RecentRejectsReconsiderableFilter().insert(tx->GetHash().ToUint256());
         BOOST_CHECK(!txdownload_impl.AlreadyHaveTx(tx->GetHash(), /*include_reconsiderable=*/true));
+        BOOST_CHECK(!txdownload_impl.TxidRejected(tx->GetHash()));
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(txid_rejects_capped, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{.m_mempool = pool, .m_deterministic_txrequest = true}};
+    const NodeId nodeid{0};
+    txdownload_impl.ConnectedPeer(nodeid, {/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+    TxValidationState state_inputs_nonstandard;
+    state_inputs_nonstandard.Invalid(TxValidationResult::TX_INPUTS_NOT_STANDARD, "");
+    constexpr auto max_txid_rejects{node::TxDownloadManagerImpl::MAX_TXID_REJECTS};
+
+    std::vector<Txid> remembered;
+    for (size_t i{0}; i < max_txid_rejects; ++i) {
+        remembered.push_back(Txid::FromUint256(m_rng.rand256()));
+        txdownload_impl.RememberTxidReject(remembered.back());
+    }
+    BOOST_REQUIRE_EQUAL(txdownload_impl.m_txid_rejects.size(), max_txid_rejects);
+
+    // Once full, a further rejection is not remembered by txid, only by wtxid.
+    const auto tx = CreatePlaceholderTx(/*segwit=*/true);
+    txdownload_impl.MempoolRejectedTx(tx, state_inputs_nonstandard, nodeid, /*first_time_failure=*/true);
+    BOOST_CHECK(!txdownload_impl.TxidRejected(tx->GetHash()));
+    BOOST_CHECK(!txdownload_impl.AlreadyHaveTx(tx->GetHash(), /*include_reconsiderable=*/false));
+    BOOST_CHECK(txdownload_impl.AlreadyHaveTx(tx->GetWitnessHash(), /*include_reconsiderable=*/false));
+    BOOST_CHECK_EQUAL(txdownload_impl.m_txid_rejects.size(), max_txid_rejects);
+    BOOST_CHECK(std::ranges::all_of(remembered, [&](const Txid& txid) { return txdownload_impl.TxidRejected(txid); }));
+
+    // A tip change clears everything, and rejections are remembered again.
+    txdownload_impl.ActiveTipChange();
+    BOOST_CHECK(txdownload_impl.m_txid_rejects.empty());
+    BOOST_CHECK(std::ranges::none_of(remembered, [&](const Txid& txid) { return txdownload_impl.TxidRejected(txid); }));
+    txdownload_impl.MempoolRejectedTx(tx, state_inputs_nonstandard, nodeid, /*first_time_failure=*/true);
+    BOOST_CHECK(txdownload_impl.TxidRejected(tx->GetHash()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

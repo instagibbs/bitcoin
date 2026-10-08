@@ -45,20 +45,15 @@ public:
      * million to make it highly unlikely for users to have issues with this
      * filter.
      *
-     * We typically only add wtxids to this filter. For non-segwit
-     * transactions, the txid == wtxid, so this only prevents us from
-     * re-downloading non-segwit transactions when communicating with
-     * non-wtxidrelay peers -- which is important for avoiding malleation
-     * attacks that could otherwise interfere with transaction relay from
-     * non-wtxidrelay peers. For communicating with wtxidrelay peers, having
-     * the reject filter store wtxids is exactly what we want to avoid
-     * redownload of a rejected transaction.
-     *
-     * In cases where we can tell that a segwit transaction will fail
-     * validation no matter the witness, we may add the txid of such
-     * transaction to the filter as well. This can be helpful when
-     * communicating with txid-relay peers or if we were to otherwise fetch a
-     * transaction via txid (eg in our orphan handling).
+     * Rejections are recorded under the wtxid only, which is what we need to
+     * avoid redownload of a rejected transaction from wtxidrelay peers. The
+     * filter is never read by txid (for announcements from txid-relay peers,
+     * or for the parents of an orphan): a witnessless transaction's wtxid
+     * equals its txid, so a witness-stripped copy of any transaction, which
+     * fails for reasons unrelated to the original, would otherwise make that
+     * txid look rejected. Failures that do not depend on the witness, such
+     * as TX_INPUTS_NOT_STANDARD, used to add the txid as well; that entry
+     * was dropped since nothing reads it.
      *
      * Memory used: 1.3 MB
      */
@@ -159,8 +154,8 @@ public:
     /** Check whether we already have this gtxid in:
      *  - mempool
      *  - orphanage
-     *  - m_recent_rejects
-     *  - m_recent_rejects_reconsiderable (if include_reconsiderable = true)
+     *  - m_recent_rejects (if wtxid)
+     *  - m_recent_rejects_reconsiderable (if wtxid and include_reconsiderable = true)
      *  - m_recent_confirmed_transactions
      *  */
     bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable);

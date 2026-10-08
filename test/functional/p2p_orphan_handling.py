@@ -5,7 +5,6 @@
 
 import time
 
-from test_framework.blocktools import MAX_STANDARD_TX_WEIGHT
 from test_framework.mempool_util import (
     create_large_orphan,
     tx_in_orphanage,
@@ -186,29 +185,6 @@ class OrphanHandlingTest(BitcoinTestFramework):
         node = self.nodes[0]
         peer1 = node.add_p2p_connection(PeerTxRelayer())
         peer2 = node.add_p2p_connection(PeerTxRelayer())
-
-        self.log.info("Test orphan handling when a nonsegwit parent is known to be invalid")
-        parent_overly_large_nonsegwit = self.wallet_nonsegwit.create_self_transfer(target_vsize=int(MAX_STANDARD_TX_WEIGHT / 4) + 1)
-        assert_equal(parent_overly_large_nonsegwit["txid"], parent_overly_large_nonsegwit["tx"].wtxid_hex)
-        parent_other = self.wallet_nonsegwit.create_self_transfer()
-        child_nonsegwit = self.wallet_nonsegwit.create_self_transfer_multi(
-            utxos_to_spend=[parent_other["new_utxo"], parent_overly_large_nonsegwit["new_utxo"]])
-
-        # Relay the parent. It should be rejected (and not reconsiderable) because it violated size limitations.
-        self.relay_transaction(peer1, parent_overly_large_nonsegwit["tx"])
-        assert parent_overly_large_nonsegwit["txid"] not in node.getrawmempool()
-
-        # Relay the child. It should not be accepted because it has missing inputs.
-        # Its parent should not be requested because its hash (txid == wtxid) has been added to the rejection filter.
-        self.relay_transaction(peer2, child_nonsegwit["tx"])
-        assert child_nonsegwit["txid"] not in node.getrawmempool()
-        assert not tx_in_orphanage(node, child_nonsegwit["tx"])
-
-        # No parents are requested.
-        self.nodes[0].bumpmocktime(GETDATA_TX_INTERVAL)
-        peer1.assert_never_requested(int(parent_other["txid"], 16))
-        peer2.assert_never_requested(int(parent_other["txid"], 16))
-        peer2.assert_never_requested(int(parent_overly_large_nonsegwit["txid"], 16))
 
         self.log.info("Test orphan handling when a segwit parent was invalid but may be retried with another witness")
         parent_low_fee = self.wallet.create_self_transfer(fee_rate=0)
@@ -409,43 +385,44 @@ class OrphanHandlingTest(BitcoinTestFramework):
         assert not tx_in_orphanage(node, child["tx"])
 
     @cleanup
-    def test_orphan_inherit_rejection(self):
+    def test_orphan_present_parent_stripped(self):
         node = self.nodes[0]
-        peer1 = node.add_p2p_connection(PeerTxRelayer())
-        peer2 = node.add_p2p_connection(PeerTxRelayer())
-        peer3 = node.add_p2p_connection(PeerTxRelayer(wtxidrelay=False))
+        peer_stripped = node.add_p2p_connection(PeerTxRelayer())
+        peer_child = node.add_p2p_connection(PeerTxRelayer())
 
-        self.log.info("Test that an orphan with rejected parents, along with any descendants, cannot be retried with an alternate witness")
-        parent_overly_large_nonsegwit = self.wallet_nonsegwit.create_self_transfer(target_vsize=int(MAX_STANDARD_TX_WEIGHT / 4) + 1)
-        assert_equal(parent_overly_large_nonsegwit["txid"], parent_overly_large_nonsegwit["tx"].wtxid_hex)
-        child = self.wallet.create_self_transfer(utxo_to_spend=parent_overly_large_nonsegwit["new_utxo"])
-        grandchild = self.wallet.create_self_transfer(utxo_to_spend=child["new_utxo"])
-        assert_not_equal(child["txid"], child["tx"].wtxid_hex)
-        assert_not_equal(grandchild["txid"], grandchild["tx"].wtxid_hex)
+        parent_confirmed = self.wallet.send_self_transfer(from_node=node)
+        utxo_confirmed = self.wallet.get_utxo(txid=parent_confirmed["txid"])
+        self.generate(node, 2)
+        # Create a fake reorg to trigger BlockDisconnected, which resets the filter of recently
+        # confirmed transactions, as if parent_confirmed had confirmed a long time ago.
+        last_block = node.getbestblockhash()
+        node.invalidateblock(last_block)
+        node.preciousblock(last_block)
+        node.syncwithvalidationinterfacequeue()
+        parent_mempool = self.wallet.send_self_transfer(from_node=node)
+        utxo_mempool = self.wallet.get_utxo(txid=parent_mempool["txid"])
 
-        # Relay the parent. It should be rejected because it pays 0 fees.
-        self.relay_transaction(peer1, parent_overly_large_nonsegwit["tx"])
-        assert parent_overly_large_nonsegwit["txid"] not in node.getrawmempool()
+        for parent, utxo, reason in [(parent_confirmed, utxo_confirmed, "txn-already-known"),
+                                     (parent_mempool, utxo_mempool, "txn-same-nonwitness-data-in-mempool")]:
+            self.log.info(f"Test that a witness-stripped copy of a parent we have, rejected with {reason}, does not get its children rejected")
+            # The stripped copy's wtxid is the parent's txid. It is rejected and cached by that wtxid.
+            parent_stripped = tx_from_hex(parent["tx"].serialize_without_witness().hex())
+            assert_equal(parent_stripped.wtxid_hex, parent["txid"])
+            with node.assert_debug_log([reason]):
+                self.relay_transaction(peer_stripped, parent_stripped)
+            assert not tx_in_orphanage(node, parent_stripped)
 
-        # Relay the child. It should be rejected for having missing parents, and this rejection is
-        # cached by txid and wtxid.
-        self.relay_transaction(peer1, child["tx"])
-        assert_equal(0, len(node.getrawmempool()))
-        assert not tx_in_orphanage(node, child["tx"])
-        peer1.assert_never_requested(parent_overly_large_nonsegwit["txid"])
-
-        # Grandchild should also not be kept in orphanage because its parent has been rejected.
-        self.relay_transaction(peer2, grandchild["tx"])
-        assert_equal(0, len(node.getrawmempool()))
-        assert not tx_in_orphanage(node, grandchild["tx"])
-        peer2.assert_never_requested(child["txid"])
-        peer2.assert_never_requested(child["tx"].wtxid_hex)
-
-        # The child should never be requested, even if announced again with potentially different witness.
-        # Sync with ping to ensure orphans are reconsidered
-        peer3.send_and_ping(msg_inv([CInv(t=MSG_TX, h=int(child["txid"], 16))]))
-        self.nodes[0].bumpmocktime(TXREQUEST_TIME_SKIP)
-        peer3.assert_never_requested(child["txid"])
+            # Another peer sends a child of this parent and of a missing parent. It is kept as an
+            # orphan, and the missing parent is requested and accepted along with the child.
+            parent_missing = self.wallet.create_self_transfer()
+            child = self.wallet.create_self_transfer_multi(utxos_to_spend=[utxo, parent_missing["new_utxo"]])
+            self.relay_transaction(peer_child, child["tx"])
+            assert tx_in_orphanage(node, child["tx"])
+            self.nodes[0].bumpmocktime(TXREQUEST_TIME_SKIP)
+            self.wait_until(lambda: any(inv.hash == parent_missing["tx"].txid_int for getdata in peer_child.getdata_received for inv in getdata.inv))
+            peer_child.send_and_ping(msg_tx(parent_missing["tx"]))
+            assert parent_missing["txid"] in node.getrawmempool()
+            assert child["txid"] in node.getrawmempool()
 
     @cleanup
     def test_same_txid_orphan(self):
@@ -852,7 +829,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.test_orphans_overlapping_parents()
         self.test_orphan_of_orphan()
         self.test_orphan_parent_confirmed()
-        self.test_orphan_inherit_rejection()
+        self.test_orphan_present_parent_stripped()
         self.test_same_txid_orphan()
         self.test_same_txid_orphan_of_orphan()
         self.test_orphan_txid_inv()

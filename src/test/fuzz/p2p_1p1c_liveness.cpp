@@ -74,7 +74,6 @@ const std::vector<unsigned char> WITNESS_DUMMY(64, 0);
 
 struct Cast {
     CTransactionRef parent;
-    CAmount parent_fee;
     CTransactionRef child;      //!< pays for the pair, from the parent's output and an output of `confirmed`
     CTransactionRef fake_child; //!< spends the parent and an unknown outpoint
     CTransactionRef confirmed;  //!< confirmed transaction funding the child: CONFIRMED_PARENT, or a coinbase
@@ -129,7 +128,6 @@ void initialize()
         for (const CAmount parent_fee : parent_fees) {
             for (const bool coinbase_funded : {false, true}) {
                 Cast cast;
-                cast.parent_fee = parent_fee;
                 cast.parent = MakeTx(version, {COutPoint{coinbases.at(shape + (coinbase_funded ? num_shapes : 0))->GetHash(), 0}}, {coinbase_value - parent_fee});
                 cast.confirmed = coinbase_funded ? coinbases.at(2 * num_shapes + shape) : CONFIRMED_PARENT;
                 const COutPoint funding{cast.confirmed->GetHash(), coinbase_funded ? 0 : static_cast<uint32_t>(shape)};
@@ -306,11 +304,6 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     bool honest_announced{false};
     // Known liveness holes. The property is not checked once a move has opened one of them.
     struct {
-        //! A witnessless parent (wtxid == txid) not in the mempool and below the minimum relay feerate
-        //! at its stripped size is rejected as TX_RECONSIDERABLE, and forgetting its wtxid in
-        //! TxRequestTracker cancels every announcer's request for the parent, since orphan resolution
-        //! requests the parent by txid.
-        bool parent_stripped{false};
         //! A witnessless copy of the confirmed transaction funding the child is rejected before any
         //! script check (as TX_CONFLICT for CONFIRMED_PARENT, as TX_CONSENSUS for a coinbase), and its
         //! wtxid, also its txid, enters the reject filter. Orphan handling checks every input's parent
@@ -322,7 +315,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         bool parent_left_with_orphan{false};
         bool Any() const
         {
-            return parent_stripped || confirmed_parent_stripped || parent_left_with_orphan;
+            return confirmed_parent_stripped || parent_left_with_orphan;
         }
     } holes;
     int reconnects{0};
@@ -439,10 +432,6 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
                 case 3: delivered = MutateWitness(fuzzed_data_provider, tx); break;
                 }
                 if (!delivered->HasWitness()) {
-                    if (tx == cast.parent && !mempool.exists(cast.parent->GetHash()) &&
-                        mempool.m_opts.min_relay_feerate.GetFee(GetVirtualTransactionSize(*delivered)) > cast.parent_fee) {
-                        holes.parent_stripped = true;
-                    }
                     if (tx == cast.confirmed) holes.confirmed_parent_stripped = true;
                 }
                 receive(*adversary, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*delivered)));

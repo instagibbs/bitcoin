@@ -309,13 +309,9 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         //! wtxid, also its txid, enters the reject filter. Orphan handling checks every input's parent
         //! against it, confirmed or not, so the child is dropped as having a rejected parent.
         bool confirmed_parent_stripped{false};
-        //! The parent left the mempool while the child was in the orphanage. Accepting the parent
-        //! completed every request for it, and retrying the orphan with the input missing again
-        //! requests nothing, so the parent is not fetched again.
-        bool parent_left_with_orphan{false};
         bool Any() const
         {
-            return confirmed_parent_stripped || parent_left_with_orphan;
+            return confirmed_parent_stripped;
         }
     } holes;
     int reconnects{0};
@@ -387,9 +383,6 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
 
     // One adversary step: an adversary acts (or the parent leaves the mempool, or time passes), then
     // the node processes it.
-    auto child_orphaned = [&]() {
-        return std::ranges::any_of(peerman->GetOrphanTransactions(), [&](const auto& o) { return o.tx->GetWitnessHash() == cast.child->GetWitnessHash(); });
-    };
     auto adversary_step = [&]() EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex) {
         const size_t idx{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(1, peers.size() - 1)};
         CNode* adversary{peers[idx]};
@@ -458,10 +451,8 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
             [&] {
                 // The parent leaves the mempool, as through eviction, replacement or a reorg. The
                 // child is not in it (or this loop would have ended).
-                const bool orphaned{child_orphaned()};
                 LOCK(mempool.cs);
                 if (const auto parent{mempool.get(cast.parent->GetHash())}) {
-                    if (orphaned) holes.parent_left_with_orphan = true;
                     mempool.removeRecursive(*parent, MemPoolRemovalReason::SIZELIMIT);
                 }
             });

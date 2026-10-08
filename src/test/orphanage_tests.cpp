@@ -838,6 +838,7 @@ BOOST_AUTO_TEST_CASE(peer_worksets)
         for (NodeId node = node0; node <= node2; ++node) {
             BOOST_CHECK(orphanage->HaveTxFromPeer(orphan_wtxid, node));
         }
+        BOOST_CHECK(orphanage->GetAnnouncers(orphan_wtxid) == (std::vector<NodeId>{node0, node1, node2}));
 
         // Parent accepted: child is added to 1 of 3 worksets.
         auto newly_reconsiderable = orphanage->AddChildrenToWorkSet(*tx_missing_parent, det_rand);
@@ -881,6 +882,7 @@ BOOST_AUTO_TEST_CASE(peer_worksets)
         orphanage->EraseForPeer(last_peer);
         orphanage->SanityCheck();
         BOOST_CHECK(!orphanage->HaveTxToReconsider(assigned_peer));
+        BOOST_CHECK(orphanage->GetAnnouncers(orphan_wtxid) == std::vector<NodeId>{assigned_peer});
 
         // Erasing the tx while it is reconsiderable leaves nothing to reconsider.
         BOOST_CHECK_EQUAL(orphanage->AddChildrenToWorkSet(*tx_missing_parent, det_rand).size(), 1);
@@ -894,6 +896,7 @@ BOOST_AUTO_TEST_CASE(peer_worksets)
             BOOST_CHECK_EQUAL(orphanage->GetTxToReconsider(node), nullptr);
             BOOST_CHECK(!orphanage->HaveTxFromPeer(orphan_wtxid, node));
         }
+        BOOST_CHECK(orphanage->GetAnnouncers(orphan_wtxid).empty());
     }
 }
 BOOST_AUTO_TEST_SUITE_END()

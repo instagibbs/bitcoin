@@ -204,9 +204,11 @@ protected:
 
     /** If this peer is an orphan resolution candidate for this transaction, treat the unique_parents as announced by
      * this peer; add them as new invs to m_txrequest.
+     * @param[in] allow_existing_announcer  Whether the peer may already be an announcer of the orphan.
      * @returns whether this transaction was a valid orphan resolution candidate.
      * */
-    bool MaybeAddOrphanResolutionCandidate(const std::vector<Txid>& unique_parents, const Wtxid& wtxid, NodeId nodeid, std::chrono::microseconds now);
+    bool MaybeAddOrphanResolutionCandidate(const std::vector<Txid>& unique_parents, const Wtxid& wtxid, NodeId nodeid, std::chrono::microseconds now,
+                                           bool allow_existing_announcer = false);
 };
 } // namespace node
 #endif // BITCOIN_NODE_TXDOWNLOADMAN_IMPL_H

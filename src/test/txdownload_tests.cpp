@@ -430,4 +430,83 @@ BOOST_FIXTURE_TEST_CASE(orphan_parent_request_survives_reject_from_other_peer, T
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(orphan_retry_missing_inputs, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadOptions DEFAULT_OPTS{.m_mempool = pool, .m_deterministic_txrequest = true};
+    node::TxDownloadConnectionInfo DEFAULT_CONN{/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
+    const std::vector<NodeId> peers{1, 2};
+    // Delay before a non-preferred peer is asked for an orphan's parents.
+    const auto request_delay{node::NONPREF_PEER_TX_DELAY + node::TXID_RELAY_DELAY};
+
+    // The parent is not in the mempool, as if it left it after being accepted.
+    const auto parent{CreatePlaceholderTx(/*segwit=*/true)};
+    const auto child{CreatePlaceholderTx(/*segwit=*/true)};
+    const auto& parent_txid{parent->GetHash()};
+    const auto& child_wtxid{child->GetWitnessHash()};
+    TxValidationState state_orphan;
+    state_orphan.Invalid(TxValidationResult::TX_MISSING_INPUTS, "");
+
+    node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
+    for (const NodeId peer : peers) txdownload_impl.ConnectedPeer(peer, DEFAULT_CONN);
+
+    // Asks the peers for the parent in turn, each answering NOTFOUND. Returns how many were asked.
+    auto ask_in_turn = [&]() {
+        size_t asked{0};
+        const auto now{GetTime<std::chrono::microseconds>()};
+        for (size_t round = 0; round < peers.size(); ++round) {
+            for (const NodeId peer : peers) {
+                const auto requests{txdownload_impl.GetRequestsToSend(peer, now)};
+                if (requests.empty()) continue;
+                BOOST_CHECK(requests.size() == 1 && !requests[0].IsWtxid() && requests[0].ToUint256() == parent_txid.ToUint256());
+                ++asked;
+                txdownload_impl.ReceivedNotFound(peer, requests);
+            }
+        }
+        return asked;
+    };
+
+    // One peer delivers the child and the other announces it. Both are announcers and candidates to
+    // be asked for the parent; one is asked once the delay has passed.
+    const auto ret_first{txdownload_impl.MempoolRejectedTx(child, state_orphan, peers[0], /*first_time_failure=*/true)};
+    BOOST_CHECK(ret_first.m_should_add_extra_compact_tx);
+    BOOST_CHECK(ret_first.m_unique_parents == std::vector<Txid>{parent_txid});
+    BOOST_CHECK(txdownload_impl.AddTxAnnouncement(peers[1], child_wtxid, GetTime<std::chrono::microseconds>()));
+    BOOST_CHECK(txdownload_impl.m_orphanage->GetAnnouncers(child_wtxid) == peers);
+    m_clock += request_delay;
+    BOOST_CHECK_EQUAL(txdownload_impl.GetRequestsToSend(peers[0], GetTime<std::chrono::microseconds>()).size() +
+                      txdownload_impl.GetRequestsToSend(peers[1], GetTime<std::chrono::microseconds>()).size(), 1U);
+    BOOST_CHECK_EQUAL(txdownload_impl.m_txrequest.Size(), 2U);
+
+    // The parent is accepted: the requests for it are forgotten and the child is put in one
+    // announcer's work set.
+    txdownload_impl.MempoolAcceptedTx(parent);
+    BOOST_CHECK_EQUAL(txdownload_impl.m_txrequest.Size(), 0U);
+    const NodeId retry_peer{txdownload_impl.HaveMoreWork(peers[0]) ? peers[0] : peers[1]};
+    BOOST_CHECK_EQUAL(txdownload_impl.GetTxToReconsider(retry_peer), child);
+
+    // A first time failure of the child from one of its announcers registers nothing, as before.
+    const auto ret_again{txdownload_impl.MempoolRejectedTx(child, state_orphan, peers[0], /*first_time_failure=*/true)};
+    BOOST_CHECK(!ret_again.m_should_add_extra_compact_tx);
+    BOOST_CHECK_EQUAL(txdownload_impl.m_txrequest.Size(), 0U);
+
+    // The parent left the mempool, so the retry misses it again. Every announcer is registered again
+    // for the parent, with the same delay, and the child stays.
+    const auto ret_retry{txdownload_impl.MempoolRejectedTx(child, state_orphan, retry_peer, /*first_time_failure=*/false)};
+    BOOST_CHECK(!ret_retry.m_should_add_extra_compact_tx);
+    BOOST_CHECK(!ret_retry.m_package_to_validate.has_value());
+    BOOST_CHECK(ret_retry.m_unique_parents == std::vector<Txid>{parent_txid});
+    BOOST_CHECK(txdownload_impl.m_orphanage->GetAnnouncers(child_wtxid) == peers);
+    BOOST_CHECK_EQUAL(ask_in_turn(), 0U);
+    m_clock += request_delay;
+    BOOST_CHECK_EQUAL(ask_in_turn(), peers.size());
+
+    // A retry that misses no parent registers nothing.
+    txdownload_impl.RecentConfirmedTransactionsFilter().insert(parent_txid.ToUint256());
+    const auto ret_confirmed{txdownload_impl.MempoolRejectedTx(child, state_orphan, retry_peer, /*first_time_failure=*/false)};
+    BOOST_CHECK(ret_confirmed.m_unique_parents.empty());
+    BOOST_CHECK_EQUAL(txdownload_impl.m_txrequest.Size(), 0U);
+    BOOST_CHECK(txdownload_impl.m_orphanage->GetAnnouncers(child_wtxid) == peers);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

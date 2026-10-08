@@ -70,6 +70,9 @@ public:
     /** Check if a {tx, peer} exists in the orphanage.*/
     virtual bool HaveTxFromPeer(const Wtxid& wtxid, NodeId peer) const = 0;
 
+    /** Get the announcers of an orphan (by wtxid), in increasing NodeId order. Empty if there is no such orphan. */
+    virtual std::vector<NodeId> GetAnnouncers(const Wtxid& wtxid) const = 0;
+
     /** Extract a transaction from a peer's work set, and flip it back to non-reconsiderable.
      *  Returns nullptr if there are no transactions to work on.
      *  Otherwise returns the transaction reference, and removes

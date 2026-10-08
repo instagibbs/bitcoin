@@ -226,11 +226,12 @@ bool TxDownloadManagerImpl::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid,
     return false;
 }
 
-bool TxDownloadManagerImpl::MaybeAddOrphanResolutionCandidate(const std::vector<Txid>& unique_parents, const Wtxid& wtxid, NodeId nodeid, std::chrono::microseconds now)
+bool TxDownloadManagerImpl::MaybeAddOrphanResolutionCandidate(const std::vector<Txid>& unique_parents, const Wtxid& wtxid, NodeId nodeid, std::chrono::microseconds now,
+                                                              bool allow_existing_announcer)
 {
     auto it_peer = m_peer_info.find(nodeid);
     if (it_peer == m_peer_info.end()) return false;
-    if (m_orphanage->HaveTxFromPeer(wtxid, nodeid)) return false;
+    if (!allow_existing_announcer && m_orphanage->HaveTxFromPeer(wtxid, nodeid)) return false;
 
     const auto& peer_entry = m_peer_info.at(nodeid);
     const auto& info = peer_entry.m_connection_info;
@@ -436,6 +437,29 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
                 RecentRejectsFilter().insert(tx.GetWitnessHash().ToUint256());
                 m_txrequest.ForgetTxHash(tx.GetHash().ToUint256());
                 m_txrequest.ForgetTxHash(tx.GetWitnessHash().ToUint256());
+            }
+        } else if (!first_time_failure) {
+            // A retry of an orphan we hold (from a work set after one of its parents was accepted or
+            // confirmed, or in a 1p1c package) still misses inputs, e.g. because an accepted parent
+            // has since left the mempool. Accepting that parent forgot every request for it, so
+            // nothing would fetch it again. Register every announcer again as a candidate for the
+            // parents still missing. This adds a fresh announcement per announcer and parent (one
+            // that txrequest still tracks is kept as it is), so no peer gets a second chance ahead
+            // of another, and each retry costs at most one request per announcer and parent. A retry
+            // needs a parent to be accepted or a package to be tried, so announcements alone cannot
+            // cause this.
+            const auto announcers{m_orphanage->GetAnnouncers(ptx->GetWitnessHash())};
+            if (!announcers.empty()) {
+                unique_parents = GetUniqueParents(tx);
+                std::erase_if(unique_parents, [&](const auto& txid) {
+                    return AlreadyHaveTx(txid, /*include_reconsiderable=*/false);
+                });
+                if (!unique_parents.empty()) {
+                    const auto now{GetTime<std::chrono::microseconds>()};
+                    for (const NodeId announcer : announcers) {
+                        MaybeAddOrphanResolutionCandidate(unique_parents, ptx->GetWitnessHash(), announcer, now, /*allow_existing_announcer=*/true);
+                    }
+                }
             }
         }
     } else if (state.GetResult() == TxValidationResult::TX_WITNESS_STRIPPED) {

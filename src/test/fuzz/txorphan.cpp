@@ -786,9 +786,11 @@ FUZZ_TARGET(txorphanage_sim)
         assert(!!txref == sim_have_tx);
         if (sim_have_tx) assert(txref->GetWitnessHash() == txn[tx]->GetWitnessHash());
 
+        std::vector<NodeId> sim_announcers;
         for (NodeId peer = 0; peer < NUM_PEERS; ++peer) {
             auto it_sim_ann = find_announce_fn(tx, peer);
             bool sim_have_ann = it_sim_ann != sim_announcements.end();
+            if (sim_have_ann) sim_announcers.push_back(peer);
             if (sim_have_ann) usage_by_peer[peer] += GetTransactionWeight(*txn[tx]);
             count_by_peer[peer] += sim_have_ann;
             // GetOrphanTransactions (announcers presence)
@@ -818,6 +820,8 @@ FUZZ_TARGET(txorphanage_sim)
             }
             assert(it == children_from_peer.rend());
         }
+        // GetAnnouncers
+        assert(real->GetAnnouncers(txn[tx]->GetWitnessHash()) == sim_announcers);
     }
     // TotalOrphanUsage
     assert(orphan_usage == real->TotalOrphanUsage());

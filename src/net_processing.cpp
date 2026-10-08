@@ -3521,6 +3521,10 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
                 ProcessInvalidTx(peer.m_id, porphanTx, state, /*first_time_failure=*/false);
             }
             return true;
+        } else {
+            // Still missing inputs: keep the orphan and request its missing parents again. This is
+            // cheap, so move on to the next orphan.
+            ProcessInvalidTx(peer.m_id, porphanTx, state, /*first_time_failure=*/false);
         }
     }
 

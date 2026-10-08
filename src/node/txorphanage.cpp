@@ -223,6 +223,7 @@ public:
     CTransactionRef GetTx(const Wtxid& wtxid) const override;
     bool HaveTx(const Wtxid& wtxid) const override;
     bool HaveTxFromPeer(const Wtxid& wtxid, NodeId peer) const override;
+    std::vector<NodeId> GetAnnouncers(const Wtxid& wtxid) const override;
     CTransactionRef GetTxToReconsider(NodeId peer) override;
     bool EraseTx(const Wtxid& wtxid) override;
     void EraseForPeer(NodeId peer) override;
@@ -601,6 +602,16 @@ CTransactionRef TxOrphanageImpl::GetTx(const Wtxid& wtxid) const
 bool TxOrphanageImpl::HaveTxFromPeer(const Wtxid& wtxid, NodeId peer) const
 {
     return m_orphans.get<ByWtxid>().count(ByWtxidView{wtxid, peer}) > 0;
+}
+
+std::vector<NodeId> TxOrphanageImpl::GetAnnouncers(const Wtxid& wtxid) const
+{
+    std::vector<NodeId> announcers;
+    const auto& index_by_wtxid = m_orphans.get<ByWtxid>();
+    auto it = index_by_wtxid.lower_bound(ByWtxidView{wtxid, MIN_PEER});
+    const auto it_end = index_by_wtxid.upper_bound(ByWtxidView{wtxid, MAX_PEER});
+    for (; it != it_end; ++it) announcers.push_back(it->m_announcer);
+    return announcers;
 }
 
 /** If there is a tx that can be reconsidered, return it and set it back to

@@ -18,8 +18,8 @@
 // Nothing below PeerManager is modelled: message handling, transaction download, validation ordering
 // and result attribution are the production code paths, and the adversary's malleations of the cast
 // transactions are not limited to a fixed set. The cast itself is fixed: P2WSH inputs, children with
-// one confirmed fee input. The oracle is coarse (mempool membership) and each execution pays for real
-// validation. Not modelled: the orphanage reaching its limits, and the tip changing during a run.
+// one confirmed fee input (an output of an ordinary confirmed transaction, or of a coinbase). The oracle
+// is coarse (mempool membership) and each execution pays for real validation. Not modelled: the orphanage reaching its limits, and the tip changing during a run.
 
 #include <addresstype.h>
 #include <addrman.h>
@@ -76,12 +76,14 @@ const std::vector<unsigned char> WITNESS_DUMMY(64, 0);
 struct Cast {
     CTransactionRef parent;
     CAmount parent_fee;
-    CTransactionRef child;      //!< pays for the pair, from the parent's output and an output of CONFIRMED_PARENT
+    CTransactionRef child;      //!< pays for the pair, from the parent's output and an output of `confirmed`
     CTransactionRef fake_child; //!< spends the parent and an unknown outpoint
+    CTransactionRef confirmed;  //!< confirmed transaction funding the child: CONFIRMED_PARENT, or a coinbase
 };
 std::vector<Cast> CASTS;
-/** Confirmed transaction whose outputs fund the children. Confirmed longer ago than the recently-confirmed
- * filter remembers (a fresh PeerManager per input has an empty one), with its outputs in the coins cache. */
+/** Confirmed transaction whose outputs fund half of the children (the other half spend a coinbase output).
+ * Confirmed longer ago than the recently-confirmed filter remembers (a fresh PeerManager per input has an
+ * empty one), with its outputs in the coins cache. */
 CTransactionRef CONFIRMED_PARENT;
 
 CTransactionRef MakeTx(uint32_t version, const std::vector<COutPoint>& inputs, const std::vector<CAmount>& amounts_out)
@@ -105,33 +107,39 @@ void initialize()
     // feerate with the witness and above it without, and 200 sat pays for the parent on its own.
     const std::vector<CAmount> parent_fees{0, 10, 200};
     const std::vector<uint32_t> versions{2, 3};
-    const size_t num_casts{versions.size() * parent_fees.size()};
+    const size_t num_shapes{versions.size() * parent_fees.size()};
 
-    std::vector<COutPoint> coins;
-    for (size_t i = 0; i < num_casts + 1; ++i) {
+    // Coinbases: a parent input per cast (two casts per shape: child funded by CONFIRMED_PARENT or by a
+    // coinbase), a funding coinbase per coinbase-funded cast, and the input of CONFIRMED_PARENT.
+    std::vector<CTransactionRef> coinbases;
+    for (size_t i = 0; i < 3 * num_shapes + 1; ++i) {
         const CBlock block{g_setup->CreateAndProcessBlock({}, P2WSH_DROP_TRUE)};
-        coins.emplace_back(block.vtx.at(0)->GetHash(), 0);
+        coinbases.push_back(block.vtx.at(0));
     }
     g_setup->mineBlocks(COINBASE_MATURITY);
     const CAmount coinbase_value{50 * COIN};
-    // CONFIRMED_PARENT: one output per cast, confirmed in its own block.
+    // CONFIRMED_PARENT: one output per shape, confirmed in its own block.
     constexpr CAmount CONFIRMED_OUTPUT{5 * COIN};
-    CONFIRMED_PARENT = MakeTx(2, {coins.at(num_casts)}, std::vector<CAmount>(num_casts, CONFIRMED_OUTPUT));
+    CONFIRMED_PARENT = MakeTx(2, {COutPoint{coinbases.at(3 * num_shapes)->GetHash(), 0}}, std::vector<CAmount>(num_shapes, CONFIRMED_OUTPUT));
     const CBlock confirmed_block{g_setup->CreateAndProcessBlock({CMutableTransaction{*CONFIRMED_PARENT}}, P2WSH_DROP_TRUE)};
     Assert(confirmed_block.vtx.size() == 2);
     Assert(WITH_LOCK(cs_main, return g_setup->m_node.chainman->ActiveChainstate().CoinsTip().HaveCoin(COutPoint{CONFIRMED_PARENT->GetHash(), 0})));
 
-    size_t coin_index{0};
+    size_t shape{0};
     for (const uint32_t version : versions) {
         for (const CAmount parent_fee : parent_fees) {
-            Cast cast;
-            cast.parent_fee = parent_fee;
-            cast.parent = MakeTx(version, {coins.at(coin_index)}, {coinbase_value - parent_fee});
-            cast.child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{CONFIRMED_PARENT->GetHash(), static_cast<uint32_t>(coin_index)}},
-                                {coinbase_value - parent_fee + CONFIRMED_OUTPUT - 100});
-            cast.fake_child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{Txid::FromUint256(uint256::ONE), 0}}, {coinbase_value});
-            CASTS.push_back(std::move(cast));
-            ++coin_index;
+            for (const bool coinbase_funded : {false, true}) {
+                Cast cast;
+                cast.parent_fee = parent_fee;
+                cast.parent = MakeTx(version, {COutPoint{coinbases.at(shape + (coinbase_funded ? num_shapes : 0))->GetHash(), 0}}, {coinbase_value - parent_fee});
+                cast.confirmed = coinbase_funded ? coinbases.at(2 * num_shapes + shape) : CONFIRMED_PARENT;
+                const COutPoint funding{cast.confirmed->GetHash(), coinbase_funded ? 0 : static_cast<uint32_t>(shape)};
+                const CAmount funding_value{coinbase_funded ? coinbase_value : CONFIRMED_OUTPUT};
+                cast.child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, funding}, {coinbase_value - parent_fee + funding_value - 100});
+                cast.fake_child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{Txid::FromUint256(uint256::ONE), 0}}, {coinbase_value});
+                CASTS.push_back(std::move(cast));
+            }
+            ++shape;
         }
     }
 }
@@ -261,7 +269,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     g_setup->m_clock.set(now);
 
     const Cast& cast{PickValue(fuzzed_data_provider, CASTS)};
-    const std::vector<CTransactionRef> cast_txs{cast.parent, cast.child, cast.fake_child, CONFIRMED_PARENT};
+    const std::vector<CTransactionRef> cast_txs{cast.parent, cast.child, cast.fake_child, cast.confirmed};
 
     AddrMan addrman{*node_ctx.netgroupman, /*deterministic=*/true, /*consistency_check_ratio=*/0};
     ConnmanTestMsg connman{0, 0, addrman, *node_ctx.netgroupman, Params()};
@@ -309,9 +317,10 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         //! enters the reject filter. Once the parent then leaves the mempool, the child is dropped as an
         //! orphan with a rejected parent, or the honest parent is ignored.
         bool known_parent_replayed{false};
-        //! A witnessless copy of CONFIRMED_PARENT is rejected as TX_CONFLICT, and its wtxid, also its
-        //! txid, enters the reject filter. Orphan handling checks every input's parent against it,
-        //! confirmed or not, so the child is dropped as having a rejected parent.
+        //! A witnessless copy of the confirmed transaction funding the child is rejected before any
+        //! script check (as TX_CONFLICT for CONFIRMED_PARENT, as TX_CONSENSUS for a coinbase), and its
+        //! wtxid, also its txid, enters the reject filter. Orphan handling checks every input's parent
+        //! against it, confirmed or not, so the child is dropped as having a rejected parent.
         bool confirmed_parent_stripped{false};
         //! A peer announced or delivered the child, and delivered another version of the parent that
         //! was not accepted. Their 1p1c package (the child is found in the orphanage as announced by
@@ -462,7 +471,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
                         mempool.m_opts.min_relay_feerate.GetFee(GetVirtualTransactionSize(*delivered)) > cast.parent_fee) {
                         holes.parent_stripped = true;
                     }
-                    if (tx == CONFIRMED_PARENT) holes.confirmed_parent_stripped = true;
+                    if (tx == cast.confirmed) holes.confirmed_parent_stripped = true;
                 } else if (tx == cast.parent && delivered->GetWitnessHash() != cast.parent->GetWitnessHash()) {
                     other_parent.emplace(adversary->GetId(), delivered->GetWitnessHash());
                 } else if (delivered->GetWitnessHash() == cast.child->GetWitnessHash()) {

@@ -118,6 +118,18 @@ std::vector<std::string> serviceFlagsToStr(uint64_t flags)
     return str_flags;
 }
 
+std::vector<CService> DecodeFixedSeeds(std::span<const uint8_t> seeds)
+{
+    std::vector<CService> endpoints;
+    ParamsStream s{SpanReader{seeds}, CAddress::V2_NETWORK};
+    while (!s.empty()) {
+        CService endpoint;
+        s >> endpoint;
+        endpoints.push_back(endpoint);
+    }
+    return endpoints;
+}
+
 GenTxid ToGenTxid(const CInv& inv)
 {
     assert(inv.IsGenTxMsg());

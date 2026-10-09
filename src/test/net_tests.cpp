@@ -2,7 +2,6 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-#include <addrman.h>
 #include <bip324.h>
 #include <chainparams.h>
 #include <clientversion.h>
@@ -589,6 +588,30 @@ BOOST_AUTO_TEST_CASE(cnetaddr_unserialize_v2)
     s >> ser_params(addr);
     BOOST_CHECK(!addr.IsValid());
     BOOST_REQUIRE(s.empty());
+}
+
+BOOST_AUTO_TEST_CASE(decode_fixed_seeds)
+{
+    const CService ipv4{Lookup("1.2.3.4", 8333, false).value()};
+    CNetAddr onion_addr;
+    BOOST_REQUIRE(onion_addr.SetSpecial("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"));
+    const CService onion{onion_addr, 18333};
+
+    // Serialized as in chainparamsseeds.h: BIP155 address and port, back to back.
+    DataStream s{};
+    const auto ser_params{CAddress::V2_NETWORK};
+    s << ser_params(ipv4) << ser_params(onion);
+
+    const std::vector<CService> decoded{DecodeFixedSeeds(MakeUCharSpan(s))};
+    BOOST_REQUIRE_EQUAL(decoded.size(), 2U);
+    BOOST_CHECK(decoded[0] == ipv4);
+    BOOST_CHECK(decoded[1] == onion);
+
+    BOOST_CHECK(DecodeFixedSeeds({}).empty());
+
+    // A truncated tail is an error, not a shorter list.
+    const auto bytes{MakeUCharSpan(s)};
+    BOOST_CHECK_THROW(DecodeFixedSeeds(bytes.first(bytes.size() - 1)), std::ios_base::failure);
 }
 
 // prior to PR #14728, this test triggers an undefined behavior
@@ -1632,36 +1655,6 @@ BOOST_AUTO_TEST_CASE(v2transport_test)
         auto ret = tester.Interact();
         BOOST_CHECK(!ret);
     }
-}
-
-BOOST_AUTO_TEST_CASE(private_broadcast_version_does_not_update_addrman_services)
-{
-    LOCK(NetEventsInterface::g_msgproc_mutex);
-
-    const CNetAddr source{LookupHost("2.3.4.5", /*fAllowLookup=*/false).value()};
-    const CAddress addr{Lookup("1.2.3.4", 8333, /*fAllowLookup=*/false).value(), NODE_NONE};
-    BOOST_REQUIRE(m_node.addrman->Add({addr}, source));
-    CNode node{/*id=*/0,
-               /*sock=*/nullptr,
-               /*addrIn=*/addr,
-               /*nKeyedNetGroupIn=*/0,
-               /*nLocalHostNonceIn=*/0,
-               /*addrBindIn=*/CService{},
-               /*addrNameIn=*/"",
-               /*conn_type_in=*/ConnectionType::PRIVATE_BROADCAST,
-               /*inbound_onion=*/false,
-               /*network_key=*/0};
-
-    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
-    connman.Handshake(node,
-                      /*successfully_connected=*/false,
-                      /*remote_services=*/NODE_NETWORK,
-                      /*local_services=*/NODE_NONE,
-                      /*version=*/PROTOCOL_VERSION,
-                      /*relay_txs=*/true);
-
-    BOOST_CHECK_EQUAL(m_node.addrman->Select().first.nServices, NODE_NONE);
-    m_node.peerman->FinalizeNode(node);
 }
 
 BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)

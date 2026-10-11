@@ -8,18 +8,20 @@
 //
 // Property: if an honest peer announces the child of an acceptable parent and child, the child ends
 // up in our mempool, whatever other peers do. The parent may be too low-fee on its own (1p1c relay)
-// or not (the child is then an orphan until the parent arrives). Adversaries hold no keys: they may
-// announce, deliver the parent, the child or the confirmed transaction funding the child as is,
-// stripped of its witness, inflated or with a freely mutated witness, deliver a fake child of the
-// parent, send notfound, stall, disconnect and reconnect. The parent may also leave the mempool
+// or not (the child is then an orphan until the parent arrives). The honest peer may first announce
+// versions of the child that do not pay for the pair, each replaced by the next, as a wallet bumping
+// the fee would; the property is then about the last version. Adversaries hold no keys: they may
+// announce, deliver the parent, any child version or the confirmed transaction funding the child as
+// is, stripped of its witness, inflated or with a freely mutated witness, deliver a fake child of
+// the parent, send notfound, stall, disconnect and reconnect. The parent may also leave the mempool
 // before the child is accepted.
 //
 // Nothing below PeerManager is modelled: message handling, transaction download, validation ordering
 // and result attribution are the production code paths, and the adversary's malleations of the cast
-// transactions are not limited to a fixed set. The cast itself is fixed: P2WSH inputs, children with
-// one confirmed fee input (an output of an ordinary confirmed transaction, or of a coinbase). The
-// oracle is coarse (mempool membership) and each execution pays for real validation. Not modelled:
-// the orphanage reaching its limits, and the tip changing during a run.
+// transactions are not limited to a fixed set. The cast itself is fixed: P2WSH inputs, children in
+// three fee versions with one confirmed fee input (an output of an ordinary confirmed transaction, or
+// of a coinbase). The oracle is coarse (mempool membership) and each execution pays for real
+// validation. Not modelled: the orphanage reaching its limits, and the tip changing during a run.
 
 #include <addresstype.h>
 #include <addrman.h>
@@ -53,6 +55,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -74,7 +77,9 @@ const std::vector<unsigned char> WITNESS_DUMMY(64, 0);
 
 struct Cast {
     CTransactionRef parent;
-    CTransactionRef child;      //!< pays for the pair, from the parent's output and an output of `confirmed`
+    //! Versions of the child, from the parent's output and an output of `confirmed`, each replacing the
+    //! previous one with a higher fee. Only the last pays for the pair.
+    std::vector<CTransactionRef> children;
     CTransactionRef fake_child; //!< spends the parent and an unknown outpoint
     CTransactionRef confirmed;  //!< confirmed transaction funding the child: CONFIRMED_PARENT, or a coinbase
 };
@@ -104,6 +109,9 @@ void initialize()
     // A parent of ~112 vbytes with its witness and ~94 without: 10 sat is below the minimum relay
     // feerate with the witness and above it without, and 200 sat pays for the parent on its own.
     const std::vector<CAmount> parent_fees{0, 10, 200};
+    // A child of ~170 vbytes: with 5 or 15 sat the pair stays below the minimum relay feerate for the
+    // first two parent fees, and the child alone is below it next to the third; 100 sat pays for all.
+    const std::vector<CAmount> child_fees{5, 15, 100};
     const std::vector<uint32_t> versions{2, 3};
     const size_t num_shapes{versions.size() * parent_fees.size()};
 
@@ -132,7 +140,9 @@ void initialize()
                 cast.confirmed = coinbase_funded ? coinbases.at(2 * num_shapes + shape) : CONFIRMED_PARENT;
                 const COutPoint funding{cast.confirmed->GetHash(), coinbase_funded ? 0 : static_cast<uint32_t>(shape)};
                 const CAmount funding_value{coinbase_funded ? coinbase_value : CONFIRMED_OUTPUT};
-                cast.child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, funding}, {coinbase_value - parent_fee + funding_value - 100});
+                for (const CAmount child_fee : child_fees) {
+                    cast.children.push_back(MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, funding}, {coinbase_value - parent_fee + funding_value - child_fee}));
+                }
                 cast.fake_child = MakeTx(version, {COutPoint{cast.parent->GetHash(), 0}, COutPoint{Txid::FromUint256(uint256::ONE), 0}}, {coinbase_value});
                 CASTS.push_back(std::move(cast));
             }
@@ -266,7 +276,8 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     g_setup->m_clock.set(now);
 
     const Cast& cast{PickValue(fuzzed_data_provider, CASTS)};
-    const std::vector<CTransactionRef> cast_txs{cast.parent, cast.child, cast.fake_child, cast.confirmed};
+    std::vector<CTransactionRef> cast_txs{cast.parent, cast.fake_child, cast.confirmed};
+    cast_txs.insert(cast_txs.end(), cast.children.begin(), cast.children.end());
 
     AddrMan addrman{*node_ctx.netgroupman, /*deterministic=*/true, /*consistency_check_ratio=*/0};
     ConnmanTestMsg connman{0, 0, addrman, *node_ctx.netgroupman, Params()};
@@ -301,13 +312,67 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     }
     CNode* const honest{peers[0]};
 
+    // The child version the honest peer holds: it starts from a fuzzer-chosen one and bumps up to the
+    // last, announcing each.
+    size_t honest_version{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, cast.children.size() - 1)};
     bool honest_announced{false};
     int reconnects{0};
+
+    // Known liveness holes that need the honest peer to bump its child. They are told apart at the end
+    // of a run, and the property is not checked if one of them opened. Both are about when a child
+    // version became an orphan announced by the honest peer, which registers the honest peer as a
+    // candidate for requesting the parent by txid: on its delivery by the honest peer, on the honest
+    // peer's announcement of it while held, or on its delivery by another peer while the honest peer's
+    // announcement of it is pending.
+    struct {
+        //! The honest peer delivered the parent against a request by txid, which completed its
+        //! announcement of that txid in TxRequestTracker. A completed announcement is kept while
+        //! another peer's announcement of the txid is open, and registering a peer for a txid it has an
+        //! announcement of does nothing. So the last child version, held for the honest peer while
+        //! another peer's announcement of the parent's txid was open or pending, has no request for the
+        //! parent, which is never requested again once the other announcements complete or go away
+        //! with their peer. Set when the honest peer delivered the parent before the last version was
+        //! held for it, and was never asked for the parent afterwards. (A pending announcement that is
+        //! never requested is invisible here, so the other peer's part is not checked.)
+        bool completed_parent_request{false};
+        //! An older child version was held for the honest peer after the last one, so it is newer in the
+        //! honest peer's orphans. When the honest peer delivers the parent, only the package with its
+        //! newest child is tried, which fails the feerate, and the parent is not delivered again. Set
+        //! when the honest peer delivered the parent after such a version was held, and no more times
+        //! than there are such versions.
+        bool older_child_newer_orphan{false};
+        bool Any() const { return completed_parent_request || older_child_newer_orphan; }
+    } holes;
+    // For `holes`, numbered in the order they happened: the honest peer's deliveries of the parent, the
+    // last request for the parent from it, and when each child version was last held for it.
+    uint64_t events{0}, parent_requested_from_honest{0}, parent_from_honest_before_last_held{0};
+    std::vector<uint64_t> parent_from_honest;
+    std::vector<uint64_t> held_for_honest(cast.children.size(), 0);
+    std::vector<bool> is_held_for_honest(cast.children.size(), false);
 
     auto receive = [&](CNode& peer, CSerializedNetMsg&& msg) { Assert(connman.ReceiveMsgFrom(peer, std::move(msg))); };
     // The honest peer is in sync with us (it announces our tip, and answers pings below), so that it
     // is not disconnected as an outbound peer with an old chain or for a ping timeout.
     receive(*honest, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(std::vector<CBlock>{CBlock{active_tip->GetBlockHeader()}})));
+    // For `holes`: note when each child version becomes an orphan announced by the honest peer.
+    auto poll_orphans = [&]() {
+        std::vector<bool> held(cast.children.size(), false);
+        for (const auto& orphan : peerman->GetOrphanTransactions()) {
+            if (!orphan.announcers.contains(honest->GetId())) continue;
+            for (size_t i = 0; i < cast.children.size(); ++i) {
+                if (orphan.tx->GetWitnessHash() == cast.children[i]->GetWitnessHash()) held[i] = true;
+            }
+        }
+        for (size_t i = 0; i < cast.children.size(); ++i) {
+            if (held[i] && !is_held_for_honest[i]) {
+                held_for_honest[i] = ++events;
+                if (i + 1 == cast.children.size()) {
+                    parent_from_honest_before_last_held = parent_from_honest.empty() ? 0 : parent_from_honest.back();
+                }
+            }
+        }
+        is_held_for_honest = std::move(held);
+    };
     // Let the node process everything pending and send its messages. The honest peer answers our
     // requests immediately with the honest transactions; adversaries never answer here. Peers are
     // serviced round-robin from a fuzzer-chosen peer, as the message handler (which shuffles them) may
@@ -323,6 +388,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
                 if (!peer || peer->fDisconnect) continue;
                 peer->fPauseSend = false;
                 more |= connman.ProcessMessagesOnce(*peer);
+                poll_orphans();
                 peerman->SendMessages(*peer);
                 for (auto& [type, payload] : TakeSentMessages(*peer)) {
                     if (peer != honest) continue;
@@ -339,13 +405,17 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
                     std::vector<CInv> invs;
                     stream >> invs;
                     std::vector<CInv> not_found;
+                    const auto& honest_child{cast.children[honest_version]};
                     for (const auto& inv : invs) {
                         if (!inv.IsGenTxMsg()) continue;
                         if (inv.hash == cast.parent->GetHash().ToUint256() || inv.hash == cast.parent->GetWitnessHash().ToUint256()) {
+                            parent_requested_from_honest = ++events;
+                            parent_from_honest.push_back(++events);
                             receive(*honest, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*cast.parent)));
-                        } else if (inv.hash == cast.child->GetHash().ToUint256() || inv.hash == cast.child->GetWitnessHash().ToUint256()) {
-                            receive(*honest, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*cast.child)));
+                        } else if (inv.hash == honest_child->GetHash().ToUint256() || inv.hash == honest_child->GetWitnessHash().ToUint256()) {
+                            receive(*honest, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*honest_child)));
                         } else {
+                            // Including child versions the honest peer has replaced.
                             not_found.push_back(inv);
                         }
                         more = true;
@@ -363,11 +433,16 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         }
         Assert(!honest->fDisconnect);
     };
-    auto announce_honest = [&]() {
-        receive(*honest, NetMsg::Make(NetMsgType::INV, std::vector<CInv>{CInv{MSG_WTX, cast.child->GetWitnessHash().ToUint256()}}));
+    // The honest peer announces the child version it holds or, once it has, replaces it with the next.
+    auto honest_step = [&]() {
+        if (honest_announced) {
+            if (honest_version + 1 == cast.children.size()) return;
+            ++honest_version;
+        }
+        receive(*honest, NetMsg::Make(NetMsgType::INV, std::vector<CInv>{CInv{MSG_WTX, cast.children[honest_version]->GetWitnessHash().ToUint256()}}));
         honest_announced = true;
     };
-    auto child_accepted = [&]() { return mempool.exists(cast.child->GetHash()); };
+    auto child_accepted = [&]() { return mempool.exists(cast.children.back()->GetHash()); };
 
     // One adversary step: an adversary acts (or the parent leaves the mempool, or time passes), then
     // the node processes it.
@@ -378,9 +453,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         std::optional<size_t> reconnect_idx;
         CallOneOf(
             fuzzed_data_provider,
-            [&] {
-                if (!honest_announced) announce_honest();
-            },
+            [&] { honest_step(); },
             [&] {
                 // Announce a cast transaction, a mutated version of it, or an unrelated hash.
                 if (!adversary) return;
@@ -449,8 +522,8 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool() && !child_accepted(), 200) {
         adversary_step();
     }
-    if (!honest_announced) {
-        announce_honest();
+    while (!honest_announced || honest_version + 1 < cast.children.size()) {
+        honest_step();
         process();
     }
 
@@ -473,7 +546,24 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         g_setup->m_clock.set(now);
         process();
     }
-    Assert(child_accepted());
+    const uint64_t last_held{held_for_honest.back()};
+    holes.completed_parent_request = last_held && parent_from_honest_before_last_held && parent_requested_from_honest < last_held;
+    if (last_held) {
+        // Older versions held for the honest peer after the last one, and the first time that happened.
+        int older_held_later{0};
+        uint64_t first_older_held_later{std::numeric_limits<uint64_t>::max()};
+        for (size_t i = 0; i + 1 < held_for_honest.size(); ++i) {
+            if (held_for_honest[i] > last_held) {
+                ++older_held_later;
+                first_older_held_later = std::min(first_older_held_later, held_for_honest[i]);
+            }
+        }
+        const auto deliveries_after{std::ranges::count_if(parent_from_honest, [&](uint64_t e) { return e > last_held; })};
+        const auto first_delivery_after{std::ranges::find_if(parent_from_honest, [&](uint64_t e) { return e > last_held; })};
+        holes.older_child_newer_orphan = older_held_later > 0 && deliveries_after > 0 && deliveries_after <= older_held_later &&
+                                         *first_delivery_after > first_older_held_later;
+    }
+    Assert(holes.Any() || child_accepted());
 
     // Tear down. Descendants (any accepted child version) go with the parent.
     for (CNode* peer : peers) {

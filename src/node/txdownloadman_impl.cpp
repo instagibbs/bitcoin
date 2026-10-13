@@ -491,12 +491,15 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
                          ptx->GetHash().ToString(), ptx->GetWitnessHash().ToString());
                 package_to_validate = Find1P1CPackage(ptx, nodeid);
             }
-        } else if (state.GetResult() != TxValidationResult::TX_CONFLICT) {
+        } else if (state.GetResult() != TxValidationResult::TX_CONFLICT && !ptx->IsCoinBase()) {
             // TX_CONFLICT means the transaction is already known (in the mempool, in the mempool with a
             // different witness, or confirmed), not that it is invalid: don't add it to the reject
             // filter. For a transaction without witness data the wtxid is also the txid, and if the
             // known transaction later leaves the mempool, a txid in the filter marks every orphan
             // spending it as having a rejected parent.
+            // Neither add a loose coinbase: it is rejected before any input lookup, so an entry saves
+            // little, and a copy without its witness has the coinbase's txid as its wtxid, which
+            // would mark every orphan spending the coinbase's outputs as having a rejected parent.
             RecentRejectsFilter().insert(ptx->GetWitnessHash().ToUint256());
         }
         // Forget only wtxid announcements: what was rejected is this wtxid, while a txid announcement (e.g. for

@@ -12,8 +12,7 @@
 // announce, deliver the parent, the child or the confirmed transaction funding the child as is,
 // stripped of its witness, inflated or with a freely mutated witness, deliver a fake child of the
 // parent, send notfound, stall, disconnect and reconnect. The parent may also leave the mempool
-// before the child is accepted. Moves that open a known liveness hole turn off the check (see
-// `holes`).
+// before the child is accepted.
 //
 // Nothing below PeerManager is modelled: message handling, transaction download, validation ordering
 // and result attribution are the production code paths, and the adversary's malleations of the cast
@@ -303,18 +302,6 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     CNode* const honest{peers[0]};
 
     bool honest_announced{false};
-    // Known liveness holes. The property is not checked once a move has opened one of them.
-    struct {
-        //! A witnessless copy of the confirmed transaction funding the child is rejected before any
-        //! script check (as TX_CONFLICT for CONFIRMED_PARENT, as TX_CONSENSUS for a coinbase), and its
-        //! wtxid, also its txid, enters the reject filter. Orphan handling checks every input's parent
-        //! against it, confirmed or not, so the child is dropped as having a rejected parent.
-        bool confirmed_parent_stripped{false};
-        bool Any() const
-        {
-            return confirmed_parent_stripped;
-        }
-    } holes;
     int reconnects{0};
 
     auto receive = [&](CNode& peer, CSerializedNetMsg&& msg) { Assert(connman.ReceiveMsgFrom(peer, std::move(msg))); };
@@ -425,9 +412,6 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
                 }
                 case 3: delivered = MutateWitness(fuzzed_data_provider, tx); break;
                 }
-                if (!delivered->HasWitness()) {
-                    if (tx == cast.confirmed) holes.confirmed_parent_stripped = true;
-                }
                 receive(*adversary, NetMsg::Make(NetMsgType::TX, TX_WITH_WITNESS(*delivered)));
             },
             [&] {
@@ -462,10 +446,10 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     };
 
     // Adversarial prefix.
-    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool() && !child_accepted() && !holes.Any(), 200) {
+    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool() && !child_accepted(), 200) {
         adversary_step();
     }
-    if (!honest_announced && !holes.Any()) {
+    if (!honest_announced) {
         announce_honest();
         process();
     }
@@ -480,7 +464,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
     // made so far counts.
     const int max_stalls{honest_outbound ? 2 * (1 + adversary_outbounds) : 2 * (num_adversaries + reconnects)};
     const auto deadline{now + 10s + (max_stalls + 1) * (node::GETDATA_TX_INTERVAL + 1s)};
-    while (!child_accepted() && !holes.Any() && now < deadline) {
+    while (!child_accepted() && now < deadline) {
         if (honest_outbound && fuzzed_data_provider.ConsumeBool()) {
             adversary_step();
             if (child_accepted()) break;
@@ -489,7 +473,7 @@ FUZZ_TARGET(p2p_1p1c_liveness, .init = ::initialize)
         g_setup->m_clock.set(now);
         process();
     }
-    Assert(holes.Any() || child_accepted());
+    Assert(child_accepted());
 
     // Tear down. Descendants (any accepted child version) go with the parent.
     for (CNode* peer : peers) {

@@ -386,6 +386,42 @@ BOOST_FIXTURE_TEST_CASE(known_mempool_parent_replay_does_not_poison_after_evicti
                         "child rejected because the evicted parent's txid was poisoned by a stripped replay");
 }
 
+// A loose coinbase without its witness is rejected as TX_CONSENSUS, and its wtxid is the coinbase's txid: a later
+// child spending the coinbase must not be rejected because that txid is in the reject filter.
+BOOST_FIXTURE_TEST_CASE(loose_coinbase_does_not_poison_its_txid, TestChain100Setup)
+{
+    const CTransactionRef& coinbase{m_coinbase_txns[0]};
+    CMutableTransaction stripped_mtx{*coinbase};
+    for (auto& txin : stripped_mtx.vin) txin.scriptWitness.SetNull();
+    const auto coinbase_stripped = MakeTransactionRef(stripped_mtx);
+    BOOST_REQUIRE(coinbase_stripped->GetWitnessHash().ToUint256() == coinbase->GetHash().ToUint256());
+    CMutableTransaction child_mtx;
+    child_mtx.vin.emplace_back(coinbase->GetHash(), 0);
+    child_mtx.vin.emplace_back(Txid::FromUint256(m_rng.rand256()), 0); // missing parent
+    child_mtx.vout.emplace_back(coinbase->vout[0].nValue, P2WSH_OP_TRUE);
+    const auto child = MakeTransactionRef(child_mtx);
+
+    LOCK(cs_main);
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadManagerImpl txdownload_impl{node::TxDownloadOptions{.m_mempool = pool, .m_deterministic_txrequest = true}};
+    constexpr NodeId honest{1}, other{2};
+    txdownload_impl.ConnectedPeer(honest, {/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+    txdownload_impl.ConnectedPeer(other, {/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(other, coinbase_stripped).first);
+    const auto coinbase_result = m_node.chainman->ProcessTransaction(coinbase_stripped);
+    BOOST_REQUIRE_MESSAGE(coinbase_result.m_state.GetResult() == TxValidationResult::TX_CONSENSUS, coinbase_result.m_state.ToString());
+    txdownload_impl.MempoolRejectedTx(coinbase_stripped, coinbase_result.m_state, other, /*first_time_failure=*/true);
+    BOOST_CHECK(!txdownload_impl.RecentRejectsFilter().contains(coinbase->GetHash().ToUint256()));
+
+    BOOST_REQUIRE(txdownload_impl.ReceivedTx(honest, child).first);
+    const auto child_result = m_node.chainman->ProcessTransaction(child);
+    BOOST_REQUIRE(child_result.m_state.GetResult() == TxValidationResult::TX_MISSING_INPUTS);
+    txdownload_impl.MempoolRejectedTx(child, child_result.m_state, honest, /*first_time_failure=*/true);
+    BOOST_CHECK_MESSAGE(txdownload_impl.m_orphanage->HaveTxFromPeer(child->GetWitnessHash(), honest),
+                        "child rejected because a stripped loose coinbase poisoned the coinbase's txid");
+}
+
 BOOST_FIXTURE_TEST_CASE(orphan_parent_request_survives_reject_from_other_peer, TestChain100Setup)
 {
     CTxMemPool& pool = *Assert(m_node.mempool);

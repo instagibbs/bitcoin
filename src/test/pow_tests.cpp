@@ -81,6 +81,18 @@ BOOST_AUTO_TEST_CASE(get_next_work_upper_limit_actual)
     BOOST_CHECK(!PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, invalid_nbits));
 }
 
+/* Test the pow_limit clamp on the maximum permitted new target */
+BOOST_AUTO_TEST_CASE(permitted_difficulty_transition_pow_limit_clamp)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
+    // old_nbits at pow_limit: 4x the target exceeds pow_limit, so the maximum
+    // permitted new target must be clamped to pow_limit itself.
+    unsigned int old_nbits = 0x1d00ffffU;
+    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), 2016, old_nbits, 0x1d00ffffU));
+    // Just above pow_limit is not permitted even though it is within 4x of old_nbits.
+    BOOST_CHECK(!PermittedDifficultyTransition(chainParams->GetConsensus(), 2016, old_nbits, 0x1d010000U));
+}
+
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_negative_target)
 {
     const auto consensus = CreateChainParams(*m_node.args, ChainType::MAIN)->GetConsensus();

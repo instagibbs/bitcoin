@@ -28,6 +28,15 @@ public:
     /** Tracks candidates for requesting and downloading transaction data. */
     TxRequestTracker m_txrequest;
 
+    /** Tracks candidates for requesting and downloading packages announced through pkginv, by
+     * PkgInv::GetId(). Separate from m_txrequest, so that announcements, requests and deliveries of
+     * the individual transactions do not delay or cancel requests for the package. */
+    TxRequestTracker m_pkgrequest;
+
+    /** The packages tracked in m_pkgrequest, by PkgInv::GetId(). Can also contain packages that
+     * m_pkgrequest no longer tracks, which MaybeTrimPackages removes. */
+    std::map<uint256, PkgInv> m_packages;
+
     /**
      * Filter for transactions that were recently rejected by the mempool.
      * These are not rerequested until the chain tip changes, at which point
@@ -130,11 +139,35 @@ public:
         return *m_lazy_recent_confirmed_transactions;
     }
 
+    /**
+     * Filter for packages from pkgtxns whose child was not accepted to the mempool, by
+     * PkgInv::GetId(). These are not requested again until the chain tip changes, at which point
+     * the filter is reset.
+     *
+     * This is the only filter written with package relay results, and it is written only with the
+     * result of validating exactly the package it records. Conversely, package relay does not
+     * consult m_lazy_recent_rejects, m_lazy_recent_rejects_reconsiderable or the orphanage, so
+     * that no transaction other than the package's own can stop us from requesting it.
+     *
+     * Parameters are picked to be the same as m_lazy_recent_rejects, with the same rationale.
+     */
+    std::unique_ptr<CRollingBloomFilter> m_lazy_recent_rejected_packages{nullptr};
+
+    CRollingBloomFilter& RecentRejectedPackagesFilter()
+    {
+        if (!m_lazy_recent_rejected_packages) {
+            m_lazy_recent_rejected_packages = std::make_unique<CRollingBloomFilter>(120'000, 0.000'001);
+        }
+
+        return *m_lazy_recent_rejected_packages;
+    }
+
     TxDownloadManagerImpl(const TxDownloadOptions& options)
         : m_mempool{options.m_mempool},
           m_rng{options.m_deterministic_txrequest},
           m_orphanage{MakeTxOrphanage()},
-          m_txrequest{options.m_deterministic_txrequest}
+          m_txrequest{options.m_deterministic_txrequest},
+          m_pkgrequest{options.m_deterministic_txrequest}
     {}
 
     struct PeerInfo {
@@ -164,6 +197,11 @@ public:
      *  */
     bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable);
 
+    /** Check whether we don't need to download this package, because its child is in the mempool
+     * (and with it the parent, or a transaction with the parent's txid) or recently confirmed, or
+     * because the package is in m_lazy_recent_rejected_packages. */
+    bool AlreadyHavePackage(const PkgInv& pkg);
+
     void ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info);
     void DisconnectedPeer(NodeId nodeid);
 
@@ -177,6 +215,12 @@ public:
 
     /** Marks a tx as ReceivedResponse in txrequest. */
     void ReceivedNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids);
+
+    bool AddPackageAnnouncement(NodeId peer, const PkgInv& pkg, std::chrono::microseconds now);
+    std::vector<PkgInv> GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+    void ReceivedPackageNotFound(NodeId nodeid, const std::vector<PkgInv>& pkgs);
+    bool ReceivedPackage(NodeId nodeid, const PkgInv& pkg);
+    void RelayedPackageRejected(const PkgInv& pkg);
 
     /** Look for a child of this transaction in the orphanage to form a 1-parent-1-child package,
      * skipping any combinations that have already been tried. Return the resulting package along with
@@ -198,6 +242,10 @@ public:
     std::vector<TxOrphanage::OrphanInfo> GetOrphanTransactions() const;
 
 protected:
+    /** Remove the entries of m_packages that m_pkgrequest no longer tracks, once there are enough of
+     * them that this is cheap per call. */
+    void MaybeTrimPackages();
+
     /** Helper for getting deduplicated vector of Txids in vin. */
     std::vector<Txid> GetUniqueParents(const CTransaction& tx);
 

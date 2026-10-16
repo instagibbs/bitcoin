@@ -8,6 +8,7 @@
 #include <net.h>
 #include <node/txorphanage.h>
 #include <policy/packages.h>
+#include <protocol.h>
 
 #include <cstdint>
 #include <memory>
@@ -140,6 +141,23 @@ public:
 
     /** Should be called when a notfound for a tx has been received. */
     void ReceivedNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids);
+
+    /** Consider requesting this package from the peer. Should be called whenever a pkginv entry
+     * has been received. Returns true if we already have the package (see AlreadyHavePackage). */
+    bool AddPackageAnnouncement(NodeId peer, const PkgInv& pkg, std::chrono::microseconds now);
+
+    /** Get getpkg requests to send. */
+    std::vector<PkgInv> GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+
+    /** Should be called when a pkgnotfound has been received. */
+    void ReceivedPackageNotFound(NodeId nodeid, const std::vector<PkgInv>& pkgs);
+
+    /** Should be called when a pkgtxns has been received. Returns whether the package should be
+     * validated: the peer announced it and we don't already have it. */
+    bool ReceivedPackage(NodeId nodeid, const PkgInv& pkg);
+
+    /** Respond to a package from pkgtxns whose child was not accepted to the mempool. */
+    void RelayedPackageRejected(const PkgInv& pkg);
 
     /** Respond to successful transaction submission to mempool */
     void MempoolAcceptedTx(const CTransactionRef& tx);

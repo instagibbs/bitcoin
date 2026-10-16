@@ -285,6 +285,10 @@ struct Peer {
 
     /** Whether this peer relays txs via wtxid */
     std::atomic<bool> m_wtxid_relay{false};
+    /** Whether we relay 1-parent-1-child packages with this peer (NetMsgFeature::PKGRELAY_1P1C).
+     *  Set when the peer advertises it before verack, cleared at verack unless both sides relay
+     *  transactions by wtxid. */
+    std::atomic<bool> m_pkgrelay{false};
     /** The feerate in the most recent BIP133 `feefilter` message sent to the peer.
      *  It is *not* a p2p protocol violation for the peer to send us
      *  transactions with a lower fee rate than this. See BIP133. */
@@ -310,6 +314,9 @@ struct Peer {
          *  constructing the `inv` message. We use the mempool to sort transactions
          *  in dependency order before relay, so this does not have to be sorted. */
         std::vector<Wtxid> m_tx_inventory_to_send GUARDED_BY(m_tx_inventory_mutex);
+        /** Wtxids to announce on their own at the next trickle, without pairing them, because the
+         *  package we announced them in could not be served to this peer (see GETPKG). */
+        std::vector<Wtxid> m_pkg_fallback_to_send GUARDED_BY(m_tx_inventory_mutex);
         /** Whether the peer has requested us to send our complete mempool. Only
          *  permitted if the peer has NetPermissionFlags::Mempool or we advertise
          *  NODE_BLOOM. See BIP35. */
@@ -394,6 +401,8 @@ struct Peer {
     Mutex m_getdata_requests_mutex;
     /** Work queue of items requested by this peer **/
     std::deque<CInv> m_getdata_requests GUARDED_BY(m_getdata_requests_mutex);
+    /** Work queue of packages requested by this peer through getpkg **/
+    std::deque<PkgInv> m_getpkg_requests GUARDED_BY(m_getdata_requests_mutex);
 
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
@@ -709,6 +718,12 @@ private:
      */
     void ProcessPackageResult(const node::PackageToValidate& package_to_validate, const PackageMempoolAcceptResult& package_result)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex, !m_inv_to_send_mutex);
+
+    /** Validate a package received in pkgtxns and handle the results. Unlike packages found
+     *  through the orphanage, only accepted transactions update per-transaction state; a
+     *  package whose child is not accepted is remembered by package id only. */
+    void ProcessRelayedPackage(CNode& pfrom, const CTransactionRef& parent, const CTransactionRef& child)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, cs_main, m_tx_download_mutex, !m_inv_to_send_mutex);
 
     /**
      * Reconsider orphan transactions after a parent has been accepted to the mempool.
@@ -1051,6 +1066,11 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
         LOCKS_EXCLUDED(::cs_main);
 
+    /** Serve queued getpkg requests until the send buffer is full, like ProcessGetData. */
+    void ProcessGetPkg(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
+        LOCKS_EXCLUDED(::cs_main);
+
     /** Process a new block. Perform any post-processing housekeeping */
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked);
 
@@ -1247,6 +1267,26 @@ static void AddKnownTx(Peer& peer, const uint256& hash)
 
     LOCK(tx_relay->m_tx_inventory_mutex);
     tx_relay->m_tx_inventory_known_filter.insert(hash);
+}
+
+/** Return the parent to announce this transaction with to a package relay peer, or nullptr to
+ *  announce it on its own. A transaction is paired with its parent if it has exactly one
+ *  unconfirmed parent, which has no unconfirmed parents itself, and its chunk in a linearization of
+ *  the two pays the peer's feefilter. That chunk is the child alone if the child does not pay a
+ *  higher feerate than the parent, and both transactions otherwise. */
+const CTxMemPoolEntry* GetPackageRelayParent(const CTxMemPool& pool, const CTxMemPoolEntry& child, const CFeeRate& filterrate)
+    EXCLUSIVE_LOCKS_REQUIRED(pool.cs)
+{
+    const auto parents{pool.GetParents(child)};
+    if (parents.size() != 1) return nullptr;
+    const CTxMemPoolEntry& parent{parents.front().get()};
+    if (!pool.GetParents(parent).empty()) return nullptr;
+
+    FeeFrac chunk{child.GetFee(), child.GetTxSize()};
+    const FeeFrac parent_feefrac{parent.GetFee(), parent.GetTxSize()};
+    if (ByRatio{chunk} > ByRatio{parent_feefrac}) chunk += parent_feefrac;
+    if (chunk.fee < filterrate.GetFee(chunk.size)) return nullptr;
+    return &parent;
 }
 
 /** Whether this peer can serve us blocks. */
@@ -2834,6 +2874,53 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     }
 }
 
+void PeerManagerImpl::ProcessGetPkg(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
+{
+    AssertLockNotHeld(cs_main);
+
+    auto tx_relay = peer.GetTxRelay();
+    if (!tx_relay) {
+        peer.m_getpkg_requests.clear();
+        return;
+    }
+
+    std::vector<PkgInv> not_found;
+    auto it{peer.m_getpkg_requests.begin()};
+    while (it != peer.m_getpkg_requests.end()) {
+        if (interruptMsgProc) return;
+        // The send buffer provides backpressure. If there's no space in the buffer, pause
+        // processing until the next call.
+        if (pfrom.fPauseSend) break;
+
+        const PkgInv& pkg{*it++};
+        const auto parent{FindTxForGetData(*tx_relay, pkg.parent)};
+        const auto child{FindTxForGetData(*tx_relay, pkg.child)};
+        if (parent && child) {
+            MakeAndPushMessage(pfrom, NetMsgType::PKGTXNS, TX_WITH_WITNESS(*parent), TX_WITH_WITNESS(*child));
+            m_mempool.RemoveUnbroadcastTx(parent->GetHash());
+            m_mempool.RemoveUnbroadcastTx(child->GetHash());
+            AddKnownTx(peer, pkg.parent.ToUint256());
+            AddKnownTx(peer, pkg.child.ToUint256());
+            continue;
+        }
+        not_found.push_back(pkg);
+
+        // If we announced this package, we did so instead of announcing its transactions on
+        // their own. Announce whichever of them is still in our mempool on its own now (the
+        // child may have been replaced, or the parent confirmed without the child), so that
+        // an unservable package cannot keep it from this peer.
+        LOCK(tx_relay->m_tx_inventory_mutex);
+        if (!tx_relay->m_tx_inventory_known_filter.contains(pkg.GetId())) continue;
+        for (const Wtxid& wtxid : {pkg.parent, pkg.child}) {
+            if (tx_relay->m_pkg_fallback_to_send.size() < node::MAX_PEER_TX_ANNOUNCEMENTS && m_mempool.exists(wtxid)) {
+                tx_relay->m_pkg_fallback_to_send.push_back(wtxid);
+            }
+        }
+    }
+    peer.m_getpkg_requests.erase(peer.m_getpkg_requests.begin(), it);
+    if (!not_found.empty()) MakeAndPushMessage(pfrom, NetMsgType::PKGNOTFOUND, not_found);
+}
+
 uint32_t PeerManagerImpl::GetFetchFlags(const Peer& peer) const
 {
     uint32_t nFetchFlags = 0;
@@ -3483,6 +3570,54 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
 
 // NOTE: the orphan processing used to be uninterruptible and quadratic, which could allow a peer to stall the node for
 // hours with specially crafted transactions. See https://bitcoincore.org/en/2024/07/03/disclose-orphan-dos.
+void PeerManagerImpl::ProcessRelayedPackage(CNode& pfrom, const CTransactionRef& parent, const CTransactionRef& child)
+{
+    AssertLockNotHeld(m_peer_mutex);
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(cs_main);
+    AssertLockHeld(m_tx_download_mutex);
+
+    const PkgInv pkg{parent->GetWitnessHash(), child->GetWitnessHash()};
+    const bool child_spends_parent{std::any_of(child->vin.begin(), child->vin.end(),
+        [&](const CTxIn& txin) { return txin.prevout.hash == parent->GetHash(); })};
+    if (parent->GetHash() == child->GetHash() || !child_spends_parent) {
+        LogDebug(BCLog::TXPACKAGES, "package from peer=%d is not a parent and child: parent %s child %s\n",
+                 pfrom.GetId(), pkg.parent.ToString(), pkg.child.ToString());
+        m_txdownloadman.RelayedPackageRejected(pkg);
+        return;
+    }
+
+    const Package package{parent, child};
+    const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
+    LogDebug(BCLog::TXPACKAGES, "relayed package evaluation for parent %s child %s from peer=%d: %s\n",
+             pkg.parent.ToString(), pkg.child.ToString(), pfrom.GetId(),
+             package_result.m_state.IsValid() ? "package accepted" : package_result.m_state.ToString());
+
+    // Iterate backwards to erase in-package descendants from the orphanage before they become
+    // relevant in AddChildrenToWorkSet.
+    for (auto it{package.rbegin()}; it != package.rend(); ++it) {
+        const auto it_result{package_result.m_tx_results.find((*it)->GetWitnessHash())};
+        if (it_result != package_result.m_tx_results.end()) {
+            const auto& tx_result{it_result->second};
+            if (tx_result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+                ProcessValidTx(pfrom.GetId(), *it, tx_result.m_replaced_transactions);
+                pfrom.m_last_tx_time = GetTime<std::chrono::seconds>();
+                continue;
+            }
+            if (tx_result.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY ||
+                tx_result.m_state.GetResult() == TxValidationResult::TX_WITNESS_STRIPPED) {
+                continue;
+            }
+        }
+        // Not accepted, and unlike the members of packages found through the orphanage, possibly
+        // never seen before: keep it for compact block reconstruction, as ProcessInvalidTx does
+        // for single transactions.
+        if (RecursiveDynamicUsage(**it) < 100000) AddToCompactExtraTransactions(*it);
+    }
+
+    if (!m_mempool.exists(pkg.child)) m_txdownloadman.RelayedPackageRejected(pkg);
+}
+
 bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 {
     AssertLockHeld(g_msgproc_mutex);
@@ -3997,7 +4132,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         if (greatest_common_version >= FEATURE_VERSION) {
             // announce supported features
-            // MakeAndPushFeature(pfrom, NetMsgFeature::FOO, uint32_t{1});
+            if (m_opts.pkgrelay && !RejectIncomingTxs(pfrom)) {
+                MakeAndPushFeature(pfrom, NetMsgFeature::PKGRELAY_1P1C);
+            }
         }
 
         // If we have too many tx-relaying inbound peers, attempt to evict an existing one.
@@ -4136,6 +4273,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             MakeAndPushMessage(pfrom, NetMsgType::SENDCMPCT, /*high_bandwidth=*/false, /*version=*/CMPCTBLOCKS_VERSION);
         }
 
+        if (peer.m_pkgrelay && (!peer.m_wtxid_relay || !peer.GetTxRelay() || RejectIncomingTxs(pfrom))) {
+            // Package relay announces and requests transactions by wtxid only.
+            peer.m_pkgrelay = false;
+        }
+
         if (m_txreconciliation) {
             if (!peer.m_wtxid_relay || !m_txreconciliation->IsPeerRegistered(pfrom.GetId())) {
                 // We could have optimistically pre-registered/registered the peer. In that case,
@@ -4253,10 +4395,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        // if (feature_id == NetMsgFeature::FOO) {
-        //     ...
-        //     return;
-        // }
+        if (feature_id == NetMsgFeature::PKGRELAY_1P1C) {
+            if (m_opts.pkgrelay) peer.m_pkgrelay = true;
+            return;
+        }
 
         // ignore unknown feature_id
         LogDebug(BCLog::NET, "unknown feature advertised: %s", SanitizeString(feature_id));
@@ -5358,6 +5500,85 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         return;
     }
 
+    if (msg_type == NetMsgType::PKGINV) {
+        std::vector<PkgInv> pkgs;
+        vRecv >> pkgs;
+        if (pkgs.size() > MAX_PKGINV_SZ) {
+            Misbehaving(peer, strprintf("pkginv message size = %u", pkgs.size()));
+            return;
+        }
+        if (!peer.m_pkgrelay) {
+            LogDebug(BCLog::NET, "pkginv from peer=%d without package relay, ignoring\n", pfrom.GetId());
+            return;
+        }
+
+        LOCK(m_tx_download_mutex);
+        const auto current_time{GetTime<std::chrono::microseconds>()};
+        for (const PkgInv& pkg : pkgs) {
+            if (pkg.parent == pkg.child) continue;
+            // The peer has both transactions; don't announce them or the package back.
+            AddKnownTx(peer, pkg.parent.ToUint256());
+            AddKnownTx(peer, pkg.child.ToUint256());
+            AddKnownTx(peer, pkg.GetId());
+            if (!m_chainman.IsInitialBlockDownload()) {
+                const bool already_have{m_txdownloadman.AddPackageAnnouncement(pfrom.GetId(), pkg, current_time)};
+                LogDebug(BCLog::NET, "got pkginv: parent %s child %s %s peer=%d\n",
+                         pkg.parent.ToString(), pkg.child.ToString(), already_have ? "have" : "new", pfrom.GetId());
+            }
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETPKG) {
+        std::vector<PkgInv> pkgs;
+        vRecv >> pkgs;
+        if (pkgs.size() > MAX_GETPKG_SZ) {
+            Misbehaving(peer, strprintf("getpkg message size = %u", pkgs.size()));
+            return;
+        }
+        if (!peer.m_pkgrelay || !peer.GetTxRelay()) return;
+
+        LOCK(peer.m_getdata_requests_mutex);
+        peer.m_getpkg_requests.insert(peer.m_getpkg_requests.end(), pkgs.begin(), pkgs.end());
+        ProcessGetPkg(pfrom, peer, interruptMsgProc);
+        return;
+    }
+
+    if (msg_type == NetMsgType::PKGTXNS) {
+        if (RejectIncomingTxs(pfrom)) {
+            LogDebug(BCLog::NET, "package sent in violation of protocol, %s", pfrom.DisconnectMsg());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (!peer.m_pkgrelay) return;
+        if (m_chainman.IsInitialBlockDownload()) return;
+
+        CTransactionRef parent;
+        CTransactionRef child;
+        vRecv >> TX_WITH_WITNESS(parent) >> TX_WITH_WITNESS(child);
+        const PkgInv pkg{parent->GetWitnessHash(), child->GetWitnessHash()};
+        AddKnownTx(peer, pkg.parent.ToUint256());
+        AddKnownTx(peer, pkg.child.ToUint256());
+
+        LOCK2(cs_main, m_tx_download_mutex);
+        if (!m_txdownloadman.ReceivedPackage(pfrom.GetId(), pkg)) {
+            LogDebug(BCLog::TXPACKAGES, "ignoring package parent %s child %s from peer=%d\n",
+                     pkg.parent.ToString(), pkg.child.ToString(), pfrom.GetId());
+            return;
+        }
+        ProcessRelayedPackage(pfrom, parent, child);
+        return;
+    }
+
+    if (msg_type == NetMsgType::PKGNOTFOUND) {
+        std::vector<PkgInv> pkgs;
+        vRecv >> pkgs;
+        if (pkgs.size() > MAX_GETPKG_SZ || !peer.m_pkgrelay) return;
+        LOCK(m_tx_download_mutex);
+        m_txdownloadman.ReceivedPackageNotFound(pfrom.GetId(), pkgs);
+        return;
+    }
+
     // Ignore unknown message types for extensibility
     LogDebug(BCLog::NET, "Unknown message type \"%s\" from peer=%d", SanitizeString(msg_type), pfrom.GetId());
     return;
@@ -5436,6 +5657,9 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         if (!peer.m_getdata_requests.empty()) {
             ProcessGetData(node, peer, interruptMsgProc);
         }
+        if (!peer.m_getpkg_requests.empty()) {
+            ProcessGetPkg(node, peer, interruptMsgProc);
+        }
     }
 
     const bool processed_orphan = ProcessOrphanTx(peer);
@@ -5449,7 +5673,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     // and prevents m_getdata_requests to grow unbounded
     {
         LOCK(peer.m_getdata_requests_mutex);
-        if (!peer.m_getdata_requests.empty()) return true;
+        if (!peer.m_getdata_requests.empty() || !peer.m_getpkg_requests.empty()) return true;
     }
 
     // Don't bother if send buffer is too full to respond anyway
@@ -6301,6 +6525,7 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         // Message: inventory
         //
         std::vector<CInv> vInv;
+        std::vector<PkgInv> vPkgInv;
         {
             LOCK(peer.m_block_inv_mutex);
             vInv.reserve(peer.m_blocks_for_inv_relay.size());
@@ -6332,7 +6557,10 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 // Time to send but the peer has requested we not relay transactions.
                 if (fSendTrickle) {
                     LOCK(tx_relay->m_bloom_filter_mutex);
-                    if (!tx_relay->m_relay_txs) tx_relay->m_tx_inventory_to_send.clear();
+                    if (!tx_relay->m_relay_txs) {
+                        tx_relay->m_tx_inventory_to_send.clear();
+                        tx_relay->m_pkg_fallback_to_send.clear();
+                    }
                 }
 
                 // Respond to BIP35 mempool requests
@@ -6378,12 +6606,14 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     // Topologically and fee-rate sort the inventory we send for privacy and priority reasons.
                     // (sorted from higher priority to lowest, skipping low fee)
                     const CFeeRate filterrate{tx_relay->m_fee_filter_received.load()};
+                    const bool pkgrelay{peer.m_pkgrelay && WITH_LOCK(tx_relay->m_bloom_filter_mutex, return !tx_relay->m_bloom_filter)};
+                    std::vector<PkgInv> pkgs_to_announce;
 
                     auto inv_tx = [&]() EXCLUSIVE_LOCKS_REQUIRED(tx_relay->m_tx_inventory_mutex) {
                         auto& invs = tx_relay->m_tx_inventory_to_send;
                         std::vector<CTransactionRef> res;
 
-                        if (invs.size() == 0) return res;
+                        if (invs.empty() && tx_relay->m_pkg_fallback_to_send.empty()) return res;
 
                         // if previous allocations were excessive, shrink to the current size
                         if (invs.capacity() > 2 * invs.size()) invs.shrink_to_fit();
@@ -6391,12 +6621,32 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         LOCK(m_mempool.cs);
                         auto txiters = m_mempool.ExtractBestByMiningScoreWithTopology(invs, invs.size());
                         res.reserve(txiters.size());
+                        // Parents announced in a package below, not to be announced on their own.
+                        std::set<Wtxid> paired_parents;
                         for (auto txiter : txiters) {
+                            if (pkgrelay) {
+                                if (const auto* parent{GetPackageRelayParent(m_mempool, *txiter, filterrate)}) {
+                                    const Wtxid& child_wtxid{txiter->GetTx().GetWitnessHash()};
+                                    if (!tx_relay->m_tx_inventory_known_filter.contains(child_wtxid.ToUint256())) {
+                                        pkgs_to_announce.push_back({parent->GetTx().GetWitnessHash(), child_wtxid});
+                                        paired_parents.insert(parent->GetTx().GetWitnessHash());
+                                    }
+                                    continue;
+                                }
+                            }
                             if (txiter->GetFee() < filterrate.GetFee(txiter->GetTxSize())) {
                                 continue; // higher feerate CPFP txs may follow, so just skip, don't stop
                             }
                             res.push_back(txiter->GetSharedTx());
                         }
+                        std::erase_if(res, [&](const auto& tx) { return paired_parents.contains(tx->GetWitnessHash()); });
+                        // Not paired again: their package could not be served to this peer.
+                        for (const Wtxid& wtxid : tx_relay->m_pkg_fallback_to_send) {
+                            const auto txiter{m_mempool.GetIter(wtxid)};
+                            if (!txiter || (*txiter)->GetFee() < filterrate.GetFee((*txiter)->GetTxSize())) continue;
+                            res.push_back((*txiter)->GetSharedTx());
+                        }
+                        tx_relay->m_pkg_fallback_to_send.clear();
                         // Ensure we'll respond to GETDATA requests for anything we're about to announce
                         tx_relay->m_last_inv_sequence = m_mempool.GetSequence();
                         return res;
@@ -6424,10 +6674,24 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                         }
                         tx_relay->m_tx_inventory_known_filter.insert(inv.hash);
                     }
+
+                    // Neither transaction is marked known here, so that whichever one we fail to
+                    // serve in the package can still be announced on its own. The package id records
+                    // that we announced the package (see GETPKG).
+                    for (const PkgInv& pkg : pkgs_to_announce) {
+                        vPkgInv.push_back(pkg);
+                        tx_relay->m_tx_inventory_known_filter.insert(pkg.GetId());
+                        if (vPkgInv.size() == MAX_PKGINV_SZ) {
+                            MakeAndPushMessage(node, NetMsgType::PKGINV, vPkgInv);
+                            vPkgInv.clear();
+                        }
+                    }
                 }
         }
         if (!vInv.empty())
             MakeAndPushMessage(node, NetMsgType::INV, vInv);
+        if (!vPkgInv.empty())
+            MakeAndPushMessage(node, NetMsgType::PKGINV, vPkgInv);
 
         // Detect whether we're stalling
         auto stalling_timeout = m_block_stalling_timeout.load();
@@ -6576,6 +6840,17 @@ bool PeerManagerImpl::SendMessages(CNode& node)
 
         if (!vGetData.empty())
             MakeAndPushMessage(node, NetMsgType::GETDATA, vGetData);
+
+        //
+        // Message: getpkg
+        //
+        if (peer.m_pkgrelay) {
+            std::vector<PkgInv> pkg_requests{WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetPackageRequestsToSend(node.GetId(), current_time))};
+            for (size_t i{0}; i < pkg_requests.size(); i += MAX_GETPKG_SZ) {
+                const auto end{pkg_requests.begin() + std::min<size_t>(i + MAX_GETPKG_SZ, pkg_requests.size())};
+                MakeAndPushMessage(node, NetMsgType::GETPKG, std::vector<PkgInv>(pkg_requests.begin() + i, end));
+            }
+        }
     } // release cs_main
     MaybeSendFeefilter(node, peer, current_time);
     return true;

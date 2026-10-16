@@ -6,6 +6,7 @@
 #include <protocol.h>
 
 #include <common/system.h>
+#include <hash.h>
 
 CMessageHeader::CMessageHeader(const MessageStartChars& pchMessageStartIn, const char* msg_type, unsigned int nMessageSizeIn)
     : pchMessageStart{pchMessageStartIn}
@@ -122,4 +123,10 @@ GenTxid ToGenTxid(const CInv& inv)
 {
     assert(inv.IsGenTxMsg());
     return inv.IsMsgWtx() ? GenTxid{Wtxid::FromUint256(inv.hash)} : GenTxid{Txid::FromUint256(inv.hash)};
+}
+
+uint256 PkgInv::GetId() const
+{
+    static const HashWriter HASHER{TaggedHash("PkgRelay1p1c")};
+    return (HashWriter{HASHER} << parent << child).GetSHA256();
 }

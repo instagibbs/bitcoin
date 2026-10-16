@@ -6,6 +6,7 @@
 #include <consensus/validation.h>
 #include <net_processing.h>
 #include <node/txdownloadman_impl.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <test/util/common.h>
@@ -334,6 +335,123 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
                                                 /*expect_orphan=*/true, /*expect_keep=*/true, /*expected_parents=*/1);
             BOOST_CHECK_MESSAGE(ok, err_msg);
         }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(package_relay_requests, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    const node::TxDownloadOptions opts{.m_mempool = pool, .m_deterministic_txrequest = true};
+    const node::TxDownloadConnectionInfo inbound{/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
+    const node::TxDownloadConnectionInfo outbound{/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
+    const auto parent{CreatePlaceholderTx(/*segwit=*/true)};
+    const auto child{CreatePlaceholderTx(/*segwit=*/true)};
+    const PkgInv pkg{parent->GetWitnessHash(), child->GetWitnessHash()};
+    const PkgInv reversed{pkg.child, pkg.parent};
+    auto now{GetTime<std::chrono::microseconds>()};
+
+    // A package's id depends on which transaction is the parent.
+    BOOST_CHECK(pkg.GetId() != reversed.GetId());
+
+    const auto requests_to{[&](node::TxDownloadManagerImpl& txdownload, NodeId peer) {
+        const auto requests{txdownload.GetPackageRequestsToSend(peer, now)};
+        BOOST_CHECK(requests.empty() || (requests.size() == 1 && requests[0].GetId() == pkg.GetId()));
+        return requests.size();
+    }};
+
+    {
+        // One request at a time; the next announcer is asked after a timeout or a notfound, and only
+        // an announcer that was not done with can deliver the package.
+        node::TxDownloadManagerImpl txdownload{opts};
+        for (NodeId peer : {0, 1}) txdownload.ConnectedPeer(peer, inbound);
+        txdownload.ConnectedPeer(2, outbound);
+
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 0);
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 1);
+
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(2, pkg, now));
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 2), 0);
+        now += node::GETDATA_TX_INTERVAL;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1), 0);
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 2), 1);
+
+        txdownload.ReceivedPackageNotFound(2, {pkg});
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1), 1);
+
+        BOOST_CHECK(!txdownload.ReceivedPackage(0, pkg));
+        BOOST_CHECK(!txdownload.ReceivedPackage(2, pkg));
+        BOOST_CHECK(!txdownload.ReceivedPackage(3, pkg));
+        BOOST_CHECK(txdownload.ReceivedPackage(1, pkg));
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 0);
+        BOOST_CHECK(txdownload.m_packages.empty());
+    }
+
+    {
+        // Per-transaction state, including the transactions' own requests, does not affect requests
+        // for the package.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        for (const auto& tx : {parent, child}) {
+            txdownload.RecentRejectsFilter().insert(tx->GetHash().ToUint256());
+            txdownload.RecentRejectsFilter().insert(tx->GetWitnessHash().ToUint256());
+            txdownload.RecentRejectsReconsiderableFilter().insert(tx->GetWitnessHash().ToUint256());
+            txdownload.m_txrequest.ReceivedInv(0, tx->GetWitnessHash(), /*preferred=*/false, now);
+        }
+        txdownload.m_orphanage->AddTx(child, 0);
+
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 1);
+
+        TxValidationState state;
+        state.Invalid(TxValidationResult::TX_CONSENSUS, "");
+        txdownload.MempoolRejectedTx(child, state, 0, /*first_time_failure=*/true);
+        txdownload.MempoolRejectedTx(parent, state, 0, /*first_time_failure=*/true);
+        txdownload.ReceivedNotFound(0, {parent->GetWitnessHash(), child->GetWitnessHash()});
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(0), 1);
+        BOOST_CHECK(txdownload.ReceivedPackage(0, pkg));
+    }
+
+    {
+        // A rejected package is not requested again until the tip changes.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        txdownload.RelayedPackageRejected(pkg);
+        BOOST_CHECK(txdownload.AddPackageAnnouncement(0, pkg, now));
+        BOOST_CHECK(!txdownload.AlreadyHavePackage(reversed));
+        txdownload.ActiveTipChange();
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+
+        // A package is dropped at request time once its child is confirmed.
+        CBlock block;
+        block.vtx = {child};
+        txdownload.BlockConnected(std::make_shared<const CBlock>(block));
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 0);
+        BOOST_CHECK(txdownload.AddPackageAnnouncement(0, pkg, now));
+    }
+
+    {
+        // Announcements are capped per peer, and their bookkeeping goes away with them.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        txdownload.ConnectedPeer(1, inbound);
+        std::vector<PkgInv> pkgs;
+        for (int i{0}; i <= node::MAX_PEER_TX_ANNOUNCEMENTS; ++i) {
+            pkgs.push_back({Wtxid::FromUint256(m_rng.rand256()), Wtxid::FromUint256(m_rng.rand256())});
+            txdownload.AddPackageAnnouncement(0, pkgs.back(), now);
+        }
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Count(0), node::MAX_PEER_TX_ANNOUNCEMENTS);
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        txdownload.ReceivedPackageNotFound(0, pkgs);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 1);
+        BOOST_CHECK_LE(txdownload.m_packages.size(), 2 * txdownload.m_pkgrequest.Size() + 100);
+        txdownload.DisconnectedPeer(0);
+        txdownload.DisconnectedPeer(1);
+        txdownload.CheckIsEmpty();
     }
 }
 

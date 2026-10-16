@@ -1960,6 +1960,86 @@ class msg_feature:
         return f"msg_feature(feature_id={self.feature_id}, data={self.feature_data.hex()})"
 
 
+PKGRELAY_1P1C_FEATURE = "pkgrelay-1p1c"
+
+
+class PkgInv:
+    """A 1-parent-1-child package by the wtxids of its transactions (pkginv, getpkg, pkgnotfound entry)."""
+    __slots__ = ("parent", "child")
+
+    def __init__(self, parent=0, child=0):
+        self.parent = parent
+        self.child = child
+
+    def deserialize(self, f):
+        self.parent = deser_uint256(f)
+        self.child = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.parent) + ser_uint256(self.child)
+
+    def __eq__(self, other):
+        return isinstance(other, PkgInv) and self.parent == other.parent and self.child == other.child
+
+    def __hash__(self):
+        return hash((self.parent, self.child))
+
+    def __repr__(self):
+        return f"PkgInv(parent={self.parent:064x}, child={self.child:064x})"
+
+
+class msg_pkginv:
+    __slots__ = ("pkgs",)
+    msgtype = b"pkginv"
+
+    def __init__(self, pkgs=None):
+        self.pkgs = pkgs if pkgs is not None else []
+
+    def deserialize(self, f):
+        self.pkgs = deser_vector(f, PkgInv)
+
+    def serialize(self):
+        return ser_vector(self.pkgs)
+
+    def __repr__(self):
+        return f"msg_pkginv(pkgs={self.pkgs!r})"
+
+
+class msg_getpkg(msg_pkginv):
+    __slots__ = ()
+    msgtype = b"getpkg"
+
+    def __repr__(self):
+        return f"msg_getpkg(pkgs={self.pkgs!r})"
+
+
+class msg_pkgnotfound(msg_pkginv):
+    __slots__ = ()
+    msgtype = b"pkgnotfound"
+
+    def __repr__(self):
+        return f"msg_pkgnotfound(pkgs={self.pkgs!r})"
+
+
+class msg_pkgtxns:
+    __slots__ = ("parent", "child")
+    msgtype = b"pkgtxns"
+
+    def __init__(self, parent=None, child=None):
+        self.parent = parent if parent is not None else CTransaction()
+        self.child = child if child is not None else CTransaction()
+
+    def deserialize(self, f):
+        self.parent.deserialize(f)
+        self.child.deserialize(f)
+
+    def serialize(self):
+        return self.parent.serialize_with_witness() + self.child.serialize_with_witness()
+
+    def __repr__(self):
+        return f"msg_pkgtxns(parent={self.parent!r}, child={self.child!r})"
+
+
 class TestFrameworkScript(unittest.TestCase):
     def test_addrv2_encode_decode(self):
         def check_addrv2(ip, net):

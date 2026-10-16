@@ -3469,8 +3469,9 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
                 }
                 case MempoolAcceptResult::ResultType::MEMPOOL_ENTRY:
                 {
-                    // AlreadyHaveTx() should be catching transactions that are already in mempool.
-                    Assume(false);
+                    // An orphan can be in the mempool if it got there other than through peer
+                    // relay (e.g. by RPC), as nothing removes it from the orphanage then.
+                    m_txdownloadman.MempoolAcceptedTx(tx);
                     break;
                 }
             }

@@ -7,11 +7,12 @@ private broadcast jobs inside the node.
 
 The node reaches the network only through its Tor SOCKS5 proxy; here that is the framework's
 SOCKS5 server, which answers RESOLVE for the test seed name from a fixed script and redirects
-CONNECT requests to Python recipients or to a second bitcoind. The first job's recipients,
-schedule and summary are checked with the shared functions of test_framework/privbcast.py. This
-test covers the node side: queueing,
-concurrency, the RPCs, abort, the report, and that the node's own mempool only learns the
-transaction from the network.
+CONNECT requests to Python recipients or to a second bitcoind. A job's wire behaviour, schedule
+and handling of the proxy are covered in real time by p2p_private_broadcast_job.py,
+p2p_private_broadcast_peers.py and p2p_private_broadcast_proxy.py; here the first job's
+recipients, schedule and summary are only checked with the same functions of
+test_framework/privbcast.py. This test covers the node side: queueing, concurrency, the RPCs,
+abort, the report, and that the node's own mempool only learns the transaction from the network.
 
 The clock is mocked on both nodes: setmocktime moves a job's schedule (a job runs on the node's
 clock) together with the recipient's own timers (its request delays, its INV trickle). A job is
@@ -45,6 +46,7 @@ from test_framework.privbcast import (
     drain_socks_commands,
     query_sets,
 )
+from test_framework.script_util import build_malleated_tx_package
 from test_framework.socks5 import Command, start_socks5_server
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -61,8 +63,10 @@ from test_framework.wallet import MiniWallet
 # test_framework/privbcast.py.
 PROMPT_SLOTS = 3  # the slots whose first opportunity opens at delivery start
 SCHEDULED_BOUND_S = 562  # a job has ended by this long after it started: its last slot has ended
-# A queued job starts at most this long after the previous start.
+# A queued job starts this long after the previous start, drawn.
+START_SPACING_MIN_S = 35
 START_SPACING_MAX_S = 55
+MAX_FINISHED_JOBS = 100
 
 
 class P2PPrivateBroadcast(BitcoinTestFramework):
@@ -238,7 +242,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.mocktime = int(time.time())
         self.advance(0)
         self.wallet = MiniWallet(self.nodes[0])
-        self.generate(self.wallet, 260)  # mature coins for every section
+        self.generate(self.wallet, 260)  # enough mature coins for the retention section
 
         self.log.info("The RPCs are unavailable without -privatebroadcast")
         assert_raises_rpc_error(-32601, None, self.nodes[1].getprivatebroadcastinfo)
@@ -277,27 +281,91 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         check_schedule(report, divisor=1, tolerance_ms=0)
         check_summary(report)
 
-        self.log.info("Running and queued jobs can be aborted")
-        txs = [self.wallet.create_self_transfer() for _ in range(2)]
+        self.log.info("Queued jobs start a drawn spacing after the previous start, whatever has ended; queued and running jobs can be aborted")
+        txs = [self.wallet.create_self_transfer() for _ in range(3)]
         w = [t["wtxid"] for t in txs]
         for t in txs:
             self.nodes[0].sendrawtransaction(t["hex"])
         self.wait_for_state(w[0], "running")
-        assert_equal(self.jobs()[w[1]]["state"], "queued")
-        # Aborting a running job, here by txid, ends it early with a report of what it did.
+        assert_equal([self.jobs()[i]["state"] for i in w[1:]], ["queued", "queued"])
+        # Aborting a running job, here by txid, ends it early with a report of what it did, and does
+        # not start the next one.
+        started = self.jobs()[w[0]]["time_started"]
         res = self.nodes[0].abortprivatebroadcast(txs[0]["txid"])
         assert_equal([(r["wtxid"], r["hex"], r["state"]) for r in res["removed_transactions"]], [(w[0], txs[0]["hex"], "running")])
         job = self.wait_for_state(w[0], "aborted", timeout=30)
         assert_equal(job["report"]["summary"]["interrupted"], True)
         assert_equal(job["announced"], False)  # stopped before delivery start: no INV written
         never_announced = txs[0]
-        # A queued job aborted before it runs, here by wtxid, ends with no report.
-        res = self.nodes[0].abortprivatebroadcast(w[1])
-        assert_equal([(r["txid"], r["state"]) for r in res["removed_transactions"]], [(txs[1]["txid"], "aborted")])
-        assert "report" not in self.jobs()[w[1]]
-        assert_raises_rpc_error(-5, None, self.nodes[0].abortprivatebroadcast, w[1])
-        assert_raises_rpc_error(-5, None, self.nodes[0].abortprivatebroadcast, "00" * 32)
+        # Just short of the minimum spacing the next job still waits, however long the node has had to
+        # notice the clock: it must within a second.
+        self.advance(started + START_SPACING_MIN_S - 1 - self.mocktime)
+        time.sleep(2)
+        assert_equal(self.jobs()[w[1]]["state"], "queued")
+        # Once the spacing has passed the next job starts, and the one after it starts while it still runs.
         self.open_gate()
+        self.wait_for_state(w[1], "running")
+        self.open_gate()
+        self.wait_for_state(w[2], "running")
+        assert_equal(self.jobs()[w[1]]["state"], "running")
+        # A queued job aborted before it runs, here by wtxid, ends with no report.
+        extra = self.wallet.create_self_transfer()
+        self.nodes[0].sendrawtransaction(extra["hex"])
+        assert_equal(self.jobs()[extra["wtxid"]]["state"], "queued")
+        # A transaction whose job is still queued or running is not queued again.
+        before = len(self.entries())
+        for t in (txs[1], txs[2], extra):
+            assert_equal(self.nodes[0].sendrawtransaction(t["hex"]), t["txid"])
+        assert_equal(len(self.entries()), before)
+        res = self.nodes[0].abortprivatebroadcast(extra["wtxid"])
+        assert_equal([(r["txid"], r["state"]) for r in res["removed_transactions"]], [(extra["txid"], "aborted")])
+        assert "report" not in self.jobs()[extra["wtxid"]]
+        assert_raises_rpc_error(-5, None, self.nodes[0].abortprivatebroadcast, extra["wtxid"])
+        assert_raises_rpc_error(-5, None, self.nodes[0].abortprivatebroadcast, "00" * 32)
+        # Once its job has finished, the same transaction may be queued again as a new job.
+        assert_equal(self.nodes[0].sendrawtransaction(extra["hex"]), extra["txid"])
+        assert_equal(len(self.entries()), before + 1)
+        assert_equal(self.jobs()[extra["wtxid"]]["state"], "queued")
+        self.end_jobs(w[1:])
+        self.finish([extra["wtxid"]])
+
+        self.log.info("A transaction whose running job is being aborted can be queued again at once")
+        t = self.wallet.create_self_transfer()
+        self.nodes[0].sendrawtransaction(t["hex"])
+        self.wait_for_state(t["wtxid"], "running")
+        self.nodes[0].abortprivatebroadcast(t["wtxid"])
+        self.nodes[0].sendrawtransaction(t["hex"])
+        runs = [j for j in self.entries() if j["wtxid"] == t["wtxid"]]
+        assert_equal([j["state"] for j in runs][-1], "queued")
+        assert_equal(len(runs), 2)
+        self.wait_until(lambda: [j["state"] for j in self.entries() if j["wtxid"] == t["wtxid"]] == ["aborted", "queued"])
+        self.nodes[0].abortprivatebroadcast(t["wtxid"])
+        self.open_gate()
+
+        self.log.info("A clock that steps back holds the queue for a spacing from the step, not until it catches up")
+        txs = [self.wallet.create_self_transfer() for _ in range(2)]
+        w = [t["wtxid"] for t in txs]
+        for t in txs:
+            self.nodes[0].sendrawtransaction(t["hex"])
+        self.wait_for_state(w[0], "running")
+        assert_equal(self.jobs()[w[1]]["state"], "queued")
+        # Only node0's clock moves back, then ticks until the next job starts; end_jobs then puts both
+        # nodes' clocks in step again. The node notices the step within a few ticks, and the next start
+        # comes a spacing after that.
+        back = self.mocktime - 3600
+        clock = back
+
+        def tick():
+            nonlocal clock
+            if self.jobs()[w[1]]["state"] == "running":
+                return True
+            self.nodes[0].setmocktime(clock)
+            clock += 1
+            return False
+        self.wait_until(tick)
+        started = self.jobs()[w[1]]["time_started"]
+        assert back + START_SPACING_MIN_S <= started <= back + 2 * START_SPACING_MAX_S, started - back
+        self.end_jobs(w)
 
         self.log.info("Receipt from the network while a job runs is recorded, and does not stop the job")
         # N7. This job announces to the Python recipients only, so node1 still lacks the transaction when it
@@ -361,6 +429,22 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.nodes[0].disconnect_p2ps()
         self.open_gate()
 
+        self.log.info("The txid reaching the mempool with another witness after submission is seen too")
+        funding = self.wallet.create_self_transfer()["tx"]
+        amount = funding.vout[0].nValue - 10000
+        funding, submitted, relayed = build_malleated_tx_package(parent=funding, rebalance_parent_output_amount=amount, child_amount=amount - 10000)
+        self.wallet.sendrawtransaction(from_node=self.nodes[1], tx_hex=funding.serialize().hex())
+        self.generate(self.nodes[1], 1, sync_fun=self.sync_blocks)
+        assert_equal(submitted.txid_hex, relayed.txid_hex)
+        job_id = self.jobs_after_submit(submitted.serialize().hex())
+        assert "seen_in_mempool" not in self.jobs()[job_id]
+        self.nodes[1].sendrawtransaction(relayed.serialize().hex())
+        self.tick_until(lambda: relayed.txid_hex in self.nodes[0].getrawmempool())
+        self.wait_until(lambda: "seen_in_mempool" in self.jobs()[job_id])
+        self.nodes[0].abortprivatebroadcast(job_id)
+        self.wait_for_state(job_id, "aborted")
+        self.open_gate()
+
         self.log.info("Disabling networking aborts running and queued jobs for good; re-enabling admits new ones")
         txs = [self.wallet.create_self_transfer() for _ in range(3)]
         ids = [self.jobs_after_submit(t["hex"]) for t in txs]
@@ -398,6 +482,25 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
             txid = w.sendtoaddress(address=w.getnewaddress(), amount=Decimal("0.001"), fee_rate=10)
             assert txid in self.nodes[0].getrawmempool()
             assert_equal(set(self.jobs()), before)
+
+        self.log.info("Finished jobs are retained up to a bound, oldest dropped first")
+        txs = [self.wallet.create_self_transfer() for _ in range(MAX_FINISHED_JOBS + 2)]
+        for t in txs:
+            self.nodes[0].sendrawtransaction(t["hex"])
+        self.wait_for_state(txs[0]["wtxid"], "running")
+        entries = self.entries()
+        states = [j["state"] for j in entries]
+        assert_equal(states.count("running"), 1)
+        assert_equal(states.count("queued"), MAX_FINISHED_JOBS + 1)
+        latest = {j["wtxid"]: j for j in entries}
+        running = [t["wtxid"] for t in txs if latest[t["wtxid"]]["state"] == "running"]
+        for t in txs:
+            if t["wtxid"] not in running:
+                self.nodes[0].abortprivatebroadcast(t["wtxid"])
+        entries = self.entries()
+        assert first not in {j["wtxid"] for j in entries}  # the first job's report has been trimmed
+        assert_equal(len(entries), MAX_FINISHED_JOBS + 1)
+        self.finish(running)
 
         self.log.info("Every connection and every query set had credentials of its own, with -proxyrandomize=0")
         # B2, U2.

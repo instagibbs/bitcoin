@@ -111,6 +111,7 @@ public:
     Report TakeReport();
     /** As of the last Step(). */
     Progress Snapshot() const { return m_progress; }
+    const Plan& GetPlan() const { return m_plan; }
 
 private:
     /** A dialled opportunity. */

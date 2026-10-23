@@ -433,9 +433,13 @@ class Socks5Server():
                 else:
                     logger.warning(f"Stop(): Handler thread {i} didn't finish after force close")
 
-def start_socks5_server(destinations_factory, resolve_factory=None, connect_reply_delay=0, resolve_reply_delay=0, auth=True, tor=True):
+def start_socks5_server(destinations_factory, resolve_factory=None, connect_reply_delay=0, resolve_reply_delay=0, auth=True, tor=True, unix_path=None):
     config = Socks5Configuration()
-    config.addr = ("127.0.0.1", 0) # Use port=0 to let the OS pick one. The actual port is later in server.conf.addr[1].
+    if unix_path is None:
+        config.addr = ("127.0.0.1", 0) # Use port=0 to let the OS pick one. The actual port is later in server.conf.addr[1].
+    else:
+        config.af = socket.AF_UNIX
+        config.addr = unix_path
     config.unauth = True
     config.auth = auth
     config.destinations_factory = destinations_factory

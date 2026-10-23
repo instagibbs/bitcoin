@@ -36,6 +36,7 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than,
     assert_greater_than_or_equal,
+    p2p_port,
 )
 from test_framework.v2_p2p import EncryptedP2PState
 from test_framework.wallet import MiniWallet
@@ -54,10 +55,14 @@ TIME_DIVISOR = 10  # scaled budgets (4.5 s handshake, 7.5 s request window, 1 s 
 PRIVATE_VERSION = 70016
 PRIVATE_USER_AGENT = "/pynode:0.0.1/"
 REGTEST_PORT = 18444
+SLOTS = 6
 SLOT_TABLE = [(0, "prompt"), (1, "prompt"), (2, "prompt"), (3, "mid"), (4, "late"), (5, "late")]  # (slot, stratum)
 OPPORTUNITIES_PER_SLOT = 4
 DISCOVERY_WINDOW_S = 12
+START_GRACE_S = 5
 HANDSHAKE_TIMEOUT_S = 45
+REQUEST_WINDOW_S = 75
+PONG_WAIT_S = 10
 BACKUP_MIN_S, BACKUP_MAX_S = 50, 60
 MID_MIN_S, MID_MAX_S = 35, 180
 LATE_MIN_S, LATE_MAX_S = 185, 240
@@ -229,14 +234,21 @@ class PrivbcastJobTest(BitcoinTestFramework):
         # nodes[1] has the chain, and from here on hears of a transaction only from a job.
         self.disconnect_nodes(0, 1)
 
-    def start_proxy(self, resolve_script, behaviours, proxy_authenticates=True, tor=True, time_divisor=TIME_DIVISOR):
+    def start_proxy(self, resolve_script, behaviours, node_endpoints=(), connect_delay=0, resolve_delay=0, proxy_authenticates=True, tor=True,
+                    time_divisor=TIME_DIVISOR, unix_path=None):
         """Start a SOCKS5 server, and restart nodes[0] to run its jobs through it, on the seeds of resolve_script.
         resolve_script: seed name -> list of answers, cycled per query.
         behaviours: endpoint address string -> (listener class, supports_v2).
+        node_endpoints: endpoint address strings redirected to nodes[1].
+        connect_delay: seconds the proxy stalls before answering any CONNECT (Tor building a circuit).
+        resolve_delay: seconds the proxy stalls before answering any RESOLVE (a slow resolver), or a dict of
+        seed name -> seconds, to stall only the RESOLVEs of those names.
         proxy_authenticates: if False the proxy lacks username and password authentication, the only method
         a job offers, and answers "no acceptable method" (0xFF).
         tor: if False the proxy is an ordinary SOCKS5 proxy: no RESOLVE, no .onion.
-        time_divisor: nodes[0]'s -privatebroadcasttimedivisor."""
+        time_divisor: nodes[0]'s -privatebroadcasttimedivisor.
+        unix_path: if set, the proxy listens on this unix socket path instead of TCP, and nodes[0] reaches it as
+        -onion=unix:<path>."""
         self.listeners = {}
         self.listeners_lock = threading.Lock()
         self.connects = {}
@@ -246,6 +258,9 @@ class PrivbcastJobTest(BitcoinTestFramework):
             with self.listeners_lock:
                 n = self.resolve_counts.get(name, 0)
                 self.resolve_counts[name] = n + 1
+            # Stopping the server ends a stall, as it ends the server's own.
+            if isinstance(resolve_delay, dict) and self.socks5_server.stopping.wait(resolve_delay.get(name, 0)):
+                return None
             answers = resolve_script.get(name)
             if not answers:
                 return None
@@ -254,6 +269,8 @@ class PrivbcastJobTest(BitcoinTestFramework):
         def destinations_factory(requested_to_addr, requested_to_port, proxy_client):
             with self.listeners_lock:
                 self.connects[requested_to_addr] = self.connects.get(requested_to_addr, 0) + 1
+                if requested_to_addr in node_endpoints:
+                    return {"actual_to_addr": "127.0.0.1", "actual_to_port": p2p_port(1)}
                 if requested_to_addr not in behaviours:
                     self.log.debug(f"unexpected connect to {format_addr_port(requested_to_addr, requested_to_port)}")
                     return None
@@ -273,10 +290,13 @@ class PrivbcastJobTest(BitcoinTestFramework):
                 _, addr, port = self.listeners[requested_to_addr]
                 return {"actual_to_addr": addr, "actual_to_port": port}
 
-        self.socks5_server = start_socks5_server(destinations_factory, resolve_factory, auth=proxy_authenticates, tor=tor)
+        self.socks5_server = start_socks5_server(destinations_factory, resolve_factory, connect_reply_delay=connect_delay,
+                                                 resolve_reply_delay=0 if isinstance(resolve_delay, dict) else resolve_delay,
+                                                 auth=proxy_authenticates, tor=tor, unix_path=unix_path)
+        proxy = f"unix:{unix_path}" if unix_path is not None else f"127.0.0.1:{self.socks5_server.conf.addr[1]}"
         self.restart_node(0, extra_args=[
             "-privatebroadcast",
-            f"-onion=127.0.0.1:{self.socks5_server.conf.addr[1]}",
+            f"-onion={proxy}",
             *[f"-privatebroadcastseed={name}" for name in resolve_script],
             f"-privatebroadcasttimedivisor={time_divisor}",
             "-v2transport=1",
@@ -307,6 +327,11 @@ class PrivbcastJobTest(BitcoinTestFramework):
     def run_job(self, tx):
         """Run a job to its end; returns the job and its report."""
         return self.finish_job(self.start_job(tx))
+
+    def abort_job(self, wtxid):
+        """Abort a running job, as a user would."""
+        removed = self.nodes[0].abortprivatebroadcast(wtxid)["removed_transactions"]
+        assert_equal([r["state"] for r in removed], ["running"])
 
     @staticmethod
     def attempts(report):

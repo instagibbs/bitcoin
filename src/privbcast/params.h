@@ -137,6 +137,7 @@ public:
         Assume(m_divisor == divisor);
     }
 
+    int Divisor() const { return m_divisor; }
     /** The duration under this timing, at millisecond resolution. */
     std::chrono::milliseconds Scale(std::chrono::milliseconds duration) const { return duration / m_divisor; }
 

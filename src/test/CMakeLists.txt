@@ -84,8 +84,10 @@ add_executable(test_bitcoin
   pow_tests.cpp
   prevector_tests.cpp
   privbcast_assign_tests.cpp
+  privbcast_attempt_tests.cpp
   privbcast_plan_tests.cpp
   privbcast_queue_tests.cpp
+  privbcast_socks5_tests.cpp
   psbt_tests.cpp
   random_tests.cpp
   rbf_tests.cpp

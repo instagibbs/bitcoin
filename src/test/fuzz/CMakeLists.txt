@@ -96,6 +96,9 @@ add_executable(fuzz
   prevector.cpp
   primitives_transaction.cpp
   privbcast_attempt.cpp
+  privbcast_discovery.cpp
+  privbcast_queue.cpp
+  privbcast_socks5.cpp
   process_message.cpp
   process_messages.cpp
   protocol.cpp

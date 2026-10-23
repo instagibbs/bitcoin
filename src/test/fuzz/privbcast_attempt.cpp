@@ -52,6 +52,14 @@ void initialize_privbcast_attempt()
     g_tx = MakeTx();
 }
 
+/** Whether the attempt acts on messages of this type in some state (E2, E5, E6). It ignores any
+ *  other in every state. */
+bool ActedOn(const std::string& type)
+{
+    return type == NetMsgType::VERSION || type == NetMsgType::WTXIDRELAY || type == NetMsgType::VERACK ||
+           type == NetMsgType::GETDATA || type == NetMsgType::PONG;
+}
+
 /** What the checks on the handshake (E2), the peer's details (H3) and the PONG (E6) know of a
  *  message the recipient was given to send: its type as the transport decodes it, whether a VERSION
  *  qualifies and, if it reads in full, its version and user agent (unknown for one of random
@@ -140,6 +148,23 @@ void CheckVersion(DataStream& payload)
     assert(payload.empty());
 }
 
+/** The twins are the same in everything they offer, record and report, but for the bytes only the
+ *  twin read. */
+void CheckTwins(const Attempt& attempt, const Attempt& twin, uint64_t extra)
+{
+    assert(std::ranges::equal(attempt.BytesToSend(), twin.BytesToSend()));
+    assert(attempt.BytesSent() == twin.BytesSent());
+    assert(attempt.BytesRecv() + extra == twin.BytesRecv());
+    assert(attempt.Ended() == twin.Ended());
+    assert(attempt.GetOutcome() == twin.GetOutcome());
+    assert(attempt.Reason() == twin.Reason());
+    assert(attempt.Times() == twin.Times());
+    assert(attempt.PeerVersion() == twin.PeerVersion());
+    assert(attempt.PeerUserAgent() == twin.PeerUserAgent());
+    assert(attempt.ExtraRequests() == twin.ExtraRequests());
+    assert(attempt.NextDeadline() == twin.NextDeadline());
+}
+
 } // namespace
 
 FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
@@ -152,12 +177,16 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
     // Times on the attempt's own scale, so that its phases are reached at every divisor.
     milliseconds now{0};
     const milliseconds scheduled_start{now + timing.Scale(milliseconds{provider.ConsumeIntegralInRange<int64_t>(-1'000, 1'000)})};
-    // A generator seeded from the input, and a key source that draws from it.
-    FastRandomContext rng{seed};
+    // A2: twins, each with a generator of its own, seeded alike, and a key source that draws from
+    // it. They get the same calls, with the same bytes at the same times, but for messages of types
+    // the attempt acts on in no state, which the twin alone gets.
+    FastRandomContext rng{seed}, twin_rng{seed};
     Attempt attempt{g_tx, scheduled_start, timing, rng, KeysFrom(rng), NodeId{0}};
-    // Its recipient.
+    Attempt twin{g_tx, scheduled_start, timing, twin_rng, KeysFrom(twin_rng), NodeId{0}};
+    // Their recipients, alike too.
     V2Transport peer(MakeResponder(rng));
-    // What the recipient sends next, what is known of everything it was given to send, and the
+    V2Transport twin_peer(MakeResponder(twin_rng));
+    // What the recipients send next, what is known of everything they were given to send, and the
     // requests among it.
     std::deque<CSerializedNetMsg> peer_queue;
     std::vector<PeerMessage> peer_messages;
@@ -166,9 +195,14 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
         peer_messages.push_back(std::move(known));
     }};
     std::vector<std::vector<CInv>> requests;
-    // Bytes from elsewhere reached the attempt, so its recipient may not decode what it writes.
+    // Bytes from elsewhere reached the attempts, so the recipients' transports may not share their
+    // sessions.
     bool foreign_bytes{false};
     bool peer_failed{false};
+    // What the twin read of the messages only it got. They count toward its receive cap (D3): past
+    // it, the twin ends on its own.
+    uint64_t extra{0};
+    bool twin_capped{false};
 
     // What the recipient decoded of the attempt's bytes.
     const std::set<std::string> allowed{NetMsgType::VERSION, NetMsgType::WTXIDRELAY, NetMsgType::VERACK,
@@ -259,28 +293,42 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
             const std::vector<uint8_t> written{offered.begin(), offered.begin() + std::min(budget - total, offered.size())};
             total += written.size();
             attempt.MarkSent(written.size(), now);
+            if (!twin_capped) twin.MarkSent(written.size(), now);
             if (peer_failed) continue;
-            if (decode(peer, written, recipient_reads)) continue;
+            const bool decoded{decode(peer, written, recipient_reads)};
+            // The twin wrote the same bytes.
+            assert(decode(twin_peer, written, [](const CNetMessage&) {}) == decoded);
+            if (decoded) continue;
             // A decode failure needs foreign bytes.
             assert(foreign_bytes);
             peer_failed = true;
         }
         return total;
     }};
-    // The recipient writes up to budget bytes, message after message. Returns how many bytes were
+    // The recipients write up to budget bytes, message after message. Returns how many bytes were
     // written.
     const auto recipients_write{[&](size_t budget) {
         size_t total{0};
         if (peer_failed || !can_receive()) return total;
         while (total < budget) {
-            if (!peer_queue.empty() && peer.SetMessageToSend(peer_queue.front())) peer_queue.pop_front();
+            if (!peer_queue.empty()) {
+                CSerializedNetMsg copy{peer_queue.front().Copy()};
+                const bool taken{peer.SetMessageToSend(peer_queue.front())};
+                assert(twin_peer.SetMessageToSend(copy) == taken);
+                if (taken) peer_queue.pop_front();
+            }
             const auto& [bytes, _more, _type]{peer.GetBytesToSend(/*have_next_message=*/!peer_queue.empty())};
+            const auto& [twin_bytes, _twin_more, _twin_type]{twin_peer.GetBytesToSend(/*have_next_message=*/!peer_queue.empty())};
+            // Both recipients are at the same message boundary.
+            assert(twin_bytes.size() == bytes.size());
             if (bytes.empty()) break;
             const size_t n{std::min(budget - total, bytes.size())};
-            const std::vector<uint8_t> chunk{bytes.begin(), bytes.begin() + n};
+            const std::vector<uint8_t> chunk{bytes.begin(), bytes.begin() + n}, twin_chunk{twin_bytes.begin(), twin_bytes.begin() + n};
             total += n;
             peer.MarkBytesSent(n);
+            twin_peer.MarkBytesSent(n);
             attempt.Received(chunk, now);
+            twin.Received(twin_chunk, now);
         }
         return total;
     }};
@@ -289,8 +337,14 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
         CallOneOf(
             provider,
             [&] { now += timing.Scale(milliseconds{provider.ConsumeIntegralInRange<int64_t>(-1'000, 60'000)}); },
-            [&] { attempt.Tick(now); },
-            [&] { attempt.Connected(now); },
+            [&] {
+                attempt.Tick(now);
+                twin.Tick(now);
+            },
+            [&] {
+                attempt.Connected(now);
+                twin.Connected(now);
+            },
             [&] { attempts_write(provider.ConsumeIntegralInRange<size_t>(0, 4'096)); },
             [&] { recipients_write(provider.ConsumeIntegralInRange<size_t>(0, 4'096)); },
             [&] {
@@ -316,14 +370,48 @@ FUZZ_TARGET(privbcast_attempt, .init = initialize_privbcast_attempt)
             },
             [&] {
                 // Bytes that are not the recipient's transport: a v1 node, a broken or hostile one.
-                if (!can_receive()) return;
+                // Not once the twin has read a message of its own: its session then decrypts them
+                // differently.
+                if (!can_receive() || extra > 0) return;
                 const std::vector<uint8_t> bytes{ConsumeRandomLengthByteVector(provider, 300)};
                 if (bytes.empty()) return;
                 foreign_bytes = true;
                 attempt.Received(bytes, now);
+                twin.Received(bytes, now);
             },
-            [&] { attempt.ConnectionFailed(now, "fuzz"); },
-            [&] { attempt.Interrupt(now, "fuzz"); });
+            [&] {
+                // A message of a type the attempt acts on in no state, to the twin alone, between
+                // two of the recipient's messages: it changes nothing the peer can see (A2).
+                if (foreign_bytes || peer_failed || twin_capped || !can_receive()) return;
+                CSerializedNetMsg msg;
+                msg.m_type = provider.ConsumeBool() ? provider.PickValueInArray(ALL_NET_MESSAGE_TYPES) : provider.ConsumeRandomLengthString(12);
+                // The type, up to its first NUL, is what the transport decodes.
+                if (ActedOn(msg.m_type.substr(0, msg.m_type.find('\0')))) msg.m_type = NetMsgType::ADDR;
+                msg.data = ConsumeRandomLengthByteVector(provider, 300);
+                // At the same time as the attempt's, so that only the message sets the twin apart.
+                attempt.Tick(now);
+                twin.Tick(now);
+                if (!twin_peer.SetMessageToSend(msg)) return;
+                const uint64_t before{twin.BytesRecv()};
+                while (true) {
+                    const auto& [bytes, _more, _type]{twin_peer.GetBytesToSend(/*have_next_message=*/false)};
+                    if (bytes.empty()) break;
+                    const std::vector<uint8_t> chunk{bytes.begin(), bytes.end()};
+                    twin_peer.MarkBytesSent(chunk.size());
+                    twin.Received(chunk, now);
+                }
+                extra += twin.BytesRecv() - before;
+            },
+            [&] {
+                attempt.ConnectionFailed(now, "fuzz");
+                twin.ConnectionFailed(now, "fuzz");
+            },
+            [&] {
+                attempt.Interrupt(now, "fuzz");
+                twin.Interrupt(now, "fuzz");
+            });
+        if (extra > 0 && twin.BytesRecv() > MAX_RECV_BYTES) twin_capped = true;
+        if (!twin_capped) CheckTwins(attempt, twin, extra);
 
         const AttemptTimes& times{attempt.Times()};
         if (times.inv_written || times.getdata) assert(times.inv_handed);

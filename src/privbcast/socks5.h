@@ -80,6 +80,9 @@ public:
      *  name instead. */
     std::optional<CNetAddr> Answer() const { return m_answer; }
 
+    const std::string& Username() const { return m_credentials.username; }
+    const std::string& Password() const { return m_credentials.password; }
+
 private:
     /** The reply awaited next, or the end of the exchange. */
     enum class Stage : uint8_t { Method, Auth, Reply, Done, Failed };

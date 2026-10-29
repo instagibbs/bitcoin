@@ -44,8 +44,7 @@ enum LogFlags : CategoryMask {
     SCAN = (CategoryMask{1} << 26),
     TXPACKAGES = (CategoryMask{1} << 27),
     KERNEL = (CategoryMask{1} << 28),
-    PRIVBROADCAST = (CategoryMask{1} << 29),
-    MINING = (CategoryMask{1} << 30),
+    MINING = (CategoryMask{1} << 29),
     ALL = ~NONE,
 };
 

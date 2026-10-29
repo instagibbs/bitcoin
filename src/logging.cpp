@@ -209,7 +209,6 @@ static const std::map<std::string, BCLog::LogFlags, std::less<>> LOG_CATEGORIES_
     {"scan", BCLog::SCAN},
     {"txpackages", BCLog::TXPACKAGES},
     {"kernel", BCLog::KERNEL},
-    {"privatebroadcast", BCLog::PRIVBROADCAST},
     {"mining", BCLog::MINING},
 };
 
@@ -234,7 +233,7 @@ std::optional<BCLog::LogFlags> BCLog::Logger::GetLogCategory(std::string_view st
     if (it != LOG_CATEGORIES_BY_STR.end()) {
         return it->second;
     }
-    if (str == "libevent") {
+    if (str == "libevent" || str == "privatebroadcast") {
        LogWarning("The logging category `%s` is deprecated, does nothing, and will be removed in a future version", str);
        return BCLog::NONE;
     }

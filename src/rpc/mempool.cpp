@@ -6,15 +6,11 @@
 #include <rpc/mempool.h>
 #include <rpc/register.h> // IWYU pragma: associated
 
-#include <common/args.h>
 #include <consensus/amount.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <index/txospenderindex.h>
-#include <net.h>
 #include <net_processing.h>
-#include <netaddress.h>
-#include <netbase.h>
 #include <node/mempool_persist.h>
 #include <node/mempool_persist_args.h>
 #include <node/transaction.h>
@@ -63,6 +59,7 @@
 #include <utility>
 #include <vector>
 
+class ArgsManager;
 namespace node {
 struct NodeContext;
 } // namespace node
@@ -80,24 +77,10 @@ static RPCMethod sendrawtransaction()
 {
     return RPCMethod{
         "sendrawtransaction",
-        "Submit a raw transaction (serialized, hex-encoded) to the network.\n"
-
-        "\nIf -privatebroadcast is disabled, then the transaction will be put into the\n"
-        "local mempool of the node and will be sent unconditionally to all currently\n"
-        "connected peers, so using sendrawtransaction for manual rebroadcast will degrade\n"
-        "privacy by leaking the transaction's origin, as nodes will normally not\n"
-        "rebroadcast non-wallet transactions already in their mempool.\n"
-
-        "\nIf -privatebroadcast is enabled, then the transaction will be sent via\n"
-        "dedicated, short-lived connections to Tor or I2P peers, or to IPv4/IPv6 peers\n"
-        "via the Tor network. This provides best-effort concealment of the transaction's origin.\n"
-        "Private broadcast is experimental and may change in future releases.\n"
-        "Submission does not itself add the transaction to the local mempool; normal\n"
-        "mempool acceptance and relay apply when it is received back from the network.\n"
-        "The private broadcast queue is bounded: when it is full, this RPC fails and\n"
-        "the transaction is not scheduled until an existing one completes or is\n"
-        "aborted. Use getprivatebroadcastinfo to inspect the queue and abortprivatebroadcast to abort.\n"
-
+        "Submit a raw transaction (serialized, hex-encoded) to local node and network.\n"
+        "\nThe transaction will be sent unconditionally to all peers, so using sendrawtransaction\n"
+        "for manual rebroadcast may degrade privacy by leaking the transaction's origin, as\n"
+        "nodes will normally not rebroadcast non-wallet transactions already in their mempool.\n"
         "\nA specific exception, RPC_TRANSACTION_ALREADY_IN_UTXO_SET, may throw if the transaction cannot be added to the mempool.\n"
 
         "\nRelated RPCs: createrawtransaction, signrawtransactionwithkey\n",
@@ -143,169 +126,21 @@ static RPCMethod sendrawtransaction()
 
             const CFeeRate max_raw_tx_fee_rate{ParseFeeRate(self.Arg<UniValue>("maxfeerate"))};
 
-
             std::string err_string;
             AssertLockNotHeld(cs_main);
             NodeContext& node = EnsureAnyNodeContext(request.context);
-            const bool private_broadcast_enabled{gArgs.GetBoolArg("-privatebroadcast", DEFAULT_PRIVATE_BROADCAST)};
-            if (private_broadcast_enabled &&
-                !g_reachable_nets.Contains(NET_ONION) &&
-                !g_reachable_nets.Contains(NET_I2P)) {
-                throw JSONRPCError(RPC_MISC_ERROR,
-                                   "-privatebroadcast is enabled, but none of the Tor or I2P networks is "
-                                   "reachable. Maybe the location of the Tor proxy couldn't be retrieved "
-                                   "from the Tor daemon at startup. Check whether the Tor daemon is running "
-                                   "and that -torcontrol, -torpassword and -i2psam are configured properly.");
-            }
-            const auto method = private_broadcast_enabled ? node::TxBroadcast::NO_MEMPOOL_PRIVATE_BROADCAST
-                                                          : node::TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL;
             const TransactionError err = BroadcastTransaction(node,
                                                               tx,
                                                               err_string,
                                                               /*max_tx_fee=*/0,
                                                               max_raw_tx_fee_rate,
-                                                              method,
+                                                              node::TxBroadcast::MEMPOOL_AND_BROADCAST_TO_ALL,
                                                               /*wait_callback=*/true);
             if (TransactionError::OK != err) {
                 throw JSONRPCTransactionError(err, err_string);
             }
 
             return tx->GetHash().GetHex();
-        },
-    };
-}
-
-static RPCMethod getprivatebroadcastinfo()
-{
-    return RPCMethod{
-        "getprivatebroadcastinfo",
-        "Returns information about transactions tracked for private broadcast.\n"
-        "Transactions that have reached the send-attempt limit remain in the result with attempts_remaining=0.\n"
-        "This method is only available when running with -privatebroadcast enabled.\n",
-        {},
-        RPCResult{
-            RPCResult::Type::OBJ, "", "",
-            {
-                {RPCResult::Type::ARR, "transactions", "",
-                    {
-                        {RPCResult::Type::OBJ, "", "",
-                            {
-                                {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
-                                {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
-                                {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
-                                {RPCResult::Type::NUM_TIME, "time_added", "The time this transaction was added to the private broadcast queue (seconds since epoch)"},
-                                {RPCResult::Type::NUM, "attempts_remaining", "The number of additional private broadcast send attempts allowed for this transaction"},
-                                {RPCResult::Type::ARR, "peers", "Per-peer send and acknowledgment information for this transaction",
-                                    {
-                                        {RPCResult::Type::OBJ, "", "",
-                                            {
-                                                {RPCResult::Type::STR, "address", "The address of the peer to which the transaction was sent"},
-                                                {RPCResult::Type::NUM_TIME, "sent", "The time this transaction was picked for sending to this peer via private broadcast (seconds since epoch)"},
-                                                {RPCResult::Type::NUM_TIME, "received", /*optional=*/true, "The time this peer acknowledged reception of the transaction (seconds since epoch)"},
-                                            }},
-                                    }},
-                            }},
-                    }},
-            }},
-        RPCExamples{
-            HelpExampleCli("getprivatebroadcastinfo", "")
-            + HelpExampleRpc("getprivatebroadcastinfo", "")
-        },
-        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
-        {
-            const NodeContext& node{EnsureAnyNodeContext(request.context)};
-            const PeerManager& peerman{EnsurePeerman(node)};
-            if (!peerman.GetInfo().private_broadcast) {
-                throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
-            }
-
-            const auto txs{peerman.GetPrivateBroadcastInfo()};
-
-            UniValue transactions(UniValue::VARR);
-            for (const auto& tx_info : txs) {
-                UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", tx_info.tx->GetHash().ToString());
-                o.pushKV("wtxid", tx_info.tx->GetWitnessHash().ToString());
-                o.pushKV("hex", EncodeHexTx(*tx_info.tx));
-                o.pushKV("time_added", TicksSinceEpoch<std::chrono::seconds>(tx_info.time_added));
-                o.pushKV("attempts_remaining", tx_info.attempts_remaining);
-                UniValue peers(UniValue::VARR);
-                for (const auto& peer : tx_info.peers) {
-                    UniValue p(UniValue::VOBJ);
-                    p.pushKV("address", peer.address.ToStringAddrPort());
-                    p.pushKV("sent", TicksSinceEpoch<std::chrono::seconds>(peer.sent));
-                    if (peer.received.has_value()) {
-                        p.pushKV("received", TicksSinceEpoch<std::chrono::seconds>(*peer.received));
-                    }
-                    peers.push_back(std::move(p));
-                }
-                o.pushKV("peers", std::move(peers));
-                transactions.push_back(std::move(o));
-            }
-
-            UniValue ret(UniValue::VOBJ);
-            ret.pushKV("transactions", std::move(transactions));
-            return ret;
-        },
-    };
-}
-
-static RPCMethod abortprivatebroadcast()
-{
-    return RPCMethod{
-        "abortprivatebroadcast",
-        "Abort private broadcast attempts for a transaction currently being privately broadcast.\n"
-        "The transaction will be removed from the private broadcast queue.\n"
-        "This method is only available when running with -privatebroadcast enabled.\n",
-        {
-            {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid for all transactions in the private broadcast queue.\n"
-                                                                "If the provided id matches a txid that corresponds to multiple transactions with different wtxids, multiple transactions will be removed and returned."},
-        },
-        RPCResult{
-            RPCResult::Type::OBJ, "", "",
-            {
-                {RPCResult::Type::ARR, "removed_transactions", "Transactions removed from the private broadcast queue",
-                    {
-                        {RPCResult::Type::OBJ, "", "",
-                            {
-                                {RPCResult::Type::STR_HEX, "txid", "The transaction hash in hex"},
-                                {RPCResult::Type::STR_HEX, "wtxid", "The transaction witness hash in hex"},
-                                {RPCResult::Type::STR_HEX, "hex", "The serialized, hex-encoded transaction data"},
-                            }},
-                    }},
-            }
-        },
-        RPCExamples{
-            HelpExampleCli("abortprivatebroadcast", "\"id\"")
-            + HelpExampleRpc("abortprivatebroadcast", "\"id\"")
-        },
-        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
-        {
-
-            const NodeContext& node{EnsureAnyNodeContext(request.context)};
-            PeerManager& peerman{EnsurePeerman(node)};
-            if (!peerman.GetInfo().private_broadcast) {
-                throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
-            }
-
-            const uint256 id{ParseHashV(self.Arg<UniValue>("id"), "id")};
-
-            const auto removed_txs{peerman.AbortPrivateBroadcast(id)};
-            if (removed_txs.empty()) {
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Transaction not in private broadcast queue. Check getprivatebroadcastinfo.");
-            }
-
-            UniValue removed_transactions(UniValue::VARR);
-            for (const auto& tx : removed_txs) {
-                UniValue o(UniValue::VOBJ);
-                o.pushKV("txid", tx->GetHash().ToString());
-                o.pushKV("wtxid", tx->GetWitnessHash().ToString());
-                o.pushKV("hex", EncodeHexTx(*tx));
-                removed_transactions.push_back(std::move(o));
-            }
-            UniValue ret(UniValue::VOBJ);
-            ret.pushKV("removed_transactions", std::move(removed_transactions));
-            return ret;
         },
     };
 }
@@ -1591,8 +1426,6 @@ void RegisterMempoolRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"rawtransactions", &sendrawtransaction},
-        {"rawtransactions", &getprivatebroadcastinfo},
-        {"rawtransactions", &abortprivatebroadcast},
         {"rawtransactions", &testmempoolaccept},
         {"blockchain", &getmempoolancestors},
         {"blockchain", &getmempooldescendants},

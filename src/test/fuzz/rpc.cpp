@@ -90,7 +90,6 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
 
 // RPC commands which are safe for fuzzing.
 const std::vector<std::string> RPC_COMMANDS_SAFE_FOR_FUZZING{
-    "abortprivatebroadcast",
     "analyzepsbt",
     "clearbanned",
     "combinepsbt",
@@ -148,7 +147,6 @@ const std::vector<std::string> RPC_COMMANDS_SAFE_FOR_FUZZING{
     "getorphantxs",
     "getpeerinfo",
     "getprioritisedtransactions",
-    "getprivatebroadcastinfo",
     "getrawaddrman",
     "getrawmempool",
     "getrawtransaction",

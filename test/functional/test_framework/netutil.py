@@ -196,13 +196,6 @@ def test_unix_socket():
     else:
         return True
 
-def format_addr_port(addr, port):
-    '''Return either "addr:port" or "[addr]:port" based on whether addr looks like an IPv6 address.'''
-    if ":" in addr:
-        return f"[{addr}]:{port}"
-    else:
-        return f"{addr}:{port}"
-
 def format_sock(sock, *, local):
     '''
     Format either local or remote side of a socket to a human readable string, e.g.

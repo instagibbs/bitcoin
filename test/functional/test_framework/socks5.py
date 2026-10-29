@@ -4,14 +4,12 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Dummy Socks5 server for testing."""
 
-import select
 import socket
 import threading
 import queue
 import logging
 
 from .netutil import (
-    format_addr_port,
     format_sock,
     set_ephemeral_port_range,
 )
@@ -39,58 +37,6 @@ def recvall(s, n):
         n -= len(d)
     return rv
 
-def sendall(s, data):
-    """Send all data to a socket, or fail."""
-    sent = 0
-    while sent < len(data):
-        _, wlist, _ = select.select([], [s], [])
-        if len(wlist) > 0:
-            n = s.send(data[sent:])
-            if n == 0:
-                raise IOError('send() on socket returned 0')
-            sent += n
-
-def forward_sockets(a, b, wakeup_socket, serv):
-    """Forwards data between sockets a and b until EOF, error, or shutdown.
-
-    Monitors wakeup_socket for a shutdown signal and checks serv.is_running()
-    to exit gracefully when the server is stopping.
-    """
-    # Prefix messages with e.g.:
-    # forward_sockets(a{remote=127.0.0.1:36935, local=127.0.0.1:9050} <-> b{local=127.0.0.1:33424, remote=127.0.0.1:8333})
-    log_prefix = ("forward_sockets("
-                  f"a{{remote={format_sock(a, local=False)}, local={format_sock(a, local=True)}}} <-> "
-                  f"b{{local={format_sock(b, local=True)}, remote={format_sock(b, local=False)}}}): ")
-
-    # Mark as non-blocking so that we do not end up in a deadlock-like situation
-    # where we block and wait on data from `a` while there is data ready to be
-    # received on `b` and forwarded to `a`. And at the same time the application
-    # at `a` is not sending anything because it waits for the data from `b` to
-    # respond.
-    a.setblocking(False)
-    b.setblocking(False)
-    sockets = [a, b, wakeup_socket]
-    while True:
-        # Blocking select with timeout
-        rlist, _, xlist = select.select(sockets, [], sockets, 2)
-        if not serv.is_running():
-            logger.debug(f"{log_prefix}Exit due to shutdown")
-            return
-        if len(xlist) > 0:
-            raise IOError(f"{log_prefix}Exceptional condition on socket")
-        for s in rlist:
-            try:
-                data = s.recv(4096)
-                if data is None or len(data) == 0:
-                    return
-                if s == a:
-                    sendall(b, data)
-                elif s == b:
-                    sendall(a, data)
-            except (BrokenPipeError, ConnectionResetError) as e:
-                logger.debug(f"{log_prefix}cannot send or receive data on socket {'a' if s == a else 'b'}: {str(e)}")
-                return
-
 # Implementation classes
 class Socks5Configuration():
     """Proxy configuration."""
@@ -100,20 +46,6 @@ class Socks5Configuration():
         self.unauth = False  # Support unauthenticated
         self.auth = False  # Support authentication
         self.keep_alive = False  # Do not automatically close connections
-        # This function is called whenever a new connection arrives to the proxy
-        # and it decides where the connection is redirected to. It is passed:
-        # - the address the client requested to connect to
-        # - the port the client requested to connect to
-        # - the client's socket address as seen by the proxy, formatted as host:port
-        # It is supposed to return an object like:
-        # {
-        #     "actual_to_addr": "127.0.0.1"
-        #     "actual_to_port": 28276
-        # }
-        # or None.
-        # If it returns an object then the connection is redirected to actual_to_addr:actual_to_port.
-        # If it returns None, or destinations_factory itself is None then the connection is closed.
-        self.destinations_factory = None
 
 class Socks5Command():
     """Information about an incoming socks5 command."""
@@ -131,9 +63,6 @@ class Socks5Connection():
     def __init__(self, serv, conn):
         self.serv = serv
         self.conn = conn
-        # Socket-pair used to wake up blocking forwarding select
-        # Note: a pipe could be used as well, but that does not work with select() on Windows
-        self.wakeup_socket_pair = socket.socketpair()
         # Index of this handler (within the server)
         self.handler_index = None
 
@@ -195,32 +124,12 @@ class Socks5Connection():
             port_hi,port_lo = recvall(self.conn, 2)
             port = (port_hi << 8) | port_lo
 
-            # Reply SUCCESS before calling destinations_factory, so the client can finish
-            # establishing the connection and register the peer; factories that consult
-            # getpeerinfo depend on that order.
+            # Send dummy response
             self.conn.sendall(bytearray([0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]))
 
             cmdin = Socks5Command(cmd, atyp, addr, port, username, password)
             self.serv.queue.put(cmdin)
             logger.debug('Proxy: %s', cmdin)
-
-            requested_to_addr = addr.decode("utf-8")
-            requested_to = format_addr_port(requested_to_addr, port)
-
-            if self.serv.is_running():
-                if self.serv.conf.destinations_factory is not None:
-                    dest = self.serv.conf.destinations_factory(requested_to_addr, port, proxy_client)
-                    if dest is not None:
-                        logger.debug(f"Serving connection to {requested_to}, will redirect it to "
-                                    f"{dest['actual_to_addr']}:{dest['actual_to_port']} instead")
-                        with socket.create_connection((dest["actual_to_addr"], dest["actual_to_port"])) as conn_to:
-                            forward_sockets(self.conn, conn_to, self.wakeup_socket_pair[1], self.serv)
-                            conn_to.close()
-                    else:
-                        logger.debug(f"Can't serve the connection to {requested_to}: the destinations factory returned None")
-                else:
-                    logger.debug(f"Can't serve the connection to {requested_to}: no destinations factory")
-
             # Disconnect happens in the "finally" block below.
 
         except (BrokenPipeError, ConnectionResetError) as e:
@@ -234,28 +143,8 @@ class Socks5Connection():
                 self.conn.close()
             else:
                 logger.debug("Keeping client connection alive")
-            s0 = self.wakeup_socket_pair[0]
-            s1 = self.wakeup_socket_pair[1]
-            self.wakeup_socket_pair = None
-            try:
-                s0.close()
-                s1.close()
-            except OSError:
-                pass
             self.serv.remove_handler(self.handler_index)
             self.handler_index = None
-
-    def wakeup(self):
-        # Wake up the blocking forwarding select by writing to the wake-up socket
-        try:
-            socket_pair = self.wakeup_socket_pair
-            if socket_pair is not None:
-                socket_pair[0].send("CloseWakeup".encode())
-                logger.debug("Waking up forwarding thread")
-        except OSError as e:
-            logger.warning(f"Error waking up forwarding thread: {e}")
-            pass
-
 
 # Wrapper for thread.join(), which may throw for daemon threads (in late stages of finalization).
 # Return True if the thread is no longer active (join succeeded), False otherwise
@@ -340,23 +229,8 @@ class Socks5Server():
         for i, item in enumerate(items):
             if item is None:
                 continue
-            thread, conn = item
-            # check if thread is still active
-            if not try_join_daemon_thread(thread, timeout=0):
-                conn.wakeup()
-                if try_join_daemon_thread(thread, timeout=2):
-                    logger.debug(f"Stop(): Handler {i} thread joined")
-                else:
-                    logger.warning(f"Stop(): Handler thread {i} didn't finish after force close")
-
-def start_socks5_server(destinations_factory):
-    config = Socks5Configuration()
-    config.addr = ("127.0.0.1", 0) # Use port=0 to let the OS pick one. The actual port is later in server.conf.addr[1].
-    config.unauth = True
-    config.auth = True
-    config.destinations_factory = destinations_factory
-
-    server = Socks5Server(config)
-    server.start()
-
-    return server
+            thread, _ = item
+            if try_join_daemon_thread(thread, timeout=2):
+                logger.debug(f"Stop(): Handler {i} thread joined")
+            else:
+                logger.warning(f"Stop(): Handler thread {i} didn't finish")

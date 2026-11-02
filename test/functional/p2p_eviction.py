@@ -19,7 +19,6 @@ from test_framework.blocktools import (
 )
 from test_framework.messages import (
     msg_pong,
-    msg_tx,
 )
 from test_framework.p2p import (
     P2PDataStore,
@@ -83,7 +82,7 @@ class P2PEvict(BitcoinTestFramework):
             txpeer.sync_with_ping()
 
             tx = self.wallet.create_self_transfer()['tx']
-            txpeer.send_without_ping(msg_tx(tx))
+            txpeer.relay_txs([tx], node)
             protected_peers.add(current_peer)
 
         self.log.info("Create 8 peers and protect them from eviction by having faster pings")

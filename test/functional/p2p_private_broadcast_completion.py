@@ -4,7 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test that all three initial private sends complete even after receiving the transaction back."""
 
-from test_framework.messages import CAddress, msg_tx
+from test_framework.messages import CAddress
 from test_framework.p2p import P2PInterface, P2P_SERVICES, p2p_lock, start_p2p_listener
 from test_framework.socks5 import Socks5Server, start_socks5_server
 from test_framework.test_framework import BitcoinTestFramework
@@ -70,7 +70,7 @@ class PrivateBroadcastCompletionTest(BitcoinTestFramework):
             assert_equal(peer.last_message["tx"].tx.txid_hex, tx["txid"])
             if i == 0:
                 self.log.info("Return the transaction while the other two peers still wait on handshake")
-                returner.send_and_ping(msg_tx(tx["tx"]))
+                returner.relay_txs([tx["tx"]], node)
 
         self.log.info("Receive another transaction while the proxy is unavailable")
         self.proxy.stop()
@@ -78,7 +78,7 @@ class PrivateBroadcastCompletionTest(BitcoinTestFramework):
         next_tx = wallet.create_self_transfer()
         with node.assert_debug_log(["will retry to a different address"], timeout=10):
             node.sendrawtransaction(next_tx["hex"])
-        returner.send_and_ping(msg_tx(next_tx["tx"]))
+        returner.relay_txs([next_tx["tx"]], node)
 
         self.log.info("Restoring the proxy opens all three connections for the received transaction")
         self.proxy = Socks5Server(self.proxy.conf)

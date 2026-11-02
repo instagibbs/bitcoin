@@ -21,7 +21,6 @@ from test_framework.messages import (
     MSG_WTX,
     malleate_tx_to_invalid_witness,
     msg_inv,
-    msg_tx,
 )
 from test_framework.netutil import (
     format_addr_port
@@ -365,7 +364,7 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         assert_equal(sibling1.txid_hex, sibling2.txid_hex)
         assert_not_equal(sibling1.wtxid_hex, sibling2.wtxid_hex)
         assert_equal(len(tx_originator.getrawmempool()), 1)
-        tx_returner.send_without_ping(msg_tx(siblings_parent))
+        tx_returner.relay_txs([siblings_parent], tx_originator)
         self.wait_until(lambda: len(tx_originator.getrawmempool()) > 1)
         self.log.info("  - siblings' parent added to the mempool")
         tx_originator.sendrawtransaction(hexstring=sibling1.serialize_with_witness().hex(), maxfeerate=0.1)

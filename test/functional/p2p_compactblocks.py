@@ -42,7 +42,6 @@ from test_framework.messages import (
     msg_no_witness_blocktxn,
     msg_sendcmpct,
     msg_sendheaders,
-    msg_tx,
     ser_uint256,
     tx_from_hex,
 )
@@ -580,7 +579,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         utxo = self.utxos.pop(0)
         block = self.build_block_with_transactions(node, utxo, 5)
         self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
-        test_node.send_and_ping(msg_tx(block.vtx[1]))
+        test_node.relay_txs([block.vtx[1]], node)
         assert block.vtx[1].txid_hex in node.getrawmempool()
 
         # Prefill 4 out of the 6 transactions, and verify that only the one
@@ -596,9 +595,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         utxo = self.utxos.pop(0)
         block = self.build_block_with_transactions(node, utxo, 10)
         self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
-        for tx in block.vtx[1:]:
-            test_node.send_without_ping(msg_tx(tx))
-        test_node.sync_with_ping()
+        test_node.relay_txs(block.vtx[1:], node)
         # Make sure all transactions were accepted.
         mempool = node.getrawmempool()
         for tx in block.vtx[1:]:
@@ -623,9 +620,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         block = self.build_block_with_transactions(node, utxo, 10)
         self.utxos.append([block.vtx[-1].txid_int, 0, block.vtx[-1].vout[0].nValue])
         # Relay the first 5 transactions from the block in advance
-        for tx in block.vtx[1:6]:
-            test_node.send_without_ping(msg_tx(tx))
-        test_node.sync_with_ping()
+        test_node.relay_txs(block.vtx[1:6], node)
         # Make sure all transactions were accepted.
         mempool = node.getrawmempool()
         for tx in block.vtx[1:6]:
@@ -928,9 +923,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.make_peer_hb_to_candidate(node, delivery_peer)
         block, cmpct_block = self.announce_cmpct_block(node, stalling_peer)
 
-        for tx in block.vtx[1:]:
-            delivery_peer.send_without_ping(msg_tx(tx))
-        delivery_peer.sync_with_ping()
+        delivery_peer.relay_txs(block.vtx[1:], node)
         mempool = node.getrawmempool()
         for tx in block.vtx[1:]:
             assert tx.txid_hex in mempool
@@ -943,9 +936,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Now test that delivering an invalid compact block won't break relay
 
         block, cmpct_block = self.announce_cmpct_block(node, stalling_peer)
-        for tx in block.vtx[1:]:
-            delivery_peer.send_without_ping(msg_tx(tx))
-        delivery_peer.sync_with_ping()
+        delivery_peer.relay_txs(block.vtx[1:], node)
 
         cmpct_block.prefilled_txn[0].tx.wit.vtxinwit = [CTxInWitness()]
         cmpct_block.prefilled_txn[0].tx.wit.vtxinwit[0].scriptWitness.stack = [ser_uint256(0)]

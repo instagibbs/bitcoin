@@ -16,7 +16,6 @@ from test_framework.mempool_util import (
 )
 from test_framework.messages import (
     COIN,
-    msg_tx,
 )
 from test_framework.p2p import (
     P2PInterface,
@@ -87,12 +86,12 @@ class PackageRelayTest(BitcoinTestFramework):
         # node0: sender
         # node1: pre-received the children (orphans, will be dropped on peer disconnect)
         # node3: pre-received the parents (too low fee)
-        # All nodes receive parent_31 ahead of time.
+        # All nodes receive parent_31 ahead of time, relayed by node1.
         txns_to_send = [
             [],
             [child_1, child_2, parent_31, child_3, child_4],
-            [parent_31],
-            [parent_1, parent_2, parent_31, parent_4]
+            [],
+            [parent_1, parent_2, parent_4]
         ]
 
         return packages_to_submit, txns_to_send
@@ -111,12 +110,12 @@ class PackageRelayTest(BitcoinTestFramework):
 
         self.log.info("Pre-send some transactions to nodes")
         for (i, peer) in enumerate(self.peers):
-            for tx in transactions_to_presend[i]:
-                peer.send_and_ping(msg_tx(tx))
+            if transactions_to_presend[i]:
+                peer.relay_txs(transactions_to_presend[i], self.nodes[i])
 
         # The fee-having parent should be the only thing in mempools
         self.sync_mempools()
-        sufficient_parent = transactions_to_presend[2][0].txid_hex
+        sufficient_parent = transactions_to_presend[1][2].txid_hex
         for i, node in enumerate(self.nodes):
             # node1 has non-empty orphanage as well
             if i == 1:

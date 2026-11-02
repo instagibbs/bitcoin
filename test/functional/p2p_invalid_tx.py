@@ -5,6 +5,8 @@
 """Test node responses to invalid transactions.
 
 In this test we connect to one node over p2p, and test tx requests."""
+import time
+
 from test_framework.blocktools import create_block
 from test_framework.messages import (
     COIN,
@@ -12,6 +14,7 @@ from test_framework.messages import (
     CTransaction,
     CTxIn,
     CTxOut,
+    msg_tx,
 )
 from test_framework.p2p import P2PDataStore
 from test_framework.test_framework import BitcoinTestFramework
@@ -48,6 +51,9 @@ class InvalidTxRequestTest(BitcoinTestFramework):
     def run_test(self):
         node = self.nodes[0]  # convenience reference to the node
         std_node = self.nodes[1]  # convenience reference to the node
+        # Use mocktime so that relaying txs can skip the tx request delays
+        for n in self.nodes:
+            n.setmocktime(int(time.time()))
 
         self.bootstrap_p2p()  # Add one p2p connection to the node
 
@@ -128,9 +134,10 @@ class InvalidTxRequestTest(BitcoinTestFramework):
         assert_equal(0, node.getmempoolinfo()['size'])  # Mempool should be empty
         assert_equal(3, len(node.getpeerinfo()))  # std node and both p2ps still connected
 
-        self.log.info('Send the withhold tx ... ')
+        self.log.info('Send the withhold tx in response to the orphan parent request ... ')
+        node.p2ps[0].wait_until(lambda: tx_withhold.txid_int in node.p2ps[0].getdata_hashes)
         with node.assert_debug_log(expected_msgs=["bad-txns-in-belowout"]):
-            node.p2ps[0].send_txs_and_test([tx_withhold], node, success=True)
+            node.p2ps[0].send_and_ping(msg_tx(tx_withhold))
 
         # Transactions that should end up in the mempool
         expected_mempool = {

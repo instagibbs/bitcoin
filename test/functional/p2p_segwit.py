@@ -125,14 +125,36 @@ def sign_p2pk_witness_input(script, tx_to, in_idx, hashtype, value, key):
     tx_to.wit.vtxinwit[in_idx].scriptWitness.stack = [script]
     sign_input_segwitv0(tx_to, in_idx, script, value, key, hashtype)
 
-def test_transaction_acceptance(node, p2p, tx, with_witness, accepted, reason=None):
+def relay_tx(node, p2p, tx, with_witness=True):
+    """Announce tx and send it once the node requests it.
+
+    Without witness, the announced wtxid is that of the stripped tx, i.e. its txid.
+    If node gets the tx from its other peer instead, it is not requested and nothing is sent."""
+    h = tx.wtxid_int if with_witness else tx.txid_int
+    inv = CInv(MSG_WTX, h) if p2p.wtxidrelay else CInv(MSG_TX, tx.txid_int)
+    with p2p_lock:
+        p2p.getdata_hashes.discard(inv.hash)
+    p2p.send_and_ping(msg_inv(inv=[inv]))
+
+    def requested():
+        with p2p_lock:
+            return inv.hash in p2p.getdata_hashes
+    node.wait_until(lambda: requested() or tx.txid_hex in node.getrawmempool())
+    if requested():
+        p2p.send_and_ping(msg_tx(tx) if with_witness else msg_no_witness_tx(tx))
+
+
+def test_transaction_acceptance(node, p2p, tx, with_witness, accepted, reason=None, requested=False):
     """Send a transaction to the node and check that it's accepted to the mempool
 
     - Submit the transaction over the p2p interface
     - use the getrawmempool rpc to check for acceptance."""
     reason = [reason] if reason else []
     with node.assert_debug_log(expected_msgs=reason):
-        p2p.send_and_ping(msg_tx(tx) if with_witness else msg_no_witness_tx(tx))
+        if requested:
+            p2p.send_and_ping(msg_tx(tx) if with_witness else msg_no_witness_tx(tx))
+        else:
+            relay_tx(node, p2p, tx, with_witness)
         assert_equal(tx.txid_hex in node.getrawmempool(), accepted)
 
 
@@ -317,7 +339,7 @@ class SegWitTest(BitcoinTestFramework):
         # This is a sanity check of our testing framework.
         assert_equal(msg_no_witness_tx(tx).serialize(), msg_tx(tx).serialize())
 
-        self.test_node.send_and_ping(msg_tx(tx))  # make sure the block was processed
+        relay_tx(self.nodes[0], self.test_node, tx)
         assert tx.txid_hex in self.nodes[0].getrawmempool()
         # Save this transaction for later
         self.utxo.append(UTXO(tx.txid_int, 0, 49 * 100000000))
@@ -539,8 +561,10 @@ class SegWitTest(BitcoinTestFramework):
         # its from)
         assert_equal(len(self.nodes[0].getrawmempool()), 0)
         assert_equal(len(self.nodes[1].getrawmempool()), 0)
-        test_transaction_acceptance(self.nodes[0], self.old_node, tx, with_witness=True, accepted=False)
-        test_transaction_acceptance(self.nodes[0], self.test_node, tx, with_witness=True, accepted=False)
+        test_transaction_acceptance(self.nodes[0], self.old_node, tx, with_witness=True, accepted=False, requested=True)
+        # test_node's announcement is requested once old_node's request is answered.
+        self.test_node.wait_until(lambda: tx_hash in self.test_node.getdata_hashes)
+        test_transaction_acceptance(self.nodes[0], self.test_node, tx, with_witness=True, accepted=False, requested=True)
 
         # But eliminating the witness should fix it
         test_transaction_acceptance(self.nodes[0], self.test_node, tx, with_witness=False, accepted=True)
@@ -1246,7 +1270,7 @@ class SegWitTest(BitcoinTestFramework):
         # Verify that unnecessary witnesses are rejected.
         self.test_node.announce_tx_and_wait_for_getdata(tx)
         assert_equal(len(self.nodes[0].getrawmempool()), 0)
-        test_transaction_acceptance(self.nodes[0], self.test_node, tx, with_witness=True, accepted=False)
+        test_transaction_acceptance(self.nodes[0], self.test_node, tx, with_witness=True, accepted=False, requested=True)
 
         # Verify that removing the witness succeeds.
         test_transaction_acceptance(self.nodes[0], self.test_node, tx, with_witness=False, accepted=True)
@@ -1273,7 +1297,7 @@ class SegWitTest(BitcoinTestFramework):
         # Node will be blinded to the transaction via wtxid, however.
         self.std_node.announce_tx_and_wait_for_getdata(tx3)
         self.std_wtx_node.announce_tx_and_wait_for_getdata(tx3, use_wtxid=True)
-        test_transaction_acceptance(self.nodes[1], self.std_node, tx3, True, False, 'tx-size')
+        test_transaction_acceptance(self.nodes[1], self.std_node, tx3, True, False, 'tx-size', requested=True)
         self.std_node.announce_tx_and_wait_for_getdata(tx3)
         self.std_wtx_node.announce_tx_and_wait_for_getdata(tx3, use_wtxid=True, success=False)
 
@@ -1390,7 +1414,7 @@ class SegWitTest(BitcoinTestFramework):
         # First we test this transaction against std_node
         # making sure the txid is added to the reject filter
         self.std_node.announce_tx_and_wait_for_getdata(tx3)
-        test_transaction_acceptance(self.nodes[1], self.std_node, tx3, with_witness=True, accepted=False, reason="bad-txns-nonstandard-inputs")
+        test_transaction_acceptance(self.nodes[1], self.std_node, tx3, with_witness=True, accepted=False, reason="bad-txns-nonstandard-inputs", requested=True)
         # Now the node will no longer ask for getdata of this transaction when advertised by same txid
         self.std_node.announce_tx_and_wait_for_getdata(tx3, success=False)
 
@@ -2045,7 +2069,7 @@ class SegWitTest(BitcoinTestFramework):
         # Send tx2 through; it's an orphan so won't be accepted
         with p2p_lock:
             self.wtx_node.last_message.pop("getdata", None)
-        test_transaction_acceptance(self.nodes[0], self.wtx_node, tx2, with_witness=True, accepted=False)
+        test_transaction_acceptance(self.nodes[0], self.wtx_node, tx2, with_witness=True, accepted=False, requested=True)
 
         # Disconnect tx_node to avoid the possibility of it being selected for orphan resolution.
         self.tx_node.peer_disconnect()
@@ -2057,7 +2081,7 @@ class SegWitTest(BitcoinTestFramework):
         assert_equal(lgd, [CInv(MSG_WITNESS_TX, tx.txid_int)])
 
         # Send tx through
-        test_transaction_acceptance(self.nodes[0], self.wtx_node, tx, with_witness=False, accepted=True)
+        test_transaction_acceptance(self.nodes[0], self.wtx_node, tx, with_witness=False, accepted=True, requested=True)
 
         # Check tx2 is there now
         assert_equal(tx2.txid_hex in self.nodes[0].getrawmempool(), True)

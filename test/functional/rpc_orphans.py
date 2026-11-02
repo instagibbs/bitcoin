@@ -4,13 +4,14 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Tests for orphan related RPCs."""
 
+import time
+
 from test_framework.mempool_util import (
     tx_in_orphanage,
 )
 from test_framework.messages import (
     CInv,
     msg_inv,
-    msg_tx,
     MSG_WTX,
 )
 from test_framework.p2p import P2PInterface
@@ -28,6 +29,8 @@ class OrphanRPCsTest(BitcoinTestFramework):
         self.num_nodes = 1
 
     def run_test(self):
+        # Use mocktime so that relaying txs can skip the tx request delays
+        self.nodes[0].setmocktime(int(time.time()))
         self.wallet = MiniWallet(self.nodes[0])
         self.test_orphan_activity()
         self.test_orphan_details()
@@ -43,8 +46,8 @@ class OrphanRPCsTest(BitcoinTestFramework):
         tx_parent_2 = self.wallet.create_self_transfer()
         tx_child_2 = self.wallet.create_self_transfer(utxo_to_spend=tx_parent_2["new_utxo"])
         peer = node.add_p2p_connection(P2PInterface())
-        peer.send_and_ping(msg_tx(tx_child_1["tx"]))
-        peer.send_and_ping(msg_tx(tx_child_2["tx"]))
+        peer.relay_txs([tx_child_1["tx"]], node)
+        peer.relay_txs([tx_child_2["tx"]], node)
 
         self.log.info("Check that neither parent is in the mempool")
         assert_equal(node.getmempoolinfo()["size"], 0)
@@ -60,7 +63,7 @@ class OrphanRPCsTest(BitcoinTestFramework):
         assert tx_in_orphanage(node, tx_child_2["tx"])
 
         self.log.info("Broadcast parent 1")
-        peer.send_and_ping(msg_tx(tx_parent_1["tx"]))
+        peer.relay_txs([tx_parent_1["tx"]], node)
         self.log.info("Check that parent 1 and child 1 are in the mempool")
         raw_mempool = node.getrawmempool()
         assert_equal(len(raw_mempool), 2)
@@ -72,7 +75,7 @@ class OrphanRPCsTest(BitcoinTestFramework):
         assert_equal(len(orphanage), 1)
         assert tx_in_orphanage(node, tx_child_2["tx"])
 
-        peer.send_and_ping(msg_tx(tx_parent_2["tx"]))
+        peer.relay_txs([tx_parent_2["tx"]], node)
         self.log.info("Check that all parents and children are now in the mempool")
         raw_mempool = node.getrawmempool()
         assert_equal(len(raw_mempool), 4)
@@ -98,8 +101,8 @@ class OrphanRPCsTest(BitcoinTestFramework):
         tx_child_2 = self.wallet.create_self_transfer(utxo_to_spend=tx_parent_2["new_utxo"])
         peer_1 = node.add_p2p_connection(P2PInterface())
         peer_2 = node.add_p2p_connection(P2PInterface())
-        peer_1.send_and_ping(msg_tx(tx_child_1["tx"]))
-        peer_2.send_and_ping(msg_tx(tx_child_2["tx"]))
+        peer_1.relay_txs([tx_child_1["tx"]], node)
+        peer_2.relay_txs([tx_child_2["tx"]], node)
 
         orphanage = node.getorphantxs(verbosity=2)
         assert tx_in_orphanage(node, tx_child_1["tx"])
@@ -110,7 +113,7 @@ class OrphanRPCsTest(BitcoinTestFramework):
         peer_ids = [orphanage[0]["from"][0], orphanage[1]["from"][0]]
 
         self.log.info("Unorphan child 2")
-        peer_2.send_and_ping(msg_tx(tx_parent_2["tx"]))
+        peer_2.relay_txs([tx_parent_2["tx"]], node)
         assert not tx_in_orphanage(node, tx_child_2["tx"])
 
         self.log.info("Check that additional announcers are reflected in RPC result")

@@ -23,7 +23,6 @@ if it was received after spy's version handshake completed.
 from test_framework.messages import (
     msg_wtxidrelay,
     msg_verack,
-    msg_tx,
     CInv,
     MSG_WTX,
 )
@@ -60,14 +59,14 @@ class TxPrivacyTest(BitcoinTestFramework):
 
         # tx_originator sends tx1
         tx1 = self.wallet.create_self_transfer()["tx"]
-        tx_originator.send_and_ping(msg_tx(tx1))
+        tx_originator.relay_txs([tx1], self.nodes[0])
 
         # Spy sends the verack
         spy.send_and_ping(msg_verack())
 
         # tx_originator sends tx2
         tx2 = self.wallet.create_self_transfer()["tx"]
-        tx_originator.send_and_ping(msg_tx(tx2))
+        tx_originator.relay_txs([tx2], self.nodes[0])
 
         # Spy should only get an inv for the second transaction as the first
         # one was received pre-verack with the spy

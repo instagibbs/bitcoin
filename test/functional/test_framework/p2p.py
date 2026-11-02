@@ -33,6 +33,7 @@ import threading
 
 from test_framework.messages import (
     CBlockHeader,
+    CInv,
     MAX_HEADERS_RESULTS,
     msg_addr,
     msg_addrv2,
@@ -116,6 +117,8 @@ TXID_RELAY_DELAY = 2
 OVERLOADED_PEER_TX_DELAY = 2
 # How long to wait before downloading a transaction from an additional peer
 GETDATA_TX_INTERVAL = 60
+# Time to bump forward (using setmocktime) so that any announced tx is requested, in seconds
+TXREQUEST_TIME_SKIP = NONPREF_PEER_TX_DELAY + TXID_RELAY_DELAY + OVERLOADED_PEER_TX_DELAY + 1
 
 MESSAGEMAP = {
     b"addr": msg_addr,
@@ -478,6 +481,9 @@ class P2PInterface(P2PConnection):
         # this and use self.wait_until.
         self.last_message = {}
 
+        # Hashes of all objects the node has requested from us via getdata
+        self.getdata_hashes = set()
+
         # A count of the number of ping messages we've sent to the node
         self.ping_counter = 1
 
@@ -528,6 +534,8 @@ class P2PInterface(P2PConnection):
                 msgtype = message.msgtype.decode('ascii')
                 self.message_count[msgtype] += 1
                 self.last_message[msgtype] = message
+                if msgtype == "getdata":
+                    self.getdata_hashes.update(i.hash for i in message.inv)
                 getattr(self, 'on_' + msgtype)(message)
             except Exception:
                 print("ERROR delivering %s (%s)" % (repr(message), sys.exc_info()[0]))
@@ -718,6 +726,24 @@ class P2PInterface(P2PConnection):
 
     def send_and_ping(self, message, *, timeout=60):
         self.send_without_ping(message)
+        self.sync_with_ping(timeout=timeout)
+
+    def relay_txs(self, txs, node, *, timeout=60):
+        """Announce txs and send them once node requests them, as a relaying peer would.
+
+        Bumps node's mocktime, if set, past the tx request delays. Requires that node requests
+        every tx; to test that a tx is not requested, send the inv directly."""
+        invs = [CInv(MSG_WTX, tx.wtxid_int) if self.wtxidrelay else CInv(MSG_TX, tx.txid_int) for tx in txs]
+        hashes = {inv.hash for inv in invs}
+        with p2p_lock:
+            self.getdata_hashes -= hashes
+        self.send_and_ping(msg_inv(invs))
+        if node.mocktime:
+            node.bumpmocktime(TXREQUEST_TIME_SKIP)
+        self.wait_until(lambda: hashes <= self.getdata_hashes, timeout=timeout)
+
+        for tx in txs:
+            self.send_without_ping(msg_tx(tx))
         self.sync_with_ping(timeout=timeout)
 
     def sync_with_ping(self, *, timeout=60):
@@ -953,21 +979,13 @@ class P2PDataStore(P2PInterface):
     def send_txs_and_test(self, txs, node, *, success=True, reject_reason=None):
         """Send txs to test node and test whether they're accepted to the mempool.
 
-         - add all txs to our tx_store
-         - send tx messages for all txs
+         - announce all txs and send them when requested
          - if success is True/False: assert that the txs are/are not accepted to the mempool
          - if reject_reason is set: assert that the correct reject message is logged."""
 
-        with p2p_lock:
-            for tx in txs:
-                self.tx_store[tx.txid_int] = tx
-
         reject_reason = [reject_reason] if reject_reason else []
         with node.assert_debug_log(expected_msgs=reject_reason):
-            for tx in txs:
-                self.send_without_ping(msg_tx(tx))
-
-            self.sync_with_ping()
+            self.relay_txs(txs, node)
 
             raw_mempool = node.getrawmempool()
             if success:

@@ -20,7 +20,6 @@ from test_framework.messages import (
     MSG_WTX,
     msg_inv,
     msg_notfound,
-    msg_tx,
 )
 from test_framework.p2p import (
     P2PInterface,
@@ -404,12 +403,12 @@ class TxDownloadTest(BitcoinTestFramework):
         peer = node.add_p2p_connection(TestP2PConn())
         low_fee_tx = self.wallet.create_self_transfer(fee_rate=Decimal("0.9")*mempoolminfee)
         assert_equal(node.testmempoolaccept([low_fee_tx['hex']])[0]["reject-reason"], "mempool min fee not met")
-        peer.send_and_ping(msg_tx(low_fee_tx['tx']))
+        peer.relay_txs([low_fee_tx['tx']], node)
         peer.send_and_ping(msg_inv([CInv(t=MSG_WTX, h=int(low_fee_tx['wtxid'], 16))]))
         node.setmocktime(int(time.time()))
         node.bumpmocktime(MAX_GETDATA_INBOUND_WAIT)
         peer.sync_with_ping()
-        assert_equal(peer.tx_getdata_count, 0)
+        assert_equal(peer.tx_getdata_count, 1)
 
         self.log.info('Check that rejection filter is cleared after new block comes in')
         self.generate(self.wallet, 1, sync_fun=self.no_op)

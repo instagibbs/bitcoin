@@ -99,10 +99,10 @@ class P2PIBDTxRelayTest(BitcoinTestFramework):
         peer_inver.wait_for_getdata([ibd_wtxid])
         self.nodes[0].disconnect_p2ps()
 
-        self.log.info("Check that nodes process the same transaction, even when unsolicited, when no longer in IBD")
+        self.log.info("Check that nodes process the same transaction when no longer in IBD")
         peer_txer = self.nodes[0].add_p2p_connection(P2PInterface())
         with self.nodes[0].assert_debug_log(expected_msgs=["was not accepted"]):
-            peer_txer.send_and_ping(msg_tx(tx))
+            peer_txer.relay_txs([tx], self.nodes[0])
 
 if __name__ == '__main__':
     P2PIBDTxRelayTest(__file__).main()

@@ -20,6 +20,7 @@ from test_framework.messages import (
     MSG_WTX,
     msg_inv,
     msg_notfound,
+    msg_tx,
 )
 from test_framework.p2p import (
     P2PInterface,
@@ -394,6 +395,14 @@ class TxDownloadTest(BitcoinTestFramework):
         self.log.info('Check that spurious notfound is ignored')
         self.nodes[0].p2ps[0].send_without_ping(msg_notfound(vec=[CInv(MSG_TX, 1)]))
 
+    def test_unrequested_tx(self):
+        self.log.info("Check that unrequested transactions are processed")
+        node = self.nodes[0]
+        peer = node.add_p2p_connection(TestP2PConn())
+        tx = self.wallet.create_self_transfer()
+        peer.send_and_ping(msg_tx(tx["tx"]))
+        assert tx["txid"] in node.getrawmempool()
+
     def test_rejects_filter_reset(self):
         self.log.info('Check that rejected tx is not requested again')
         node = self.nodes[0]
@@ -463,6 +472,7 @@ class TxDownloadTest(BitcoinTestFramework):
         self.test_large_inv_batch()
         self.test_duplicate_tx_inv()
         self.test_spurious_notfound()
+        self.test_unrequested_tx()
 
         # Run each test against new bitcoind instances, as setting mocktimes has long-term effects on when
         # the next trickle relay event happens.

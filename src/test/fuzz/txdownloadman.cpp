@@ -376,6 +376,7 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                 }
             },
             [&] {
+                const auto inflight_before{txdownload_impl.m_txrequest.CountInFlight(rand_peer)};
                 const auto& [should_validate, maybe_package] = txdownload_impl.ReceivedTx(rand_peer, rand_tx);
                 // The only possible results should be:
                 // - Don't validate the tx, no package.
@@ -383,6 +384,10 @@ FUZZ_TARGET(txdownloadman_impl, .init = initialize)
                 // - Validate the tx, no package.
                 // The only combination that doesn't make sense is validate both tx and package.
                 Assert(!(should_validate && maybe_package.has_value()));
+                // Without relay permissions, a tx is only processed if it answered a request to this peer.
+                if ((should_validate || maybe_package.has_value()) && !HasRelayPermissions(rand_peer)) {
+                    Assert(txdownload_impl.m_txrequest.CountInFlight(rand_peer) < inflight_before);
+                }
                 if (should_validate) {
                     Assert(!txdownload_impl.AlreadyHaveTx(rand_tx->GetWitnessHash(), /*include_reconsiderable=*/true));
                 }

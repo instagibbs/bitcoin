@@ -396,8 +396,27 @@ class TxDownloadTest(BitcoinTestFramework):
         self.nodes[0].p2ps[0].send_without_ping(msg_notfound(vec=[CInv(MSG_TX, 1)]))
 
     def test_unrequested_tx(self):
-        self.log.info("Check that unrequested transactions are processed")
+        self.log.info("Check that unrequested transactions are ignored")
         node = self.nodes[0]
+        peer = node.add_p2p_connection(TestP2PConn())
+        other_peer = node.add_p2p_connection(TestP2PConn())
+        tx = self.wallet.create_self_transfer()
+        with node.assert_debug_log([f"ignoring unrequested tx {tx['txid']}"]):
+            peer.send_and_ping(msg_tx(tx["tx"]))
+        assert tx["txid"] not in node.getrawmempool()
+
+        self.log.info("Check that a transaction requested from another peer is ignored")
+        wtxid = tx["tx"].wtxid_int
+        peer.send_and_ping(msg_inv([CInv(t=MSG_WTX, h=wtxid)]))
+        peer.wait_for_getdata([wtxid])
+        with node.assert_debug_log([f"ignoring unrequested tx {tx['txid']}"]):
+            other_peer.send_and_ping(msg_tx(tx["tx"]))
+        assert tx["txid"] not in node.getrawmempool()
+        peer.send_and_ping(msg_tx(tx["tx"]))
+        assert tx["txid"] in node.getrawmempool()
+
+        self.log.info("Check that unrequested transactions from peers with relay permission are processed")
+        self.restart_node(0, extra_args=["-whitelist=relay@127.0.0.1"])
         peer = node.add_p2p_connection(TestP2PConn())
         tx = self.wallet.create_self_transfer()
         peer.send_and_ping(msg_tx(tx["tx"]))

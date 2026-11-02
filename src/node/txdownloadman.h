@@ -152,7 +152,8 @@ public:
 
     /** Marks a tx as ReceivedResponse in txrequest and checks whether AlreadyHaveTx.
      * Return a bool indicating whether this tx should be validated. If false, optionally, a
-     * PackageToValidate. */
+     * PackageToValidate. Unless the peer has relay permissions, a tx that we did not request
+     * from this peer is not validated. */
     std::pair<bool, std::optional<PackageToValidate>> ReceivedTx(NodeId nodeid, const CTransactionRef& ptx);
 
     /** Whether there are any orphans to reconsider for this peer. */

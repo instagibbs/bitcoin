@@ -177,12 +177,12 @@ public:
     void RequestedTx(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry);
 
     /** Converts a CANDIDATE or REQUESTED announcement to a COMPLETED one. If no such announcement exists for the
-     *  provided peer and txhash, nothing happens.
+     *  provided peer and txhash, nothing happens. Returns whether the announcement was REQUESTED.
      *
      * It should be called whenever a transaction or NOTFOUND was received from a peer. When the transaction is
      * not needed entirely anymore, ForgetTxhash should be called instead of, or in addition to, this call.
      */
-    void ReceivedResponse(NodeId peer, const uint256& txhash);
+    bool ReceivedResponse(NodeId peer, const uint256& txhash);
 
     // The operations below inspect the data structure.
 

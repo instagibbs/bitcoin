@@ -511,8 +511,17 @@ std::pair<bool, std::optional<PackageToValidate>> TxDownloadManagerImpl::Receive
     const Wtxid& wtxid = ptx->GetWitnessHash();
 
     // Mark that we have received a response
-    m_txrequest.ReceivedResponse(nodeid, txid.ToUint256());
-    if (ptx->HasWitness()) m_txrequest.ReceivedResponse(nodeid, wtxid.ToUint256());
+    bool requested{m_txrequest.ReceivedResponse(nodeid, txid.ToUint256())};
+    if (ptx->HasWitness()) requested |= m_txrequest.ReceivedResponse(nodeid, wtxid.ToUint256());
+
+    // Ignore transactions we did not request from this peer, unless it has relay permissions.
+    if (!requested) {
+        auto it = m_peer_info.find(nodeid);
+        if (it == m_peer_info.end() || !it->second.m_connection_info.m_relay_permissions) {
+            LogDebug(BCLog::NET, "ignoring unrequested tx %s (wtxid=%s) from peer=%d", txid.ToString(), wtxid.ToString(), nodeid);
+            return {false, std::nullopt};
+        }
+    }
 
     // First check if we should drop this tx.
     // We do the AlreadyHaveTx() check using wtxid, rather than txid - in the

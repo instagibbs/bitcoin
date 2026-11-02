@@ -232,13 +232,14 @@ public:
     void ReceivedResponse(int peer, int txhash)
     {
         // Apply to naive structure: convert anything to COMPLETED.
+        const bool requested{m_announcements[txhash][peer].m_state == State::REQUESTED};
         if (m_announcements[txhash][peer].m_state != State::NOTHING) {
             m_announcements[txhash][peer].m_state = State::COMPLETED;
             Cleanup(txhash);
         }
 
         // Call TxRequestTracker's implementation.
-        m_tracker.ReceivedResponse(peer, TXHASHES[txhash]);
+        assert(m_tracker.ReceivedResponse(peer, TXHASHES[txhash]) == requested);
     }
 
     void GetRequestable(int peer)

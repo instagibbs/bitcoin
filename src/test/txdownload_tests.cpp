@@ -337,4 +337,46 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(unrequested_tx, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    node::TxDownloadOptions DEFAULT_OPTS{.m_mempool = pool, .m_deterministic_txrequest = true};
+    node::TxDownloadManagerImpl txdownload_impl{DEFAULT_OPTS};
+    const std::chrono::microseconds now{GetTime()};
+    const NodeId peer{0}, other_peer{1}, relay_peer{2};
+    txdownload_impl.ConnectedPeer(peer, {/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+    txdownload_impl.ConnectedPeer(other_peer, {/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true});
+    txdownload_impl.ConnectedPeer(relay_peer, {/*m_preferred=*/true, /*m_relay_permissions=*/true, /*m_wtxid_relay=*/true});
+
+    for (const auto segwit : {true, false}) {
+        const auto ptx{CreatePlaceholderTx(segwit)};
+
+        // Unrequested transactions are ignored, unless the peer has relay permissions.
+        BOOST_CHECK(!txdownload_impl.ReceivedTx(peer, ptx).first);
+        BOOST_CHECK(txdownload_impl.ReceivedTx(relay_peer, ptx).first);
+
+        // An announcement that has not been requested yet does not count.
+        txdownload_impl.AddTxAnnouncement(peer, ptx->GetWitnessHash(), now);
+        BOOST_CHECK(!txdownload_impl.ReceivedTx(peer, ptx).first);
+
+        // A transaction requested from one peer is ignored from another, and processed once from the first.
+        txdownload_impl.AddTxAnnouncement(peer, ptx->GetWitnessHash(), now);
+        BOOST_CHECK_EQUAL(txdownload_impl.GetRequestsToSend(peer, now).size(), 1U);
+        BOOST_CHECK(!txdownload_impl.ReceivedTx(other_peer, ptx).first);
+        BOOST_CHECK(txdownload_impl.ReceivedTx(peer, ptx).first);
+        BOOST_CHECK(!txdownload_impl.ReceivedTx(peer, ptx).first);
+
+        // A txid request, as used for orphan parents, also counts.
+        txdownload_impl.AddTxAnnouncement(peer, ptx->GetHash(), now);
+        BOOST_CHECK_EQUAL(txdownload_impl.GetRequestsToSend(peer, now + node::TXID_RELAY_DELAY).size(), 1U);
+        BOOST_CHECK(txdownload_impl.ReceivedTx(peer, ptx).first);
+
+        // A response after the request expired is ignored.
+        txdownload_impl.AddTxAnnouncement(peer, ptx->GetWitnessHash(), now);
+        BOOST_CHECK_EQUAL(txdownload_impl.GetRequestsToSend(peer, now).size(), 1U);
+        BOOST_CHECK(txdownload_impl.GetRequestsToSend(peer, now + node::GETDATA_TX_INTERVAL).empty());
+        BOOST_CHECK(!txdownload_impl.ReceivedTx(peer, ptx).first);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

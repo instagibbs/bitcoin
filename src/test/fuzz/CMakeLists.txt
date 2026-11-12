@@ -81,6 +81,8 @@ add_executable(fuzz
   overflow.cpp
   p2p_handshake.cpp
   p2p_headers_presync.cpp
+  p2p_pkgrelay_receive.cpp
+  p2p_pkgrelay_send.cpp
   p2p_private_broadcast.cpp
   p2p_transport_serialization.cpp
   pcp.cpp
@@ -91,6 +93,7 @@ add_executable(fuzz
   parse_script.cpp
   parse_univalue.cpp
   partially_downloaded_block.cpp
+  pkgrequest.cpp
   policy_estimator_io.cpp
   poolresource.cpp
   pow.cpp

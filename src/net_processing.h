@@ -42,6 +42,8 @@ class Warnings;
 
 /** Whether transaction reconciliation protocol should be enabled by default. */
 inline constexpr bool DEFAULT_TXRECONCILIATION_ENABLE{false};
+/** Whether to relay 1-parent-1-child packages with peers that support it (NetMsgFeature::PKGRELAY_1P1C) */
+inline constexpr bool DEFAULT_PKGRELAY{true};
 /** Default number of non-mempool transactions to keep around for block reconstruction. Includes
     orphan, replaced, and rejected transactions. */
 inline constexpr uint32_t DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN{100};
@@ -115,6 +117,8 @@ public:
         unsigned int tx_send_rate{DEFAULT_TX_SEND_RATE};
         //! Return the running block filter index for a filter type, if enabled.
         std::function<BlockFilterIndex*(BlockFilterType)> get_block_filter_index{[](BlockFilterType) { return nullptr; }};
+        //! Whether 1-parent-1-child packages are relayed with peers that support it.
+        bool pkgrelay{DEFAULT_PKGRELAY};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

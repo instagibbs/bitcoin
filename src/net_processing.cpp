@@ -906,6 +906,10 @@ private:
 
     bool RejectIncomingTxs(const CNode& peer) const;
 
+    /** Whether we offer package relay to this peer: on every connection that may carry transactions
+     *  in either direction. */
+    bool OfferPackageRelay(const CNode& peer) const;
+
     /** Whether we've completed initial sync yet, for determining when to turn
       * on extra block-relay-only peers. */
     bool m_initial_sync_finished GUARDED_BY(cs_main){false};
@@ -4127,7 +4131,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         if (greatest_common_version >= FEATURE_VERSION) {
             // announce supported features
-            // MakeAndPushFeature(pfrom, NetMsgFeature::FOO, uint32_t{1});
+            if (OfferPackageRelay(pfrom)) {
+                MakeAndPushFeature(pfrom, NetMsgFeature::PKGRELAY_1P1C);
+            }
         }
 
         // If we have too many tx-relaying inbound peers, attempt to evict an existing one.
@@ -4266,6 +4272,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             MakeAndPushMessage(pfrom, NetMsgType::SENDCMPCT, /*high_bandwidth=*/false, /*version=*/CMPCTBLOCKS_VERSION);
         }
 
+        if (peer.m_pkgrelay && !peer.m_wtxid_relay) {
+            // Package relay announces and requests transactions by wtxid only.
+            peer.m_pkgrelay = false;
+        }
+
         if (m_txreconciliation) {
             if (!peer.m_wtxid_relay || !m_txreconciliation->IsPeerRegistered(pfrom.GetId())) {
                 // We could have optimistically pre-registered/registered the peer. In that case,
@@ -4382,10 +4393,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        // if (feature_id == NetMsgFeature::FOO) {
-        //     ...
-        //     return;
-        // }
+        if (feature_id == NetMsgFeature::PKGRELAY_1P1C) {
+            if (OfferPackageRelay(pfrom)) peer.m_pkgrelay = true;
+            return;
+        }
 
         // ignore unknown feature_id
         LogDebug(BCLog::NET, "unknown feature advertised: %s", SanitizeString(feature_id));
@@ -6111,6 +6122,14 @@ void PeerManagerImpl::MaybeSendFeefilter(CNode& pto, Peer& peer, std::chrono::mi
                 (currentFilter < 3 * peer.m_fee_filter_sent / 4 || currentFilter > 4 * peer.m_fee_filter_sent / 3)) {
         peer.m_next_send_feefilter = current_time + m_rng.randrange<std::chrono::microseconds>(MAX_FEEFILTER_CHANGE_DELAY);
     }
+}
+
+bool PeerManagerImpl::OfferPackageRelay(const CNode& peer) const
+{
+    // Also where we don't accept transactions from the peer, as in -blocksonly mode: we may still
+    // announce our own. Not on private broadcast connections, which carry only the transaction we
+    // broadcast.
+    return m_opts.pkgrelay && !peer.IsBlockOnlyConn() && !peer.IsFeelerConn() && !peer.IsPrivateBroadcastConn();
 }
 
 bool PeerManagerImpl::RejectIncomingTxs(const CNode& peer) const

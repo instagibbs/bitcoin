@@ -4,7 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test transaction relay behavior during IBD:
 - Set fee filters to MAX_MONEY
-- Don't request transactions
+- Don't request transactions or packages
 - Ignore all transaction messages
 """
 
@@ -18,8 +18,10 @@ from test_framework.messages import (
     CTransaction,
     from_hex,
     msg_inv,
+    msg_pkginv,
     msg_tx,
     MSG_WTX,
+    PkgInv,
 )
 from test_framework.p2p import (
     NONPREF_PEER_TX_DELAY,
@@ -68,6 +70,15 @@ class P2PIBDTxRelayTest(BitcoinTestFramework):
         peer_inver.sync_with_ping()
         with p2p_lock:
             assert txid not in peer_inver.getdata_requests
+        self.nodes[0].disconnect_p2ps()
+
+        self.log.info("Check that nodes don't send getpkg for packages while still in IBD")
+        peer_pkginver = self.nodes[0].add_p2p_connection(P2PInterface(pkgrelay=True))
+        peer_pkginver.send_and_ping(msg_pkginv([PkgInv(parent=0xdeadbeef, child=0xfeedbeef)]))
+        self.nodes[0].bumpmocktime(NONPREF_PEER_TX_DELAY)
+        peer_pkginver.sync_with_ping()
+        with p2p_lock:
+            assert "getpkg" not in peer_pkginver.last_message
         self.nodes[0].disconnect_p2ps()
 
         self.log.info("Check that nodes don't process unsolicited transactions while still in IBD")

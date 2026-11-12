@@ -4125,7 +4125,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         if (greatest_common_version >= FEATURE_VERSION) {
             // announce supported features
-            // MakeAndPushFeature(pfrom, NetMsgFeature::FOO, uint32_t{1});
+            if (m_opts.pkgrelay && !RejectIncomingTxs(pfrom)) {
+                MakeAndPushFeature(pfrom, NetMsgFeature::PKGRELAY_1P1C);
+            }
         }
 
         // If we have too many tx-relaying inbound peers, attempt to evict an existing one.
@@ -4264,6 +4266,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             MakeAndPushMessage(pfrom, NetMsgType::SENDCMPCT, /*high_bandwidth=*/false, /*version=*/CMPCTBLOCKS_VERSION);
         }
 
+        if (peer.m_pkgrelay && (!peer.m_wtxid_relay || !peer.GetTxRelay() || RejectIncomingTxs(pfrom))) {
+            // Package relay announces and requests transactions by wtxid only.
+            peer.m_pkgrelay = false;
+        }
+
         if (m_txreconciliation) {
             if (!peer.m_wtxid_relay || !m_txreconciliation->IsPeerRegistered(pfrom.GetId())) {
                 // We could have optimistically pre-registered/registered the peer. In that case,
@@ -4380,10 +4387,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        // if (feature_id == NetMsgFeature::FOO) {
-        //     ...
-        //     return;
-        // }
+        if (feature_id == NetMsgFeature::PKGRELAY_1P1C) {
+            if (m_opts.pkgrelay) peer.m_pkgrelay = true;
+            return;
+        }
 
         // ignore unknown feature_id
         LogDebug(BCLog::NET, "unknown feature advertised: %s", SanitizeString(feature_id));

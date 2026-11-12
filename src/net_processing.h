@@ -114,6 +114,8 @@ public:
         unsigned int tx_send_rate{DEFAULT_TX_SEND_RATE};
         //! Whether 1-parent-1-child packages are relayed with peers that support it.
         bool pkgrelay{DEFAULT_PKGRELAY};
+        //! Whether orphan transactions are kept (this is a test-only option).
+        bool keep_orphans{true};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

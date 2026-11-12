@@ -172,7 +172,8 @@ public:
     TxDownloadManagerImpl(const TxDownloadOptions& options)
         : m_mempool{options.m_mempool},
           m_rng{options.m_deterministic_txrequest},
-          m_orphanage{MakeTxOrphanage()},
+          // Without orphans, one weight unit per peer (zero is not allowed) trims each on arrival.
+          m_orphanage{options.m_keep_orphans ? MakeTxOrphanage() : MakeTxOrphanage(DEFAULT_MAX_ORPHANAGE_LATENCY_SCORE, /*reserved_peer_usage=*/1)},
           m_txrequest{options.m_deterministic_txrequest},
           m_pkgrequest{options.m_deterministic_txrequest}
     {}

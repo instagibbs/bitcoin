@@ -49,6 +49,8 @@ struct TxDownloadOptions {
     const CTxMemPool& m_mempool;
     /** Instantiate TxRequestTracker as deterministic (used for tests). */
     bool m_deterministic_txrequest{false};
+    /** Keep orphan transactions; otherwise each is dropped on arrival (used for tests). */
+    bool m_keep_orphans{true};
 };
 struct TxDownloadConnectionInfo {
     /** Whether this peer is preferred for transaction download. */

@@ -314,6 +314,13 @@ public:
                 }
             }
             assert(m_tracker.Count(peer) == tracked);
+            std::vector<uint256> announced;
+            m_tracker.GetAnnounced(peer, announced);
+            assert(announced.size() == tracked);
+            for (const auto& txhash : announced) {
+                const auto it{std::find(std::begin(TXHASHES), std::end(TXHASHES), txhash)};
+                assert(it != std::end(TXHASHES) && m_announcements[it - std::begin(TXHASHES)][peer].m_state != State::NOTHING);
+            }
             assert(m_tracker.CountInFlight(peer) == inflight);
             assert(m_tracker.CountCandidates(peer) == candidates);
             total += tracked;

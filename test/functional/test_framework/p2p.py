@@ -44,6 +44,11 @@ from test_framework.messages import (
     msg_cfilter,
     msg_cmpctblock,
     msg_feature,
+    msg_getpkg,
+    msg_pkginv,
+    msg_pkgnotfound,
+    msg_pkgtxns,
+    PKGRELAY_1P1C_FEATURE,
     msg_feefilter,
     msg_filteradd,
     msg_filterclear,
@@ -138,6 +143,7 @@ MESSAGEMAP = {
     b"getcfheaders": msg_getcfheaders,
     b"getcfilters": msg_getcfilters,
     b"getdata": msg_getdata,
+    b"getpkg": msg_getpkg,
     b"getheaders": msg_getheaders,
     b"headers": msg_headers,
     b"inv": msg_inv,
@@ -145,6 +151,9 @@ MESSAGEMAP = {
     b"merkleblock": msg_merkleblock,
     b"notfound": msg_notfound,
     b"ping": msg_ping,
+    b"pkginv": msg_pkginv,
+    b"pkgnotfound": msg_pkgnotfound,
+    b"pkgtxns": msg_pkgtxns,
     b"pong": msg_pong,
     b"sendaddrv2": msg_sendaddrv2,
     b"sendcmpct": msg_sendcmpct,
@@ -466,7 +475,7 @@ class P2PInterface(P2PConnection):
 
     Individual testcases should subclass this and override the on_* methods
     if they want to alter message handling behaviour."""
-    def __init__(self, support_addrv2=False, wtxidrelay=True):
+    def __init__(self, support_addrv2=False, wtxidrelay=True, pkgrelay=False):
         super().__init__()
 
         # Track number of messages of each type received.
@@ -488,6 +497,9 @@ class P2PInterface(P2PConnection):
 
         # If the peer supports wtxid-relay
         self.wtxidrelay = wtxidrelay
+
+        # If the peer supports 1-parent-1-child package relay
+        self.pkgrelay = pkgrelay
 
     def peer_connect_send_version(self, services):
         # Send a version msg
@@ -561,10 +573,14 @@ class P2PInterface(P2PConnection):
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
     def on_getheaders(self, message): pass
+    def on_getpkg(self, message): pass
     def on_headers(self, message): pass
     def on_mempool(self, message): pass
     def on_merkleblock(self, message): pass
     def on_notfound(self, message): pass
+    def on_pkginv(self, message): pass
+    def on_pkgnotfound(self, message): pass
+    def on_pkgtxns(self, message): pass
     def on_pong(self, message): pass
     def on_sendaddrv2(self, message): pass
     def on_sendcmpct(self, message): pass
@@ -598,6 +614,8 @@ class P2PInterface(P2PConnection):
             self.send_without_ping(msg_wtxidrelay())
         if self.support_addrv2:
             self.send_without_ping(msg_sendaddrv2())
+        if message.nVersion >= 70017 and self.pkgrelay:
+            self.send_without_ping(msg_feature(PKGRELAY_1P1C_FEATURE))
         self.send_without_ping(msg_verack())
         self.nServices = message.nServices
         self.relay = message.relay

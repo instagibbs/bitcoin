@@ -6,11 +6,13 @@
 #include <consensus/validation.h>
 #include <net_processing.h>
 #include <node/txdownloadman_impl.h>
+#include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/script.h>
 #include <test/util/common.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
+#include <test/util/txmempool.h>
 #include <validation.h>
 
 #include <array>
@@ -334,6 +336,273 @@ BOOST_FIXTURE_TEST_CASE(handle_missing_inputs, TestChain100Setup)
                                                 /*expect_orphan=*/true, /*expect_keep=*/true, /*expected_parents=*/1);
             BOOST_CHECK_MESSAGE(ok, err_msg);
         }
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(package_relay_requests, TestChain100Setup)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    const node::TxDownloadOptions opts{.m_mempool = pool, .m_deterministic_txrequest = true};
+    const node::TxDownloadConnectionInfo inbound{/*m_preferred=*/false, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
+    const node::TxDownloadConnectionInfo outbound{/*m_preferred=*/true, /*m_relay_permissions=*/false, /*m_wtxid_relay=*/true};
+    const auto parent{CreatePlaceholderTx(/*segwit=*/true)};
+    const auto child{CreatePlaceholderTx(/*segwit=*/true)};
+    const PkgInv pkg{parent->GetWitnessHash(), child->GetWitnessHash()};
+    const PkgInv reversed{pkg.child, pkg.parent};
+    auto now{GetTime<std::chrono::microseconds>()};
+    const auto failure{[](TxValidationResult result) {
+        TxValidationState state;
+        state.Invalid(result, "");
+        return MempoolAcceptResult::Failure(state);
+    }};
+
+    // A package's id depends on which transaction is the parent.
+    BOOST_CHECK(pkg.GetId() != reversed.GetId());
+
+    const auto requests_to{[&](node::TxDownloadManagerImpl& txdownload, NodeId peer) {
+        const auto requests{txdownload.GetPackageRequestsToSend(peer, now)};
+        txdownload.m_pkgrequest.SanityCheck();
+        BOOST_CHECK(requests.empty() || (requests.size() == 1 && requests[0].pkg.GetId() == pkg.GetId() && !requests[0].child_only));
+        return requests.size();
+    }};
+
+    {
+        // One request at a time; the next announcer is asked after a timeout or a notfound, and only
+        // an announcer that was not done with can deliver the package.
+        node::TxDownloadManagerImpl txdownload{opts};
+        for (NodeId peer : {0, 1}) txdownload.ConnectedPeer(peer, inbound);
+        txdownload.ConnectedPeer(2, outbound);
+
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 0);
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 1);
+
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(2, pkg, now));
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 2), 0);
+        now += node::GETDATA_TX_INTERVAL;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1), 0);
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 2), 1);
+
+        txdownload.ReceivedPackageNotFound(2, {pkg});
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1), 1);
+
+        BOOST_CHECK(!txdownload.ReceivedPackage(0, parent, child));
+        BOOST_CHECK(!txdownload.ReceivedPackage(2, parent, child));
+        BOOST_CHECK(!txdownload.ReceivedPackage(3, parent, child));
+        BOOST_CHECK(txdownload.ReceivedPackage(1, parent, child));
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 0);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 0);
+    }
+
+    {
+        // Per-transaction state, including the transactions' own requests, does not affect requests
+        // for the package.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        for (const auto& tx : {parent, child}) {
+            txdownload.RecentRejectsFilter().insert(tx->GetHash().ToUint256());
+            txdownload.RecentRejectsFilter().insert(tx->GetWitnessHash().ToUint256());
+            txdownload.RecentRejectsReconsiderableFilter().insert(tx->GetWitnessHash().ToUint256());
+            txdownload.m_txrequest.ReceivedInv(0, tx->GetWitnessHash(), /*preferred=*/false, now);
+        }
+        txdownload.m_orphanage->AddTx(child, 0);
+
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 1);
+
+        TxValidationState state;
+        state.Invalid(TxValidationResult::TX_CONSENSUS, "");
+        txdownload.MempoolRejectedTx(child, state, 0, /*first_time_failure=*/true);
+        txdownload.MempoolRejectedTx(parent, state, 0, /*first_time_failure=*/true);
+        txdownload.ReceivedNotFound(0, {parent->GetWitnessHash(), child->GetWitnessHash()});
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(0), 1);
+        BOOST_CHECK(txdownload.ReceivedPackage(0, parent, child));
+    }
+
+    {
+        // A rejected package is not requested again until the tip changes.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        txdownload.RecentRejectedPackagesFilter().insert(pkg.GetId().ToUint256());
+        BOOST_CHECK(txdownload.AddPackageAnnouncement(0, pkg, now));
+        BOOST_CHECK(!txdownload.AlreadyHavePackage(reversed));
+        txdownload.ActiveTipChange();
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+
+        // A package is dropped at request time once its child is confirmed.
+        CBlock block;
+        block.vtx = {child};
+        txdownload.BlockConnected(std::make_shared<const CBlock>(block));
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 0);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 0);
+        BOOST_CHECK(txdownload.AddPackageAnnouncement(0, pkg, now));
+    }
+
+    {
+        // A package whose child does not spend its parent is rejected as delivered.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, reversed, now));
+        BOOST_CHECK(!txdownload.ReceivedPackage(0, child, parent));
+        BOOST_CHECK(txdownload.AlreadyHavePackage(reversed));
+        BOOST_CHECK(!txdownload.AlreadyHavePackage(pkg));
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 0);
+    }
+
+    {
+        // What a validated package leaves behind: the members not accepted, to keep for compact block
+        // reconstruction unless they are in the mempool already, and the package as rejected unless
+        // its child is in the mempool.
+        node::TxDownloadManagerImpl txdownload{opts};
+        std::map<Wtxid, MempoolAcceptResult> results;
+        results.emplace(pkg.parent, MempoolAcceptResult::MempoolTx(/*vsize=*/100, /*fees=*/0));
+        results.emplace(pkg.child, failure(TxValidationResult::TX_CONSENSUS));
+        const auto keep{txdownload.RelayedPackageValidated({parent, child}, PackageMempoolAcceptResult{PackageValidationState{}, std::move(results)})};
+        BOOST_REQUIRE_EQUAL(keep.size(), 1U);
+        BOOST_CHECK(keep[0] == child);
+        BOOST_CHECK(txdownload.AlreadyHavePackage(pkg));
+        // A member without a result was not validated, and is kept.
+        BOOST_CHECK_EQUAL(txdownload.RelayedPackageValidated({parent, child}, PackageMempoolAcceptResult{PackageValidationState{}, {}}).size(), 2U);
+    }
+
+    {
+        // Announcements are capped per peer, and their bookkeeping goes away with them.
+        node::TxDownloadManagerImpl txdownload{opts};
+        txdownload.ConnectedPeer(0, inbound);
+        txdownload.ConnectedPeer(1, inbound);
+        std::vector<PkgInv> pkgs;
+        for (int i{0}; i <= node::MAX_PEER_PKG_ANNOUNCEMENTS; ++i) {
+            pkgs.push_back({Wtxid::FromUint256(m_rng.rand256()), Wtxid::FromUint256(m_rng.rand256())});
+            txdownload.AddPackageAnnouncement(0, pkgs.back(), now);
+        }
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Count(0), node::MAX_PEER_PKG_ANNOUNCEMENTS);
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Count(1), 1);
+        txdownload.ReceivedPackageNotFound(0, pkgs);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 1);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 1);
+        txdownload.m_pkgrequest.SanityCheck();
+        txdownload.DisconnectedPeer(0);
+        txdownload.DisconnectedPeer(1);
+        txdownload.CheckIsEmpty();
+    }
+
+    {
+        // A package is forgotten once no announcer is left to request it from, whether a
+        // disconnection or a timeout ends the last announcement.
+        node::TxDownloadManagerImpl txdownload{opts};
+        for (NodeId peer : {0, 1}) txdownload.ConnectedPeer(peer, outbound);
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 1);
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, reversed, now));
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 2);
+        txdownload.DisconnectedPeer(1);
+        txdownload.m_pkgrequest.SanityCheck();
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 1);
+        now += node::GETDATA_TX_INTERVAL;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 0);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 0);
+        txdownload.DisconnectedPeer(0);
+        txdownload.CheckIsEmpty();
+    }
+
+    {
+        // A package whose parent is in the mempool is requested child only, and only the peer it was
+        // requested from can answer with the child, once. If the child turns out to be missing
+        // inputs, the full package is requested from the same peer, once, with the request kept in
+        // flight.
+        node::TxDownloadManagerImpl txdownload{opts};
+        for (NodeId peer : {0, 1}) txdownload.ConnectedPeer(peer, inbound);
+        TryAddToMempool(pool, TestMemPoolEntryHelper{}.FromTx(parent));
+        const auto child_of{[&](NodeId peer) { return txdownload.ReceivedPackageChild(peer, pkg.child); }};
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        now += node::NONPREF_PEER_TX_DELAY;
+        auto requests{txdownload.GetPackageRequestsToSend(0, now)};
+        BOOST_REQUIRE_EQUAL(requests.size(), 1U);
+        BOOST_CHECK(requests[0].child_only);
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        BOOST_CHECK(child_of(1).empty());
+        BOOST_CHECK(txdownload.ReceivedPackageChild(0, pkg.parent).empty());
+        BOOST_REQUIRE_EQUAL(child_of(0).size(), 1U);
+        BOOST_CHECK(!txdownload.RelayedChildValidated(0, {pkg}, failure(TxValidationResult::TX_MISSING_INPUTS)));
+        txdownload.m_pkgrequest.SanityCheck();
+        BOOST_CHECK(child_of(0).empty());
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(0), 1);
+        BOOST_CHECK(!txdownload.AlreadyHavePackage(pkg));
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 1);
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 0), 0);
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1), 0);
+        BOOST_CHECK(txdownload.ReceivedPackage(0, parent, child));
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 0);
+
+        // The child's result ends the request for every announcer, and remembers the package as
+        // rejected unless the child was accepted; one that lost its witness is not kept for
+        // compact blocks.
+        for (const auto result : {TxValidationResult::TX_CONSENSUS, TxValidationResult::TX_WITNESS_STRIPPED}) {
+            txdownload.ActiveTipChange();
+            BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+            BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+            now += node::NONPREF_PEER_TX_DELAY;
+            const NodeId asked{txdownload.GetPackageRequestsToSend(0, now).empty() ? 1 : 0};
+            if (asked == 1) BOOST_CHECK_EQUAL(txdownload.GetPackageRequestsToSend(1, now).size(), 1U);
+            BOOST_REQUIRE_EQUAL(txdownload.ReceivedPackageChild(asked, pkg.child).size(), 1U);
+            BOOST_CHECK_EQUAL(txdownload.RelayedChildValidated(asked, {pkg}, failure(result)), result == TxValidationResult::TX_CONSENSUS);
+            BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 0);
+            BOOST_CHECK(txdownload.AlreadyHavePackage(pkg));
+        }
+        txdownload.ActiveTipChange();
+
+        // A notfound for the child ends the request while the parent is in the mempool, and the child
+        // is not accepted from that peer then.
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(1, pkg, now));
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(txdownload.GetPackageRequestsToSend(0, now).size() + txdownload.GetPackageRequestsToSend(1, now).size(), 1U);
+        const NodeId asked{txdownload.m_pkgrequest.CountInFlight(0) ? 0 : 1};
+        txdownload.ReceivedPackageChildNotFound(asked, {pkg.child});
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(asked), 0);
+        BOOST_CHECK(txdownload.ReceivedPackageChild(asked, pkg.child).empty());
+
+        // Once the parent has left the mempool, a notfound for the child turns the request into one
+        // for the full package, still in flight, and with the child-only request's expiry.
+        requests = txdownload.GetPackageRequestsToSend(1 - asked, now);
+        BOOST_REQUIRE_EQUAL(requests.size(), 1U);
+        BOOST_CHECK(requests[0].child_only);
+        WITH_LOCK(pool.cs, pool.removeRecursive(*parent, MemPoolRemovalReason::REPLACED));
+        txdownload.ReceivedPackageChildNotFound(1 - asked, {pkg.child});
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(1 - asked), 1);
+        BOOST_CHECK(txdownload.ReceivedPackageChild(1 - asked, pkg.child).empty());
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1 - asked), 1);
+        now += node::GETDATA_TX_INTERVAL - 1us;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1 - asked), 0);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(1 - asked), 1);
+        now += 1us;
+        BOOST_CHECK_EQUAL(requests_to(txdownload, 1 - asked), 0);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 0);
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountPackages(), 0);
+
+        // A full request owed for a package we have by now is dropped instead.
+        TryAddToMempool(pool, TestMemPoolEntryHelper{}.FromTx(parent));
+        BOOST_CHECK(!txdownload.AddPackageAnnouncement(0, pkg, now));
+        now += node::NONPREF_PEER_TX_DELAY;
+        BOOST_CHECK_EQUAL(txdownload.GetPackageRequestsToSend(0, now).size(), 1U);
+        BOOST_REQUIRE_EQUAL(txdownload.ReceivedPackageChild(0, pkg.child).size(), 1U);
+        BOOST_CHECK(!txdownload.RelayedChildValidated(0, {pkg}, failure(TxValidationResult::TX_MISSING_INPUTS)));
+        txdownload.RecentRejectedPackagesFilter().insert(pkg.GetId().ToUint256());
+        BOOST_CHECK(txdownload.GetPackageRequestsToSend(0, now).empty());
+        BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.Size(), 0);
+        WITH_LOCK(pool.cs, pool.removeRecursive(*parent, MemPoolRemovalReason::REPLACED));
+
+        // Disconnecting drops the records.
+        txdownload.DisconnectedPeer(0);
+        txdownload.DisconnectedPeer(1);
+        txdownload.CheckIsEmpty();
     }
 }
 

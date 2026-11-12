@@ -6,6 +6,7 @@
 #ifndef BITCOIN_PROTOCOL_H
 #define BITCOIN_PROTOCOL_H
 
+#include <attributes.h>
 #include <kernel/messagestartchars.h> // IWYU pragma: export
 #include <netaddress.h>
 #include <primitives/transaction.h>
@@ -15,6 +16,7 @@
 #include <util/time.h>
 
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -268,6 +270,17 @@ inline constexpr const char* SENDTXRCNCL{"sendtxrcncl"};
  * BIP 434 Peer feature negotiation
  */
 inline constexpr const char* FEATURE{"feature"};
+/**
+ * Announces 1-parent-1-child packages as (parent wtxid, child wtxid) pairs.
+ * Only exchanged with peers that negotiated NetMsgFeature::PKGRELAY_1P1C.
+ */
+inline constexpr const char* PKGINV{"pkginv"};
+/** Requests both transactions of announced 1-parent-1-child packages. */
+inline constexpr const char* GETPKG{"getpkg"};
+/** The parent and the child of one requested package. */
+inline constexpr const char* PKGTXNS{"pkgtxns"};
+/** Lists requested packages that were not served. */
+inline constexpr const char* PKGNOTFOUND{"pkgnotfound"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -308,14 +321,24 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::WTXIDRELAY,
     NetMsgType::SENDTXRCNCL,
     NetMsgType::FEATURE,
+    NetMsgType::PKGINV,
+    NetMsgType::GETPKG,
+    NetMsgType::PKGTXNS,
+    NetMsgType::PKGNOTFOUND,
 })};
 
 inline constexpr size_t MAX_FEATUREID_LENGTH{80};
 inline constexpr size_t MAX_FEATUREDATA_LENGTH{512};
 
 namespace NetMsgFeature {
-//inline constexpr std::string_view FOO{"BIP-FOO"};
+/** Relay of 1-parent-1-child packages through pkginv, getpkg, pkgtxns and pkgnotfound. Requires wtxidrelay. */
+inline constexpr std::string_view PKGRELAY_1P1C{"pkgrelay-1p1c"};
 }
+
+/** Maximum number of entries in a pkginv message. */
+inline constexpr unsigned int MAX_PKGINV_SZ{1000};
+/** Maximum number of entries in a getpkg or pkgnotfound message, as many as a peer keeps in flight. */
+inline constexpr unsigned int MAX_GETPKG_SZ{100};
 
 /** nServices flags */
 enum ServiceFlags : uint64_t {
@@ -547,5 +570,29 @@ public:
 
 /** Convert a TX/WITNESS_TX/WTX CInv to a GenTxid. */
 GenTxid ToGenTxid(const CInv& inv);
+
+/** Identifier of a package announced with pkginv (see PkgInv::GetId), not to be taken for a wtxid. */
+class PkgId
+{
+    uint256 m_hash;
+
+public:
+    explicit PkgId(const uint256& hash) : m_hash{hash} {}
+    const uint256& ToUint256() const LIFETIMEBOUND { return m_hash; }
+    std::string ToString() const { return m_hash.ToString(); }
+    bool operator==(const PkgId&) const = default;
+    std::strong_ordering operator<=>(const PkgId&) const = default;
+};
+
+/** pkginv, getpkg and pkgnotfound entry: a 1-parent-1-child package by the wtxids of its transactions. */
+struct PkgInv {
+    Wtxid parent;
+    Wtxid child;
+
+    SERIALIZE_METHODS(PkgInv, obj) { READWRITE(obj.parent, obj.child); }
+
+    /** Identifier of the package. Unlike GetPackageHash, it depends on which transaction is the parent. */
+    PkgId GetId() const;
+};
 
 #endif // BITCOIN_PROTOCOL_H

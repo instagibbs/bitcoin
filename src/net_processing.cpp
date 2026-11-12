@@ -32,6 +32,7 @@
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
 #include <node/connection_types.h>
+#include <node/pkgrelay.h>
 #include <node/protocol_version.h>
 #include <node/timeoffsets.h>
 #include <node/txdownloadman.h>
@@ -315,6 +316,9 @@ struct Peer {
          *  constructing the `inv` message. We use the mempool to sort transactions
          *  in dependency order before relay, so this does not have to be sorted. */
         std::vector<Wtxid> m_tx_inventory_to_send GUARDED_BY(m_tx_inventory_mutex);
+        /** Transactions to announce on their own at the next trickle, because a package with them
+         *  could not be served to this peer (see GETPKG). */
+        node::PackageFallback m_pkg_fallback GUARDED_BY(m_tx_inventory_mutex);
         /** Whether the peer has requested us to send our complete mempool. Only
          *  permitted if the peer has NetPermissionFlags::Mempool or we advertise
          *  NODE_BLOOM. See BIP35. */
@@ -399,6 +403,8 @@ struct Peer {
     Mutex m_getdata_requests_mutex;
     /** Work queue of items requested by this peer **/
     std::deque<CInv> m_getdata_requests GUARDED_BY(m_getdata_requests_mutex);
+    /** Work queue of packages requested by this peer through getpkg **/
+    std::vector<PkgInv> m_getpkg_requests GUARDED_BY(m_getdata_requests_mutex);
 
     /** Time of the last getheaders message to this peer */
     NodeClock::time_point m_last_getheaders_timestamp GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
@@ -1066,6 +1072,14 @@ private:
 
     /** Send getpkg requests, in messages of at most MAX_GETPKG_SZ. */
     void PushGetPkg(CNode& node, const std::vector<PkgInv>& pkgs);
+
+    /** Serve queued getpkg requests until the send buffer is full, like ProcessGetData. Serving
+     *  removes the transactions from the unbroadcast set and marks them known to the peer. A package
+     *  that cannot be served is answered with pkgnotfound, and its transactions are queued to be
+     *  announced on their own (see PackageFallback). */
+    void ProcessGetPkg(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
+        LOCKS_EXCLUDED(::cs_main);
 
     /** Process a new block. Perform any post-processing housekeeping */
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked);
@@ -2845,6 +2859,46 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         // assume we have them and request the parents from us.
         MakeAndPushMessage(pfrom, NetMsgType::NOTFOUND, vNotFound);
     }
+}
+
+void PeerManagerImpl::ProcessGetPkg(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
+{
+    AssertLockNotHeld(cs_main);
+
+    auto tx_relay = peer.GetTxRelay();
+    if (!tx_relay) {
+        peer.m_getpkg_requests.clear();
+        return;
+    }
+
+    std::vector<PkgInv> not_found;
+    auto it{peer.m_getpkg_requests.begin()};
+    while (it != peer.m_getpkg_requests.end()) {
+        if (interruptMsgProc) return;
+        // The send buffer provides backpressure. If there's no space in the buffer, pause
+        // processing until the next call.
+        if (pfrom.fPauseSend) break;
+
+        const PkgInv& pkg{*it++};
+        const auto parent{FindTxForGetData(*tx_relay, pkg.parent)};
+        const auto child{FindTxForGetData(*tx_relay, pkg.child)};
+        if (parent && child) {
+            MakeAndPushMessage(pfrom, NetMsgType::PKGTXNS, TX_WITH_WITNESS(*parent), TX_WITH_WITNESS(*child));
+            m_mempool.RemoveUnbroadcastTx(parent->GetHash());
+            m_mempool.RemoveUnbroadcastTx(child->GetHash());
+            AddKnownTx(peer, pkg.parent.ToUint256());
+            AddKnownTx(peer, pkg.child.ToUint256());
+            continue;
+        }
+        not_found.push_back(pkg);
+
+        // We may have announced this package instead of its transactions. Announce those still in
+        // our mempool on their own, so that a package we cannot serve does not keep them from the peer.
+        LOCK(tx_relay->m_tx_inventory_mutex);
+        tx_relay->m_pkg_fallback.Add(pkg, m_mempool, tx_relay->m_tx_inventory_known_filter);
+    }
+    peer.m_getpkg_requests.erase(peer.m_getpkg_requests.begin(), it);
+    if (!not_found.empty()) MakeAndPushMessage(pfrom, NetMsgType::PKGNOTFOUND, not_found);
 }
 
 void PeerManagerImpl::PushGetPkg(CNode& node, const std::vector<PkgInv>& pkgs)
@@ -5470,6 +5524,21 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         return;
     }
 
+    if (msg_type == NetMsgType::GETPKG) {
+        std::vector<PkgInv> pkgs;
+        vRecv >> pkgs;
+        if (pkgs.size() > MAX_GETPKG_SZ) {
+            Misbehaving(peer, strprintf("getpkg message size = %u", pkgs.size()));
+            return;
+        }
+        if (!peer.m_pkgrelay || !peer.GetTxRelay()) return;
+
+        LOCK(peer.m_getdata_requests_mutex);
+        peer.m_getpkg_requests.insert(peer.m_getpkg_requests.end(), pkgs.begin(), pkgs.end());
+        ProcessGetPkg(pfrom, peer, interruptMsgProc);
+        return;
+    }
+
     if (msg_type == NetMsgType::PKGTXNS) {
         if (RejectIncomingTxs(pfrom)) {
             LogDebug(BCLog::NET, "package sent in violation of protocol, %s", pfrom.DisconnectMsg());
@@ -5582,6 +5651,9 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         if (!peer.m_getdata_requests.empty()) {
             ProcessGetData(node, peer, interruptMsgProc);
         }
+        if (!peer.m_getpkg_requests.empty()) {
+            ProcessGetPkg(node, peer, interruptMsgProc);
+        }
     }
 
     const bool processed_orphan = ProcessOrphanTx(peer);
@@ -5595,7 +5667,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
     // and prevents m_getdata_requests to grow unbounded
     {
         LOCK(peer.m_getdata_requests_mutex);
-        if (!peer.m_getdata_requests.empty()) return true;
+        if (!peer.m_getdata_requests.empty() || !peer.m_getpkg_requests.empty()) return true;
     }
 
     // Don't bother if send buffer is too full to respond anyway
@@ -5628,7 +5700,7 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         if (interruptMsgProc) return false;
         {
             LOCK(peer.m_getdata_requests_mutex);
-            if (!peer.m_getdata_requests.empty()) fMoreWork = true;
+            if (!peer.m_getdata_requests.empty() || !peer.m_getpkg_requests.empty()) fMoreWork = true;
         }
         // Does this peer have an orphan ready to reconsider?
         // (Note: we may have provided a parent for an orphan provided
@@ -6477,7 +6549,10 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                 // Time to send but the peer has requested we not relay transactions.
                 if (fSendTrickle) {
                     LOCK(tx_relay->m_bloom_filter_mutex);
-                    if (!tx_relay->m_relay_txs) tx_relay->m_tx_inventory_to_send.clear();
+                    if (!tx_relay->m_relay_txs) {
+                        tx_relay->m_tx_inventory_to_send.clear();
+                        tx_relay->m_pkg_fallback.Take();
+                    }
                 }
 
                 // Respond to BIP35 mempool requests
@@ -6523,33 +6598,41 @@ bool PeerManagerImpl::SendMessages(CNode& node)
                     // Topologically and fee-rate sort the inventory we send for privacy and priority reasons.
                     // (sorted from higher priority to lowest, skipping low fee)
                     const CFeeRate filterrate{tx_relay->m_fee_filter_received.load()};
+                    const bool pkgrelay{peer.m_pkgrelay && WITH_LOCK(tx_relay->m_bloom_filter_mutex, return !tx_relay->m_bloom_filter)};
 
                     auto inv_tx = [&]() EXCLUSIVE_LOCKS_REQUIRED(tx_relay->m_tx_inventory_mutex) {
                         auto& invs = tx_relay->m_tx_inventory_to_send;
-                        std::vector<CTransactionRef> res;
-
-                        if (invs.size() == 0) return res;
+                        if (invs.empty() && tx_relay->m_pkg_fallback.empty()) return node::InventoryToSend{};
 
                         // if previous allocations were excessive, shrink to the current size
                         if (invs.capacity() > 2 * invs.size()) invs.shrink_to_fit();
 
                         LOCK(m_mempool.cs);
                         auto txiters = m_mempool.ExtractBestByMiningScoreWithTopology(invs, invs.size());
-                        res.reserve(txiters.size());
-                        for (auto txiter : txiters) {
-                            if (txiter->GetFee() < filterrate.GetFee(txiter->GetTxSize())) {
-                                continue; // higher feerate CPFP txs may follow, so just skip, don't stop
-                            }
-                            res.push_back(txiter->GetSharedTx());
-                        }
+                        auto res{node::SelectInventory(m_mempool, txiters, tx_relay->m_pkg_fallback.Take(), filterrate, pkgrelay, tx_relay->m_tx_inventory_known_filter)};
                         // Ensure we'll respond to GETDATA requests for anything we're about to announce
                         tx_relay->m_last_inv_sequence = m_mempool.GetSequence();
                         return res;
                     }();
 
+                    // Packages go first, so that a peer requesting a package and a transaction
+                    // spending it at once gets the package first. Only the package id is marked known:
+                    // a transaction we fail to serve in the package may still be announced on its own
+                    // (see GETPKG).
+                    std::vector<PkgInv> vPkgInv;
+                    for (const PkgInv& pkg : inv_tx.pkgs) {
+                        vPkgInv.push_back(pkg);
+                        tx_relay->m_tx_inventory_known_filter.insert(pkg.GetId().ToUint256());
+                        if (vPkgInv.size() == MAX_PKGINV_SZ) {
+                            MakeAndPushMessage(node, NetMsgType::PKGINV, vPkgInv);
+                            vPkgInv.clear();
+                        }
+                    }
+                    if (!vPkgInv.empty()) MakeAndPushMessage(node, NetMsgType::PKGINV, vPkgInv);
+
                     LOCK(tx_relay->m_bloom_filter_mutex);
-                    vInv.reserve(std::min<size_t>(MAX_INV_SZ, vInv.size() + inv_tx.size()));
-                    for (auto& tx : inv_tx) {
+                    vInv.reserve(std::min<size_t>(MAX_INV_SZ, vInv.size() + inv_tx.txs.size()));
+                    for (auto& tx : inv_tx.txs) {
                         // `TxRelay::m_tx_inventory_known_filter` contains either txids or wtxids
                         // depending on whether our peer supports wtxid-relay. Therefore, first
                         // construct the inv and then use its hash for the filter check.

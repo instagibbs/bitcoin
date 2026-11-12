@@ -202,6 +202,10 @@ public:
      * result_peers. Does not try to ensure that result_peers contains no duplicates. */
     void GetCandidatePeers(const uint256& txhash, std::vector<NodeId>& result_peers) const;
 
+    /** For some peer, appends the txhashes of all its announcements (REQUESTED, CANDIDATE, and COMPLETED) to
+     * result_txhashes. */
+    void GetAnnounced(NodeId peer, std::vector<uint256>& result_txhashes) const;
+
     /** Access to the internal priority computation (testing only) */
     uint64_t ComputePriority(const uint256& txhash, NodeId peer, bool preferred) const;
 

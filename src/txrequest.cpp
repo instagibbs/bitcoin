@@ -572,6 +572,14 @@ public:
         }
     }
 
+    void GetAnnounced(NodeId peer, std::vector<uint256>& result_txhashes) const
+    {
+        const auto& index = m_index.get<ByPeer>();
+        for (auto it = index.lower_bound(ByPeerView{peer, false, uint256::ZERO}); it != index.end() && it->m_peer == peer; ++it) {
+            result_txhashes.push_back(it->m_gtxid.ToUint256());
+        }
+    }
+
     void ReceivedInv(NodeId peer, const GenTxid& gtxid, bool preferred,
                      std::chrono::microseconds reqtime)
     {
@@ -720,6 +728,7 @@ size_t TxRequestTracker::CountCandidates(NodeId peer) const { return m_impl->Cou
 size_t TxRequestTracker::Count(NodeId peer) const { return m_impl->Count(peer); }
 size_t TxRequestTracker::Size() const { return m_impl->Size(); }
 void TxRequestTracker::GetCandidatePeers(const uint256& txhash, std::vector<NodeId>& result_peers) const { return m_impl->GetCandidatePeers(txhash, result_peers); }
+void TxRequestTracker::GetAnnounced(NodeId peer, std::vector<uint256>& result_txhashes) const { return m_impl->GetAnnounced(peer, result_txhashes); }
 void TxRequestTracker::SanityCheck() const { m_impl->SanityCheck(); }
 
 void TxRequestTracker::PostGetRequestableSanityCheck(std::chrono::microseconds now) const

@@ -8,6 +8,7 @@
 #include <net.h>
 #include <node/txorphanage.h>
 #include <policy/packages.h>
+#include <protocol.h>
 
 #include <cstdint>
 #include <memory>
@@ -17,6 +18,8 @@ class CRollingBloomFilter;
 class CTxMemPool;
 class GenTxid;
 class TxRequestTracker;
+struct MempoolAcceptResult;
+struct PackageMempoolAcceptResult;
 namespace node {
 class TxDownloadManagerImpl;
 
@@ -28,6 +31,10 @@ inline constexpr int32_t MAX_PEER_TX_REQUEST_IN_FLIGHT = 100;
  *  rate (by our own policy, see DEFAULT_TX_SEND_RATE) for several minutes, while not receiving
  *  the actual transaction (from any peer) in response to requests for them. */
 inline constexpr int32_t MAX_PEER_TX_ANNOUNCEMENTS = 5000;
+/** Maximum number of packages announced with pkginv to consider for requesting, per peer. Lower than
+ *  MAX_PEER_TX_ANNOUNCEMENTS: a peer announces only some of its transactions in packages, and each
+ *  package announcement takes about three times the memory of a transaction announcement. */
+inline constexpr int32_t MAX_PEER_PKG_ANNOUNCEMENTS = 1000;
 /** How long to delay requesting transactions via txids, if we have wtxid-relaying peers */
 inline constexpr auto TXID_RELAY_DELAY{2s};
 /** How long to delay requesting transactions from non-preferred peers */
@@ -140,6 +147,57 @@ public:
 
     /** Should be called when a notfound for a tx has been received. */
     void ReceivedNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids);
+
+    /** Consider requesting this package from the peer. Should be called whenever a pkginv entry
+     * has been received. Returns true if we already have the package (see AlreadyHavePackage).
+     * Ignored if the peer has MAX_PEER_PKG_ANNOUNCEMENTS tracked already. */
+    bool AddPackageAnnouncement(NodeId peer, const PkgInv& pkg, std::chrono::microseconds now);
+
+    /** A package to request: both transactions with getpkg, or the child only with getdata. */
+    struct PackageRequest {
+        PkgInv pkg;
+        bool child_only;
+    };
+
+    /** Get package requests to send: first the packages to request in full again after a request for
+     * the child alone (see ReceivedPackageChildNotFound and RelayedChildValidated), then new requests.
+     * A new request is for the child alone if the parent is in the mempool. The requests count as
+     * sent, so the caller must send each. Packages we already have are forgotten instead of
+     * returned. */
+    std::vector<PackageRequest> GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+
+    /** Should be called when a pkgnotfound has been received. Marks the peer done with these
+     * packages, so that other announcers are asked. */
+    void ReceivedPackageNotFound(NodeId nodeid, const std::vector<PkgInv>& pkgs);
+
+    /** Should be called when a pkgtxns has been received. If the peer announced the package, stops
+     * requesting it from any peer, and remembers it as rejected if the child does not spend the
+     * parent. Returns whether to validate it (then call RelayedPackageValidated): the peer announced
+     * it, we don't already have it, and the child spends the parent. */
+    bool ReceivedPackage(NodeId nodeid, const CTransactionRef& parent, const CTransactionRef& child);
+
+    /** Should be called when a transaction has been received, before ReceivedTx. Returns the packages
+     * we requested child only from this peer with this transaction as the child and don't already
+     * have; those we have are forgotten. If there are any, the transaction is to be validated for
+     * them instead of by ReceivedTx (then call RelayedChildValidated). */
+    std::vector<PkgInv> ReceivedPackageChild(NodeId nodeid, const Wtxid& child);
+
+    /** Should be called when a notfound has been received. Ends the child-only requests to this peer
+     * it answers, unless the parent left the mempool: then the package is requested in full from the
+     * same peer, which announces the parent on its own if it cannot serve the package either. */
+    void ReceivedPackageChildNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids);
+
+    /** Respond to the validation of a package from pkgtxns. Remembers the package as rejected unless
+     * its child is in the mempool. Returns its transactions to keep for compact block reconstruction:
+     * those not accepted, other than ones already in the mempool or stripped of their witness. */
+    std::vector<CTransactionRef> RelayedPackageValidated(const Package& package, const PackageMempoolAcceptResult& result);
+
+    /** Respond to the validation of the child of packages requested child only from this peer (see
+     * ReceivedPackageChild). If it was missing inputs, the packages are requested in full from the same
+     * peer and nothing is remembered about them. Otherwise they are no longer requested, and remembered
+     * as rejected unless the child was accepted. Returns whether to keep the child for compact block
+     * reconstruction. */
+    bool RelayedChildValidated(NodeId nodeid, const std::vector<PkgInv>& pkgs, const MempoolAcceptResult& result);
 
     /** Respond to successful transaction submission to mempool */
     void MempoolAcceptedTx(const CTransactionRef& tx);

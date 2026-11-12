@@ -51,6 +51,38 @@ void TxDownloadManager::ReceivedNotFound(NodeId nodeid, const std::vector<GenTxi
 {
     m_impl->ReceivedNotFound(nodeid, gtxids);
 }
+bool TxDownloadManager::AddPackageAnnouncement(NodeId peer, const PkgInv& pkg, std::chrono::microseconds now)
+{
+    return m_impl->AddPackageAnnouncement(peer, pkg, now);
+}
+std::vector<TxDownloadManager::PackageRequest> TxDownloadManager::GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
+{
+    return m_impl->GetPackageRequestsToSend(nodeid, current_time);
+}
+void TxDownloadManager::ReceivedPackageNotFound(NodeId nodeid, const std::vector<PkgInv>& pkgs)
+{
+    m_impl->ReceivedPackageNotFound(nodeid, pkgs);
+}
+bool TxDownloadManager::ReceivedPackage(NodeId nodeid, const CTransactionRef& parent, const CTransactionRef& child)
+{
+    return m_impl->ReceivedPackage(nodeid, parent, child);
+}
+std::vector<PkgInv> TxDownloadManager::ReceivedPackageChild(NodeId nodeid, const Wtxid& child)
+{
+    return m_impl->ReceivedPackageChild(nodeid, child);
+}
+void TxDownloadManager::ReceivedPackageChildNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids)
+{
+    m_impl->ReceivedPackageChildNotFound(nodeid, gtxids);
+}
+std::vector<CTransactionRef> TxDownloadManager::RelayedPackageValidated(const Package& package, const PackageMempoolAcceptResult& result)
+{
+    return m_impl->RelayedPackageValidated(package, result);
+}
+bool TxDownloadManager::RelayedChildValidated(NodeId nodeid, const std::vector<PkgInv>& pkgs, const MempoolAcceptResult& result)
+{
+    return m_impl->RelayedChildValidated(nodeid, pkgs, result);
+}
 void TxDownloadManager::MempoolAcceptedTx(const CTransactionRef& tx)
 {
     m_impl->MempoolAcceptedTx(tx);
@@ -93,6 +125,7 @@ void TxDownloadManagerImpl::ActiveTipChange()
 {
     RecentRejectsFilter().reset();
     RecentRejectsReconsiderableFilter().reset();
+    RecentRejectedPackagesFilter().reset();
 }
 
 void TxDownloadManagerImpl::BlockConnected(const std::shared_ptr<const CBlock>& pblock)
@@ -149,6 +182,15 @@ bool TxDownloadManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_rec
     return RecentRejectsFilter().contains(hash) || std::visit([&](const auto& id) { return m_mempool.exists(id); }, gtxid);
 }
 
+bool TxDownloadManagerImpl::AlreadyHavePackage(const PkgInv& pkg)
+{
+    if (m_mempool.exists(pkg.child)) return true;
+
+    if (RecentConfirmedTransactionsFilter().contains(pkg.child.ToUint256())) return true;
+
+    return RecentRejectedPackagesFilter().contains(pkg.GetId().ToUint256());
+}
+
 void TxDownloadManagerImpl::ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info)
 {
     // If already connected (shouldn't happen in practice), exit early.
@@ -162,6 +204,7 @@ void TxDownloadManagerImpl::DisconnectedPeer(NodeId nodeid)
 {
     m_orphanage->EraseForPeer(nodeid);
     m_txrequest.DisconnectedPeer(nodeid);
+    m_pkgrequest.DisconnectedPeer(nodeid);
 
     if (auto it = m_peer_info.find(nodeid); it != m_peer_info.end()) {
         if (it->second.m_connection_info.m_wtxid_relay) m_num_wtxid_peers -= 1;
@@ -295,6 +338,150 @@ void TxDownloadManagerImpl::ReceivedNotFound(NodeId nodeid, const std::vector<Ge
         // completed in TxRequestTracker.
         m_txrequest.ReceivedResponse(nodeid, gtxid.ToUint256());
     }
+}
+
+bool TxDownloadManagerImpl::AddPackageAnnouncement(NodeId peer, const PkgInv& pkg, std::chrono::microseconds now)
+{
+    if (AlreadyHavePackage(pkg)) return true;
+
+    auto it = m_peer_info.find(peer);
+    if (it == m_peer_info.end()) return false;
+    const auto& info = it->second.m_connection_info;
+    if (!info.m_relay_permissions && m_pkgrequest.Count(peer) >= MAX_PEER_PKG_ANNOUNCEMENTS) {
+        // Too many queued package announcements for this peer
+        return false;
+    }
+    // Same delays as AddTxAnnouncement, counted separately for packages.
+    auto delay{0us};
+    if (!info.m_preferred) delay += NONPREF_PEER_TX_DELAY;
+    const bool overloaded = !info.m_relay_permissions && m_pkgrequest.CountInFlight(peer) >= MAX_PEER_TX_REQUEST_IN_FLIGHT;
+    if (overloaded) delay += OVERLOADED_PEER_TX_DELAY;
+
+    m_pkgrequest.ReceivedInv(peer, pkg, info.m_preferred, now + delay);
+
+    return false;
+}
+
+std::vector<TxDownloadManager::PackageRequest> TxDownloadManagerImpl::GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
+{
+    std::vector<TxDownloadManager::PackageRequest> requests;
+    for (const PkgInv& pkg : m_pkgrequest.GetFullToSend(nodeid)) {
+        if (AlreadyHavePackage(pkg)) {
+            m_pkgrequest.Forget(pkg.GetId());
+            continue;
+        }
+        LogDebug(BCLog::NET, "Requesting package parent %s child %s again in full peer=%d\n",
+                 pkg.parent.ToString(), pkg.child.ToString(), nodeid);
+        requests.push_back({pkg, /*child_only=*/false});
+    }
+    for (const PkgInv& pkg : m_pkgrequest.GetRequestable(nodeid, current_time)) {
+        if (AlreadyHavePackage(pkg)) {
+            m_pkgrequest.Forget(pkg.GetId());
+            continue;
+        }
+        // We have the parent, so only the child is needed. Should the parent leave the mempool
+        // before the child arrives, the package is requested in full from the same peer.
+        const bool child_only{m_mempool.exists(pkg.parent)};
+        LogDebug(BCLog::NET, "Requesting package parent %s child %s%s peer=%d\n",
+                 pkg.parent.ToString(), pkg.child.ToString(), child_only ? " (child only)" : "", nodeid);
+        m_pkgrequest.Requested(nodeid, pkg, child_only, current_time + GETDATA_TX_INTERVAL);
+        requests.push_back({pkg, child_only});
+    }
+    return requests;
+}
+
+void TxDownloadManagerImpl::ReceivedPackageNotFound(NodeId nodeid, const std::vector<PkgInv>& pkgs)
+{
+    for (const auto& pkg : pkgs) m_pkgrequest.ReceivedResponse(nodeid, pkg.GetId());
+}
+
+bool TxDownloadManagerImpl::ReceivedPackage(NodeId nodeid, const CTransactionRef& parent, const CTransactionRef& child)
+{
+    const PkgInv pkg{parent->GetWitnessHash(), child->GetWitnessHash()};
+    const PkgId id{pkg.GetId()};
+    // Ignore packages that this peer did not announce, or that we already received from it.
+    if (!m_pkgrequest.IsCandidate(nodeid, id)) return false;
+
+    // The package id commits to both wtxids, so whatever validation decides about these
+    // transactions holds for every announcement of the package: stop requesting it.
+    m_pkgrequest.Forget(id);
+
+    const bool child_spends_parent{std::ranges::any_of(child->vin, [&](const CTxIn& txin) { return txin.prevout.hash == parent->GetHash(); })};
+    if (parent->GetHash() == child->GetHash() || !child_spends_parent) {
+        LogDebug(BCLog::TXPACKAGES, "package from peer=%d is not a parent and child: parent %s child %s\n",
+                 nodeid, pkg.parent.ToString(), pkg.child.ToString());
+        RecentRejectedPackagesFilter().insert(id.ToUint256());
+        return false;
+    }
+    return !AlreadyHavePackage(pkg);
+}
+
+std::vector<PkgInv> TxDownloadManagerImpl::ReceivedPackageChild(NodeId nodeid, const Wtxid& child)
+{
+    std::vector<PkgInv> pkgs;
+    for (const PkgInv& pkg : m_pkgrequest.ChildOnlyRequests(nodeid, child)) {
+        if (AlreadyHavePackage(pkg)) {
+            m_pkgrequest.Forget(pkg.GetId());
+        } else {
+            pkgs.push_back(pkg);
+        }
+    }
+    return pkgs;
+}
+
+void TxDownloadManagerImpl::ReceivedPackageChildNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids)
+{
+    for (const GenTxid& gtxid : gtxids) {
+        if (!gtxid.IsWtxid()) continue;
+        for (const PkgInv& pkg : m_pkgrequest.ChildOnlyRequests(nodeid, std::get<Wtxid>(gtxid))) {
+            if (m_mempool.exists(pkg.parent)) {
+                m_pkgrequest.ReceivedResponse(nodeid, pkg.GetId());
+            } else {
+                m_pkgrequest.ToFull(nodeid, pkg.GetId());
+            }
+        }
+    }
+}
+
+std::vector<CTransactionRef> TxDownloadManagerImpl::RelayedPackageValidated(const Package& package, const PackageMempoolAcceptResult& result)
+{
+    std::vector<CTransactionRef> keep;
+    if (!Assume(package.size() == 2)) return keep;
+    for (const CTransactionRef& tx : package) {
+        const auto it{result.m_tx_results.find(tx->GetWitnessHash())};
+        if (it != result.m_tx_results.end()) {
+            const auto& tx_result{it->second};
+            if (tx_result.m_result_type == MempoolAcceptResult::ResultType::VALID ||
+                tx_result.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY ||
+                tx_result.m_state.GetResult() == TxValidationResult::TX_WITNESS_STRIPPED) {
+                continue;
+            }
+        }
+        // Keep it for compact block reconstruction, as MempoolRejectedTx does for single transactions.
+        keep.push_back(tx);
+    }
+    const PkgInv pkg{package[0]->GetWitnessHash(), package[1]->GetWitnessHash()};
+    if (!m_mempool.exists(pkg.child)) RecentRejectedPackagesFilter().insert(pkg.GetId().ToUint256());
+    return keep;
+}
+
+bool TxDownloadManagerImpl::RelayedChildValidated(NodeId nodeid, const std::vector<PkgInv>& pkgs, const MempoolAcceptResult& result)
+{
+    if (result.m_result_type != MempoolAcceptResult::ResultType::VALID &&
+        result.m_state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
+        // The requests stay in flight, and nothing about the packages or their transactions is
+        // remembered: what we know about the child depends on the parent being in our mempool.
+        for (const PkgInv& pkg : pkgs) m_pkgrequest.ToFull(nodeid, pkg.GetId());
+        return false;
+    }
+    // As for pkgtxns, the result holds for every announcement of the packages, since the parent
+    // was in the mempool.
+    const bool accepted{result.m_result_type == MempoolAcceptResult::ResultType::VALID};
+    for (const PkgInv& pkg : pkgs) {
+        m_pkgrequest.Forget(pkg.GetId());
+        if (!accepted) RecentRejectedPackagesFilter().insert(pkg.GetId().ToUint256());
+    }
+    return !accepted && result.m_state.GetResult() != TxValidationResult::TX_WITNESS_STRIPPED;
 }
 
 std::optional<PackageToValidate> TxDownloadManagerImpl::Find1P1CPackage(const CTransactionRef& ptx, NodeId nodeid)
@@ -577,6 +764,7 @@ CTransactionRef TxDownloadManagerImpl::GetTxToReconsider(NodeId nodeid)
 void TxDownloadManagerImpl::CheckIsEmpty(NodeId nodeid)
 {
     assert(m_txrequest.Count(nodeid) == 0);
+    assert(m_pkgrequest.Count(nodeid) == 0);
     assert(m_orphanage->UsageByPeer(nodeid) == 0);
 }
 void TxDownloadManagerImpl::CheckIsEmpty()
@@ -584,6 +772,8 @@ void TxDownloadManagerImpl::CheckIsEmpty()
     assert(m_orphanage->TotalOrphanUsage() == 0);
     assert(m_orphanage->CountUniqueOrphans() == 0);
     assert(m_txrequest.Size() == 0);
+    assert(m_pkgrequest.Size() == 0);
+    assert(m_pkgrequest.CountPackages() == 0);
     assert(m_num_wtxid_peers == 0);
 }
 std::vector<TxOrphanage::OrphanInfo> TxDownloadManagerImpl::GetOrphanTransactions() const

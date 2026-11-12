@@ -10,6 +10,7 @@
 #include <consensus/validation.h>
 #include <kernel/chain.h>
 #include <net.h>
+#include <node/pkgrequest.h>
 #include <node/txorphanage.h>
 #include <primitives/transaction.h>
 #include <policy/packages.h>
@@ -27,6 +28,22 @@ public:
     std::unique_ptr<TxOrphanage> m_orphanage;
     /** Tracks candidates for requesting and downloading transaction data. */
     TxRequestTracker m_txrequest;
+
+    /** Tracks candidates for requesting and downloading packages announced through pkginv.
+     * Separate from m_txrequest, so that announcements, requests and deliveries of the individual
+     * transactions do not delay or cancel requests for the package.
+     *
+     * The cost: neither tracker sees the other's requests in flight. While only some peers relay
+     * packages, a child announced with inv by one peer and with pkginv by another can be requested
+     * from both before either reply arrives, and downloaded twice, with its parent if we lack it.
+     * In simulation this happens for a few percent of nodes per package, more with high-latency
+     * links, and is rare once every peer relays packages. Accepted for now. Two ways to avoid it:
+     * - Delay requests for invs from peers without package relay by 2 s while a package relay peer
+     *   is connected. It removes few duplicates and slows propagation by up to about 1.5 s.
+     * - Hold a request while the other tracker has one in flight for the same child, for at most
+     *   1 s, once per request. It removes nearly all duplicates without slowing propagation, but a
+     *   peer stalling a request in one tracker then delays the other's by up to 1 s. */
+    PackageRequestTracker m_pkgrequest;
 
     /**
      * Filter for transactions that were recently rejected by the mempool.
@@ -130,11 +147,34 @@ public:
         return *m_lazy_recent_confirmed_transactions;
     }
 
+    /**
+     * Filter for relayed packages whose child was not accepted to the mempool, by PkgInv::GetId().
+     * These are not requested again until the chain tip changes, at which point the filter is reset.
+     *
+     * Package relay writes only this filter, and only with the result of validating exactly the
+     * package it records. It does not consult m_lazy_recent_rejects,
+     * m_lazy_recent_rejects_reconsiderable or the orphanage, so that no transaction other than the
+     * package's own can stop us from requesting it.
+     *
+     * Parameters are picked to be the same as m_lazy_recent_rejects, with the same rationale.
+     */
+    std::unique_ptr<CRollingBloomFilter> m_lazy_recent_rejected_packages{nullptr};
+
+    CRollingBloomFilter& RecentRejectedPackagesFilter()
+    {
+        if (!m_lazy_recent_rejected_packages) {
+            m_lazy_recent_rejected_packages = std::make_unique<CRollingBloomFilter>(120'000, 0.000'001);
+        }
+
+        return *m_lazy_recent_rejected_packages;
+    }
+
     TxDownloadManagerImpl(const TxDownloadOptions& options)
         : m_mempool{options.m_mempool},
           m_rng{options.m_deterministic_txrequest},
           m_orphanage{MakeTxOrphanage()},
-          m_txrequest{options.m_deterministic_txrequest}
+          m_txrequest{options.m_deterministic_txrequest},
+          m_pkgrequest{options.m_deterministic_txrequest}
     {}
 
     struct PeerInfo {
@@ -164,6 +204,11 @@ public:
      *  */
     bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable);
 
+    /** Check whether we don't need to download this package, because its child is in the mempool
+     * (and with it the parent, or a transaction with the parent's txid) or recently confirmed, or
+     * because the package is in m_lazy_recent_rejected_packages. */
+    bool AlreadyHavePackage(const PkgInv& pkg);
+
     void ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info);
     void DisconnectedPeer(NodeId nodeid);
 
@@ -177,6 +222,15 @@ public:
 
     /** Marks a tx as ReceivedResponse in txrequest. */
     void ReceivedNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids);
+
+    bool AddPackageAnnouncement(NodeId peer, const PkgInv& pkg, std::chrono::microseconds now);
+    std::vector<TxDownloadManager::PackageRequest> GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+    void ReceivedPackageNotFound(NodeId nodeid, const std::vector<PkgInv>& pkgs);
+    bool ReceivedPackage(NodeId nodeid, const CTransactionRef& parent, const CTransactionRef& child);
+    std::vector<PkgInv> ReceivedPackageChild(NodeId nodeid, const Wtxid& child);
+    void ReceivedPackageChildNotFound(NodeId nodeid, const std::vector<GenTxid>& gtxids);
+    std::vector<CTransactionRef> RelayedPackageValidated(const Package& package, const PackageMempoolAcceptResult& result);
+    bool RelayedChildValidated(NodeId nodeid, const std::vector<PkgInv>& pkgs, const MempoolAcceptResult& result);
 
     /** Look for a child of this transaction in the orphanage to form a 1-parent-1-child package,
      * skipping any combinations that have already been tried. Return the resulting package along with

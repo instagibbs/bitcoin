@@ -424,12 +424,14 @@ FUZZ_TARGET(pkgrelay_receive_liveness, .init = Initialize)
     // bound; for it the adversaries go quiet (stalling any request made to them) and every connection
     // made so far counts. Requests for different transactions and packages run concurrently. A pair the
     // honest sender can no longer serve takes a second round of stalls, for the parent or child it then
-    // announces on its own.
+    // announces on its own. A stall can last two intervals: an adversary answers a request for the child
+    // alone with notfound just before it expires, once the parent has left our mempool, and then stalls
+    // the request for both that follows.
     const int max_stalls{honest_outbound ? 1 + adversary_outbounds : num_adversaries + reconnects};
     const auto drain_start{net.now};
     auto deadline = [&] {
         const int rounds{std::ranges::any_of(items, [&](const Item& item) { return item.pair && !(has_parent(item) && has_tx(item)); }) ? 2 : 1};
-        return drain_start + rounds * (10s + (max_stalls + 1) * (node::GETDATA_TX_INTERVAL + 1s));
+        return drain_start + rounds * (10s + (max_stalls + 1) * 2 * (node::GETDATA_TX_INTERVAL + 1s));
     };
     while (!all_done() && net.now < deadline()) {
         if (honest_outbound && fdp.ConsumeBool()) {

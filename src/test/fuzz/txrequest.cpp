@@ -231,6 +231,20 @@ public:
         m_tracker.RequestedTx(peer, TXHASHES[txhash], exptime);
     }
 
+    void RequestedTxAgain(int peer, int txhash, std::chrono::microseconds exptime)
+    {
+        // Apply to naive structure: if a REQUESTED announcement exists for peer/txhash, change its expiry.
+        if (m_announcements[txhash][peer].m_state == State::REQUESTED) {
+            m_announcements[txhash][peer].m_time = exptime;
+        }
+
+        // Add event so that AdvanceToEvent can quickly jump to the point where its exptime passes.
+        if (exptime > m_now) m_events.push(exptime);
+
+        // Call TxRequestTracker's implementation.
+        m_tracker.RequestedTxAgain(peer, TXHASHES[txhash], exptime);
+    }
+
     void ReceivedResponse(int peer, int txhash)
     {
         // Apply to naive structure: convert anything to COMPLETED.
@@ -342,7 +356,7 @@ FUZZ_TARGET(txrequest)
     // Decode the input as a sequence of instructions with parameters
     auto it = buffer.begin();
     while (it != buffer.end()) {
-        int cmd = *(it++) % 11;
+        int cmd = *(it++) % 12;
         int peer, txidnum, delaynum;
         switch (cmd) {
         case 0: // Make time jump to the next event (m_time of CANDIDATE or REQUESTED)
@@ -389,6 +403,12 @@ FUZZ_TARGET(txrequest)
             peer = it == buffer.end() ? 0 : *(it++) % MAX_PEERS;
             txidnum = it == buffer.end() ? 0 : *(it++);
             tester.ReceivedResponse(peer, txidnum % MAX_TXHASHES);
+            break;
+        case 11: // Requested tx from peer again
+            peer = it == buffer.end() ? 0 : *(it++) % MAX_PEERS;
+            txidnum = it == buffer.end() ? 0 : *(it++);
+            delaynum = it == buffer.end() ? 0 : *(it++);
+            tester.RequestedTxAgain(peer, txidnum % MAX_TXHASHES, tester.Now() + DELAYS[delaynum]);
             break;
         default:
             assert(false);

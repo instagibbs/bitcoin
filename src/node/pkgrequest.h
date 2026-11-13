@@ -29,8 +29,8 @@ namespace node {
  * - an index of the child-alone requests by peer and child, since their reply does not name the
  *   package.
  *
- * A child-alone request can be turned into a full one (ToFull). It stays in flight with the expiry
- * it was first requested with, so that both replies have to arrive within that time.
+ * A child-alone request can be turned into a full one (ToFull). It stays in flight, and gets a new
+ * expiry when the full request is sent (GetFullToSend).
  */
 class PackageRequestTracker
 {
@@ -55,13 +55,13 @@ public:
     void Requested(NodeId peer, const PkgInv& pkg, bool child_only, std::chrono::microseconds expiry);
 
     /** Turns the child-alone request to this peer for the package into one for both transactions,
-     * still in flight with the same expiry, which ChildOnlyRequests no longer returns. GetFullToSend
-     * returns it once. */
+     * still in flight, which ChildOnlyRequests no longer returns. GetFullToSend returns it once;
+     * until then it keeps its expiry. */
     void ToFull(NodeId peer, const PkgId& id);
 
     /** Removes and returns the packages that ToFull queued for a full request to this peer. They are
-     * in flight already. The caller must send getpkg for each. */
-    std::vector<PkgInv> GetFullToSend(NodeId peer);
+     * in flight already; their expiry becomes `expiry`. The caller must send getpkg for each. */
+    std::vector<PkgInv> GetFullToSend(NodeId peer, std::chrono::microseconds expiry);
 
     /** The packages requested child alone from this peer with this child. */
     std::vector<PkgInv> ChildOnlyRequests(NodeId peer, const Wtxid& child) const;

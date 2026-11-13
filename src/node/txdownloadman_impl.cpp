@@ -365,7 +365,7 @@ bool TxDownloadManagerImpl::AddPackageAnnouncement(NodeId peer, const PkgInv& pk
 std::vector<TxDownloadManager::PackageRequest> TxDownloadManagerImpl::GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
 {
     std::vector<TxDownloadManager::PackageRequest> requests;
-    for (const PkgInv& pkg : m_pkgrequest.GetFullToSend(nodeid)) {
+    for (const PkgInv& pkg : m_pkgrequest.GetFullToSend(nodeid, current_time + GETDATA_TX_INTERVAL)) {
         if (AlreadyHavePackage(pkg)) {
             m_pkgrequest.Forget(pkg.GetId());
             continue;

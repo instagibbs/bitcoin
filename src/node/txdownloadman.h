@@ -163,7 +163,7 @@ public:
      * the child alone (see ReceivedPackageChildNotFound and RelayedChildValidated), then new requests.
      * A new request is for the child alone if the parent is in the mempool. The requests count as
      * sent, so the caller must send each. Packages we already have are forgotten instead of
-     * returned. */
+     * returned. Each request expires GETDATA_TX_INTERVAL after this call. */
     std::vector<PackageRequest> GetPackageRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
 
     /** Should be called when a pkgnotfound has been received. Marks the peer done with these

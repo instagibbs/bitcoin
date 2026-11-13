@@ -570,10 +570,12 @@ BOOST_FIXTURE_TEST_CASE(package_relay_requests, TestChain100Setup)
         BOOST_CHECK(txdownload.ReceivedPackageChild(asked, pkg.child).empty());
 
         // Once the parent has left the mempool, a notfound for the child turns the request into one
-        // for the full package, still in flight, and with the child-only request's expiry.
+        // for the full package, still in flight, which expires GETDATA_TX_INTERVAL after it is sent
+        // rather than with the child-only request.
         requests = txdownload.GetPackageRequestsToSend(1 - asked, now);
         BOOST_REQUIRE_EQUAL(requests.size(), 1U);
         BOOST_CHECK(requests[0].child_only);
+        now += node::GETDATA_TX_INTERVAL - 1us;
         WITH_LOCK(pool.cs, pool.removeRecursive(*parent, MemPoolRemovalReason::REPLACED));
         txdownload.ReceivedPackageChildNotFound(1 - asked, {pkg.child});
         BOOST_CHECK_EQUAL(txdownload.m_pkgrequest.CountInFlight(1 - asked), 1);

@@ -176,6 +176,11 @@ public:
      */
     void RequestedTx(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry);
 
+    /** Sets a new expiry for a REQUESTED announcement, for a follow-up request to the same peer. If no REQUESTED
+     *  announcement exists for the provided peer and txhash, nothing happens.
+     */
+    void RequestedTxAgain(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry);
+
     /** Converts a CANDIDATE or REQUESTED announcement to a COMPLETED one. If no such announcement exists for the
      *  provided peer and txhash, nothing happens.
      *

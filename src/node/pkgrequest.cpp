@@ -85,7 +85,7 @@ void PackageRequestTracker::ToFull(NodeId peer, const PkgId& id)
     m_full_to_send.emplace(peer, id);
 }
 
-std::vector<PkgInv> PackageRequestTracker::GetFullToSend(NodeId peer)
+std::vector<PkgInv> PackageRequestTracker::GetFullToSend(NodeId peer, std::chrono::microseconds expiry)
 {
     std::vector<PkgInv> pkgs;
     const auto begin{m_full_to_send.lower_bound({peer, PkgId{uint256::ZERO}})};
@@ -94,6 +94,7 @@ std::vector<PkgInv> PackageRequestTracker::GetFullToSend(NodeId peer)
         const auto it{m_packages.find(end->second)};
         if (!Assume(it != m_packages.end())) continue;
         it->second.request = Request::FULL;
+        m_tracker.RequestedTxAgain(peer, end->second.ToUint256(), expiry);
         pkgs.push_back(it->second.pkg);
     }
     m_full_to_send.erase(begin, end);

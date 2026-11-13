@@ -76,7 +76,8 @@ FUZZ_TARGET(pkgrequest)
             },
             [&] {
                 const NodeId peer{consume_peer()};
-                for (const PkgInv& pkg : tracker.GetFullToSend(peer)) assert(tracker.IsCandidate(peer, pkg.GetId()));
+                const std::chrono::microseconds timeout{fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(1, 60'000'000)};
+                for (const PkgInv& pkg : tracker.GetFullToSend(peer, now + timeout)) assert(tracker.IsCandidate(peer, pkg.GetId()));
             },
             [&] { tracker.ReceivedResponse(consume_peer(), consume_pkg().GetId()); },
             [&] { tracker.Forget(consume_pkg().GetId()); },

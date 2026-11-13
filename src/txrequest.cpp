@@ -674,6 +674,14 @@ public:
         });
     }
 
+    void RequestedTxAgain(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry)
+    {
+        // A REQUESTED announcement is never CANDIDATE_BEST.
+        auto it = m_index.get<ByPeer>().find(ByPeerView{peer, false, txhash});
+        if (it == m_index.get<ByPeer>().end() || it->GetState() != State::REQUESTED) return;
+        Modify<ByPeer>(it, [expiry](Announcement& ann) { ann.m_time = expiry; });
+    }
+
     void ReceivedResponse(NodeId peer, const uint256& txhash)
     {
         // We need to search the ByPeer index for both (peer, false, txhash) and (peer, true, txhash).
@@ -745,6 +753,11 @@ void TxRequestTracker::ReceivedInv(NodeId peer, const GenTxid& gtxid, bool prefe
 void TxRequestTracker::RequestedTx(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry)
 {
     m_impl->RequestedTx(peer, txhash, expiry);
+}
+
+void TxRequestTracker::RequestedTxAgain(NodeId peer, const uint256& txhash, std::chrono::microseconds expiry)
+{
+    m_impl->RequestedTxAgain(peer, txhash, expiry);
 }
 
 void TxRequestTracker::ReceivedResponse(NodeId peer, const uint256& txhash)
